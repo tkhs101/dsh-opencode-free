@@ -117,7 +117,13 @@ a vision badge when the model declares image input, and a thinking badge naming
 its strongest published reasoning level. Models that publish no level list get
 no thinking badge rather than a guessed one.
 
-A probe round is reported live and then kept. While it runs, a progress pill
+A probe round answers two different questions in the order that costs least.
+First it reads Zen's own catalogue — one `GET /zen/v1/models`, which spends no
+inference quota — and any model Zen has stopped listing leaves the picker
+without a single completion being sent. That check is free enough to repeat on
+every round, so a model Zen puts back simply reappears. Only what the catalogue
+cannot answer is then asked directly: Zen still lists the model, does it
+actually reply, and how fast.
 counts finished models against the total and every row shows its own state —
 green with the answering latency, a spinner on the model being asked right now,
 grey for the ones still queued. A red row never says only "failed": it names the
@@ -183,16 +189,17 @@ answers. That is a real cost and it is worth being explicit about it:
   that have never been judged, so it shrinks as models are retired. A Zen key
   raises your quota, which makes this round cheaper in practice, but it does not
   change which models are in it.
-- **It can be turned off by not using it.** There is no separate switch: the
-  round runs when you read the model list, and the detail page's **Probe now**
-  button asks for an extra round on demand, bypassing the daily limit. If you
-  never touch the picker you never pay for it.
+- **The catalogue is read first, and that part is free.** Every round begins with
+  a single `GET /zen/v1/models`. A model Zen no longer lists is dropped without
+  any completion being sent, which is why the round is cheap rather than N
+  requests long. A model Zen puts back reappears on the next round, with no
+  manual recovery.
 - **A refused or throttled round changes nothing.** If the anonymous tier
   gates you, the quota runs out, your key is rejected, the network drops, or a
   whole endpoint is down, the plugin concludes nothing at all: the list stays
   exactly as it was and the card says this round's results are untrustworthy.
-  The only thing that removes a model is the route positively saying that
-  model will not be served.
+  The only things that remove a model are the catalogue dropping it and the
+  route positively saying that model will not be served.
 - **Hiding a model is still yours to decide.** The switch on the card is
   independent of all of the above.
 

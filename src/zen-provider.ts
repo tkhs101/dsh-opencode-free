@@ -101,6 +101,8 @@ export const OPENCODE_USER_AGENT =
   "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14 dsh-opencode-free/0.2.0";
 export const OPENCODE_CLIENT = "cli";
 export const OPENCODE_PROJECT = "global";
+/** The literal credential the free tier runs on; there is no other. */
+const ANONYMOUS_KEY = "public";
 
 /**
  * Static free-tier gate headers. Must stay in sync with requestOptions().
@@ -843,6 +845,51 @@ function compatRequestOptions<T extends StreamOptions>(
   };
 }
 
+/**
+ * The ids Zen currently serves, from one `GET /zen/v1/models`.
+ *
+ * This is the free tier's availability check, and it is deliberately the cheap
+ * one: a catalogue GET costs no inference quota, so it can be asked far more
+ * often than a completion can be spent. 9router reaches the same conclusion
+ * about its OpenCode Free provider — its connection test is exactly this
+ * request, `valid = res.ok` — which is why asking it per model id is affordable
+ * here in a way asking a completion per model id is not.
+ *
+ * The headers are 9router's, and they are load-bearing rather than
+ * decorative: the same request without `Bearer public` and a versioned
+ * `opencode/x.y.z` User-Agent is the shape the free tier answers with 403
+ * `FreeTierError`. One function so the host refresh and the probe round cannot
+ * drift into asking upstream two different questions.
+ *
+ * Resolves null on any failure or malformed body: a null must never narrow the
+ * catalogue, only a successful answer may.
+ */
+export async function fetchZenModelIds(
+  fetchImpl: typeof fetch = globalThis.fetch,
+  signal?: AbortSignal,
+): Promise<readonly string[] | null> {
+  try {
+    const response = await fetchImpl(`${BASE_URL}/models`, {
+      signal: signal ?? AbortSignal.timeout(5000),
+      headers: {
+        Authorization: `Bearer ${ANONYMOUS_KEY}`,
+        "User-Agent": OPENCODE_USER_AGENT,
+        "x-opencode-client": OPENCODE_CLIENT,
+      },
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { data?: { id?: unknown }[] } | null;
+    if (body === null || typeof body !== "object" || !Array.isArray(body.data)) return null;
+    const ids = body.data
+      .map((entry) => (entry === null || typeof entry !== "object" ? "" : (entry as { id?: unknown }).id))
+      // Upstream ids are strings; anything else is not a model id we can gate on.
+      .filter((id): id is string => typeof id === "string" && id !== "");
+    return ids.length > 0 ? ids : null;
+  } catch {
+    return null;
+  }
+}
+
 export function patchCompatDirectTransport(getSessionId: SessionGetter = () => undefined): void {
   const stash = compatOriginals();
   for (const api of SUPPORTED_APIS) {
@@ -1315,17 +1362,11 @@ export function zenProvider(
       }
       if (!ctx.allowNetwork || ctx.signal.aborted) return;
       const signal = ctx.signal;
-      const response = await fetch(`${BASE_URL}/models`, {
-        signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
-        headers: { "User-Agent": "dsh-opencode-free/0.2.0" },
-      });
-      if (!response.ok) throw new Error(`Zen model catalogue: HTTP ${response.status}`);
-      const body = (await response.json()) as { data?: { id?: unknown }[] };
-      if (!Array.isArray(body.data)) throw new Error("Invalid Zen model catalogue");
-      // Upstream ids are strings; anything else is not a model id we can gate on.
-      const availableIds = body.data
-        .map((m) => m.id)
-        .filter((id): id is string => typeof id === "string" && id !== "");
+      // The same fetch the probe round uses. One function, so the host refresh
+      // and a probe round cannot end up asking upstream two different questions
+      // and disagreeing about the same model.
+      const availableIds = await fetchZenModelIds(globalThis.fetch, signal);
+      if (availableIds === null) throw new Error("Zen model catalogue unavailable");
       const available = new Set<unknown>(availableIds);
       const next = select(available);
       // D3: Zen is the availability gate. Handing the live ids to the

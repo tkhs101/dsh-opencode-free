@@ -5,6 +5,7 @@ import {
   PROVIDER_ID,
   classifyZenFailure,
   describeTransportCause,
+  fetchZenModelIds,
   isModelUnavailableFailure,
   probeModel,
   ZEN_FAILURE_GUIDANCE,
@@ -398,6 +399,45 @@ test('GUARD: every probe in a round shares one session instead of minting a new 
   for (const value of seen) {
     assert.match(String(value), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/, 'and the shared one is canonical')
   }
+})
+
+test('GUARD: the availability check is one cheap catalogue GET, in 9router\'s shape', async () => {
+  // This is the request that decides availability, so its shape is a contract:
+  // it must be free of inference quota, and it must carry the identity the
+  // free tier accepts. Without `Bearer public` and a versioned opencode UA the
+  // same GET answers 403 FreeTierError — which is how a cheap check turns into
+  // a wrong one.
+  const seen = []
+  const ids = await fetchZenModelIds(async (url, init) => {
+    seen.push({ url: String(url), init })
+    return new Response(JSON.stringify({ data: [{ id: 'big-pickle' }, { id: 'space-bunny-free' }] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  assert.equal(seen.length, 1, 'one request, and it is a GET of the catalogue')
+  assert.equal(seen[0].url, 'https://opencode.ai/zen/v1/models')
+  assert.equal(seen[0].init.method, undefined, 'no body, no method override: a plain GET')
+  const headers = readNodeHeader(seen[0].init.headers, 'authorization')
+  assert.equal(headers, 'Bearer public', 'the free tier runs on the literal "public" key')
+  assert.match(String(readNodeHeader(seen[0].init.headers, 'user-agent')), /^opencode\/1\.\d+\.\d+/, 'versioned opencode UA')
+  assert.equal(readNodeHeader(seen[0].init.headers, 'x-opencode-client'), 'cli')
+  assert.deepEqual([...ids], ['big-pickle', 'space-bunny-free'])
+  // A failure must read as "unknown", never as "nothing is available": this
+  // value narrows the catalogue, so an empty answer here would empty the picker.
+  for (const bad of [
+    async () => new Response('nope', { status: 403 }),
+    async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    async () => new Response(JSON.stringify({ models: [{ id: 'big-pickle' }] }), { status: 200 }),
+    async () => new Response('not json', { status: 200 }),
+    async () => { throw new Error('socket died') },
+  ]) {
+    assert.equal(await fetchZenModelIds(bad), null, 'resolves null instead of narrowing')
+  }
+  // Non-string entries are not ids to gate on and must not become `undefined`.
+  const mixed = await fetchZenModelIds(async () => new Response(
+    JSON.stringify({ data: [{ id: 'big-pickle' }, { id: 42 }, null, {}, { id: '' }] }), { status: 200 },
+  ))
+  assert.deepEqual([...mixed], ['big-pickle'])
 })
 
 test('GUARD: placeholder efforts never reach the wire', async () => {

@@ -86,6 +86,7 @@ window.__ModuleLoader__.load({
 			"probing.unprobed": "本轮未探测",
 			"probing.andMore": "等",
 			"reason.dead": "已下架",
+			"reason.notlisted": "Zen 未提供",
 			"reason.timeout": "探测超时",
 			"reason.transport": "连接失败",
 			"reason.anongated": "匿名层被拒",
@@ -131,6 +132,7 @@ window.__ModuleLoader__.load({
 			"probing.unprobed": "Not probed",
 			"probing.andMore": "and",
 			"reason.dead": "Gone",
+			"reason.notlisted": "Not offered",
 			"reason.timeout": "Timed out",
 			"reason.transport": "Connection failed",
 			"reason.anongated": "Anon tier refused",
@@ -560,6 +562,7 @@ window.__ModuleLoader__.load({
 		 */
 		var FAILURE_WORDS = {
 			"dead": "reason.dead",
+			"not-listed": "reason.notlisted",
 			"timeout": "reason.timeout",
 			"transport": "reason.transport",
 			"anon-gated": "reason.anongated",
@@ -568,6 +571,11 @@ window.__ModuleLoader__.load({
 			"unknown": "reason.unknown",
 			"error": "reason.error"
 		};
+
+		/** Failure codes whose model also leaves the list, so its row — and
+		    therefore its badge — cannot be read afterwards. Each needs to be
+		    named in the report instead. */
+		var GONE_CODES = { "dead": true, "not-listed": true };
 
 		function failureText(t, result) {
 			var key = typeof result.code === "string" && hasOwnKey(FAILURE_WORDS, result.code)
@@ -969,11 +977,11 @@ window.__ModuleLoader__.load({
 							continue;
 						}
 						badCount += 1;
-						// `dead` is the one failure that also REMOVES the row, so
-						// its badge can never be read afterwards. Counting it
+						// `dead` and `not-listed` both REMOVE the row, so their
+						// badges can never be read afterwards. Counting them
 						// separately is what lets the report say "3 failed, 2 of
 						// them gone" instead of quietly losing two.
-						if (entry !== null && entry.code === "dead") goneCount += 1;
+						if (entry !== null && GONE_CODES[entry.code] === true) goneCount += 1;
 					}
 					// A dead model is gone from `visible`, so its row cannot
 					// speak for itself. Naming the count here is what keeps a
@@ -1005,7 +1013,7 @@ window.__ModuleLoader__.load({
 				for (var goneId in liveResults) {
 					if (!hasOwnKey(liveResults, goneId)) continue;
 					var gone = liveResults[goneId];
-					if (gone === null || gone.status !== "failed" || gone.code !== "dead") continue;
+					if (gone === null || gone.status !== "failed" || GONE_CODES[gone.code] !== true) continue;
 					removed.push(goneId);
 				}
 				if (removed.length > 0) {

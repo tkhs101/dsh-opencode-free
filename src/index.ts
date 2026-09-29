@@ -32,6 +32,7 @@ import {
   builtinFreeModels,
   builtinKnownApis,
   catalogTemplate,
+  fetchZenModelIds,
   patchCompatDirectTransport,
   patchGlobalFetchForZen,
   patchNodeHttpForZen,
@@ -57,6 +58,7 @@ export {
   classifyZenFailure,
   createTransportRecorder,
   describeTransportCause,
+  fetchZenModelIds,
   freeModels,
   isEncryptedContentError,
   isModelUnavailableFailure,
@@ -335,6 +337,10 @@ export function apply(ctx: HostContext, config?: Config): void {
         provider: provider as unknown as ProbeStreamer,
         apiKey: getConfigKey() ?? "public",
       }),
+    // A probe round asks the catalogue before it asks any model: one free GET
+    // settles "does Zen still serve this id", so a withdrawn model costs no
+    // inference at all. Same request, same headers, as the host's own refresh.
+    listZenIds: async () => await fetchZenModelIds(fetch as unknown as typeof globalThis.fetch),
   });
   registerCatalogRoutes(ctx, catalog);
 

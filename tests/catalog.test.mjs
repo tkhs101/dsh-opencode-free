@@ -629,7 +629,7 @@ test('readCache rejects a file still carrying the old `opencode` field', async (
 
 // ── T3 state container ──────────────────────────────────────────────────────
 
-function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baselineModels = baseline(), probe } = {}) {
+function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baselineModels = baseline(), probe, listZenIds } = {}) {
   return createCatalog({
     template: template(),
     builtinBaseline: baselineModels,
@@ -639,6 +639,7 @@ function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baseline
     now: () => clock.t,
     ...(ttlMs === undefined ? {} : { ttlMs }),
     ...(probe === undefined ? {} : { probe }),
+    ...(listZenIds === undefined ? {} : { listZenIds }),
   })
 }
 
@@ -1060,6 +1061,94 @@ test('a dead verdict still names the status it died on', async () => {
     assert.equal(entry.status, 'failed')
     assert.equal(entry.code, 'dead')
     assert.equal(entry.http, 0, 'a bare DEAD() carries no status, and says so')
+  })
+})
+
+test('a model Zen no longer lists is dropped without spending an inference request', async () => {
+  await withTempDir(async (dir) => {
+    // The cheap authoritative check comes first: one GET of the catalogue
+    // settles membership, so a withdrawn model must cost ZERO completions. Before
+    // this, every round spent one request per model to relearn a fact the
+    // catalogue already answered for free.
+    const probe = recordingProber()
+    const catalog = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v1"', body: apiBody() })]),
+      probe,
+      listZenIds: async () => ['space-bunny-free', 'big-pickle'],
+    })
+    await waitFor(() => catalog.current().source === 'models.dev')
+    probe.calls.length = 0
+    await catalog.forceProbes()
+    assert.ok(!probe.calls.includes('muse-spark-1.3-contributor-free'), 'an unlisted model is never asked')
+    assert.ok(probe.calls.includes('big-pickle'), 'a listed model still is')
+    assert.ok(!catalog.current().visible.includes('muse-spark-1.3-contributor-free'), 'and it leaves the list')
+    // It is still REPORTED, at zero cost, with the reason that is actually
+    // known — a row that silently vanishes is unexplainable.
+    const entry = catalog.probeProgress().results['muse-spark-1.3-contributor-free']
+    assert.equal(entry.status, 'failed')
+    assert.equal(entry.code, 'not-listed')
+    assert.equal(entry.ms, 0)
+    // The tally has to add up: unlisted models count toward the round.
+    const progress = catalog.probeProgress()
+    assert.equal(progress.done, progress.total, 'done reaches total')
+  })
+})
+
+test('a model Zen puts back reappears: membership is never a permanent verdict', async () => {
+  await withTempDir(async (dir) => {
+    // The failure mode this separation exists to prevent. A `dead` verdict is
+    // permanent by decision, so anything re-derived from the catalogue must not
+    // be recorded as one — otherwise a model that comes back stays suppressed
+    // for the life of the cache file.
+    const probe = recordingProber()
+    let served = ['big-pickle']
+    const catalog = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v1"', body: apiBody() })]),
+      probe,
+      listZenIds: async () => served,
+    })
+    await waitFor(() => catalog.current().source === 'models.dev')
+    await catalog.forceProbes()
+    assert.ok(!catalog.current().visible.includes('muse-spark-1.3-contributor-free'), 'withdrawn while Zen drops it')
+    // Zen restores it. No cache deletion, no manual recovery.
+    served = ['big-pickle', 'muse-spark-1.3-contributor-free']
+    probe.calls.length = 0
+    await catalog.forceProbes()
+    assert.ok(catalog.current().visible.includes('muse-spark-1.3-contributor-free'), 'and it comes back on the next round')
+    assert.ok(probe.calls.includes('muse-spark-1.3-contributor-free'), 'because it is probed again, not remembered')
+  })
+})
+
+test('a failed catalogue fetch narrows nothing and costs no verdict', async () => {
+  await withTempDir(async (dir) => {
+    // A null answer means "unknown", never "empty": one flaky GET must not be
+    // able to empty the picker or to manufacture a removal report.
+    const probe = recordingProber()
+    const catalog = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v1"', body: apiBody() })]),
+      probe,
+      listZenIds: async () => null,
+    })
+    await waitFor(() => catalog.current().source === 'models.dev')
+    await catalog.forceProbes()
+    assert.ok(catalog.current().visible.length > 1, 'the list is untouched')
+    assert.ok(probe.calls.length > 1, 'and every model was asked, as before')
+    for (const entry of Object.values(catalog.probeProgress().results)) {
+      assert.notEqual(entry.code, 'not-listed', 'a failed fetch reports no removals')
+    }
+    // A rejection must degrade the same way, not abort the round.
+    const thrower = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v2"', body: apiBody() })]),
+      probe,
+      listZenIds: async () => { throw new Error('network down') },
+    })
+    await waitFor(() => thrower.current().source === 'models.dev')
+    await thrower.forceProbes()
+    assert.ok(thrower.current().visible.length > 1, 'a rejected fetch narrows nothing either')
   })
 })
 

@@ -523,6 +523,17 @@ export interface CreateCatalogOptions {
    * unavailable and every probe entry point is a no-op.
    */
   readonly probe?: ((model: Model<Api>) => Promise<ProbeResult>) | undefined;
+  /**
+   * The ids Zen currently serves, from one `GET /zen/v1/models` — the same cheap
+   * availability check 9router performs for its free provider, and the reason
+   * that check is worth doing before anything expensive.
+   *
+   * A model missing from this list is not available, full stop, and saying so
+   * costs one GET instead of one inference request per model. Resolves null when
+   * the fetch failed, which must never narrow anything: the round then falls
+   * back to probing everything it would otherwise have probed.
+   */
+  readonly listZenIds?: (() => Promise<readonly string[] | null>) | undefined;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly userAgent?: string;
@@ -581,6 +592,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
   const now = options.now ?? Date.now;
   const userAgent = options.userAgent;
   const probe = options.probe;
+  const listZenIds = options.listZenIds;
 
   let cache: CatalogCacheRecord | null = null;
   let models: Model<Api>[] = builtinBaseline.slice();
@@ -762,20 +774,49 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    */
   const runProbeRound = async (): Promise<void> => {
     const stamp = now();
-    const targets = models.filter((model) => probes[model.id]?.verdict !== "dead");
+    // Cheap authoritative availability first. One `GET /zen/v1/models` answers
+    // "does Zen serve this id at all" without spending inference quota, so a
+    // withdrawn model costs one GET instead of one completion — and the answer
+    // is Zen's own, not a reading of error prose. This is the same check 9router
+    // makes for its free provider, and it is the reason its availability test
+    // is fast.
+    //
+    // It is deliberately NOT recorded as a `dead` verdict. `dead` is permanent
+    // and learned by asking the model; membership is recomputed from the
+    // authority on every round, so a model Zen puts back simply reappears.
+    // Conflating the two is how a model that came back stays suppressed forever.
+    const served = await listZenIds?.().catch(() => null) ?? null;
+    if (served !== null) zenIds = new Set(served);
+    const servedSet = served === null ? null : new Set(served);
+    const live = servedSet === null
+      ? models
+      : models.filter((model) => servedSet.has(model.id));
+    const targets = live.filter((model) => probes[model.id]?.verdict !== "dead");
+    // Models Zen dropped: out of `visible` without ever being asked. They still
+    // count toward the round, because the panel's tally has to add up and a
+    // silent hole in the list is exactly what a reader cannot explain.
+    const notListed = servedSet === null
+      ? []
+      : models.filter((model) => !servedSet.has(model.id) && probes[model.id]?.verdict !== "dead");
     // The panel polls this while the round runs: a progress pill ("4/10") and
     // one badge per row (ok with latency / failed / probing / waiting). It is
     // replaced wholesale at the start of every round and frozen when the round
     // ends, so a late poll never shows a previous round's leftovers as live.
     probeRun = {
       running: true,
-      total: targets.length,
+      total: targets.length + notListed.length,
       done: 0,
       current: null,
       results: {},
       startedAt: stamp,
     };
     let untrusted = false;
+    for (const model of notListed) {
+      // At zero cost, with the reason that is actually known: Zen does not list
+      // it. This is what lets the panel say so rather than leave a gap.
+      probeRun.results[model.id] = { status: "failed", ms: 0, code: "not-listed", http: 0 };
+      probeRun.done += 1;
+    }
     try {
       for (const model of targets) {
         probeRun.current = model.id;

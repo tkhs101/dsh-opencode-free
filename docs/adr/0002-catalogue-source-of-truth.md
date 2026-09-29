@@ -101,9 +101,19 @@ deprecated` 即預設可見」）**
   total/current/results`），卡片輪詢它來畫進度藥丸與每行徽標（綠＋毫秒／紅
   ／藍轉圈／灰等待）。進度是純記憶體、不落盤、不參與任何判定；`POST /
   api/probe` 照舊等整輪跑完才回最終快照。
+- **可用性先問清單，再問模型**（對齊 9router 的 OpenCode Free 做法）：探測輪
+  開頭先打一次 `GET /zen/v1/models`（帶 `Bearer public` ＋ 版本化 opencode UA，
+  5 秒超時）。Zen 不再列出的模型**不花任何推理額度**就被移出清單——這是它又快
+  又準的原因：清單 GET 不花額度，所以問多便宜；完成度要花，就只花在清單答不了
+  的問題上。9router 對 free provider 的連線測試就是這一個請求（`valid = res.ok`）。
+- **清單缺席 ≠ 永久判定**：Zen 不列出只改「閘」（每次輪次重算，模型回來就回來），
+  不寫進持久化的 `dead`。`dead` 仍留給「Zen 有列但問不動」——那必須真的去問，
+  成本高所以才值得永久記住。混為一談就是「模型回來了卻被永久 suppress」。
+- 清單 GET 失敗（null）時**什麼都不縮**：照舊全輪探測，且不產生任何移除報告。一次
+  網路抖動不能清空選單。
 - **失敗必須帶原因**：`results[x]` 的失敗項除 `ms` 外還有 `code`（`dead`／
-  `timeout`／`transport`／`anon-gated`／`quota-exhausted`／`bad-key`／
-  `unknown`／`error`）與 `http`（0 = 從未收到任何回應）。`code` 由探測層
+  `not-listed`／`timeout`／`transport`／`anon-gated`／`quota-exhausted`／
+  `bad-key`／`unknown`／`error`）與 `http`（0 = 從未收到任何回應）。`code` 由探測層
   產生、面板自己翻字，中文診斷不會漏到英文介面；只寫「失敗」的紅色徽標就是
   這個欄位要防的東西。`dead` 額外算一條：它同時移除該行，徽標永遠讀不到，所以
   戰績要另外點名。
