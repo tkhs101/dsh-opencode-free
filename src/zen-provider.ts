@@ -32,7 +32,7 @@ export const BASE_URL = "https://opencode.ai/zen/v1";
 const SUPPORTED_APIS = new Set(["openai-responses", "openai-completions"]);
 
 export function freeModels(): Model<Api>[] {
-  return getBuiltinModels("opencode")
+  const builtin = getBuiltinModels("opencode")
     .filter((m) => SUPPORTED_APIS.has(m.api) && Object.values(m.cost).every((cost) => cost === 0))
     .map((m) => ({
       ...m,
@@ -50,6 +50,31 @@ export function freeModels(): Model<Api>[] {
         ...STATIC_ZEN_HEADERS,
       },
     }));
+  const known = new Set(builtin.map((m) => m.id));
+  // Free-tier models that exist in the live Zen catalogue but postdate pi-ai
+  // 0.85.1's builtin list (DSH pins pi-ai, so a builtin bump is not an
+  // option). Each entry clones the mimo-v2.5-free record shape and overrides
+  // only id/name/limits. api=openai-completions is confirmed for
+  // mimo-v2.6-flash-free by pi-ai 0.87's builtin data; for the other four it
+  // is the majority-transport default (5/7 baseline entries) — a wrong guess
+  // surfaces as a model error with guidance, never silent misrouting.
+  // Limits come from models.dev (anomalyco fork, opencode provider) where
+  // published, otherwise the template's own values.
+  const template = builtin.find((m) => m.id === "mimo-v2.5-free");
+  const synthetic: Array<{ id: string; name: string; contextWindow: number; maxTokens: number }> = [
+    { id: "mimo-v2.6-flash-free", name: "MiMo-V2.6-Flash Free", contextWindow: 200_000, maxTokens: 32_000 },
+    { id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash Free", contextWindow: 200_000, maxTokens: 128_000 },
+    { id: "space-bunny-free", name: "Space Bunny Free", contextWindow: 1_048_576, maxTokens: 524_288 },
+    { id: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview Free", contextWindow: 200_000, maxTokens: 32_000 },
+    { id: "jev-1.13-free", name: "Jev 1.13 Free", contextWindow: 200_000, maxTokens: 32_000 },
+  ];
+  if (template !== undefined) {
+    for (const s of synthetic) {
+      if (known.has(s.id)) continue;
+      builtin.push({ ...template, id: s.id, name: s.name, contextWindow: s.contextWindow, maxTokens: s.maxTokens });
+    }
+  }
+  return builtin;
 }
 
 export const OPENCODE_USER_AGENT =

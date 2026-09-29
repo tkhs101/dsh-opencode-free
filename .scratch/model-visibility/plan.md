@@ -11,7 +11,7 @@
 
 ## Goal / Architecture / Tech Stack
 
-- Goal：详情页 DSH 风格卡片，一期 7 行模型 Switch，开关经 Plugin Config 持久并控制 picker 显隐。
+- Goal：详情页 DSH 风格卡片，一期 12 行模型 Switch，开关经 Plugin Config 持久并控制 picker 显隐。
 - Architecture：host 存状态（Config `hiddenModels`）+ 启动时包过滤视图（`getModels` 过滤，`refreshModels` 透传）→ `PiAiAdapter profiles()` 下一 operation 生效；client 为无构建手写 `__ModuleLoader__` bundle，只读写 `configForms`。
 - Tech Stack：TS（host）+ 手写 JS（client，`React.createElement`，原生 elements + 内联 CSS，gitbash 同模式）+ schemastery（Config schema）+ tsx（测试/生成脚本）。
 
@@ -62,7 +62,7 @@ picker 可见性由 provider models 经 `PiAiAdapter` 驱动，无现成开关�
 
 - Purpose：client 的 `MODELS` 常量与 `freeModels()` 基线同源。
 - Change：脚本读 `freeModels().map(id)`，写 `src/client.js` 头部 `MODELS = [...]` 段（幂等、可重复跑）；`package.json` 加 `"prebuild": "tsx scripts/gen-client-models.mjs"`（`build` 仍是 `tsc`，`pretest`/`prepack` 自动受益）。
-- Verify：`pnpm run build` 后 `grep MODELS src/client.js` 含 7 个 id。
+- Verify：`pnpm run build` 后 `grep MODELS src/client.js` 含 12 个 id。
 
 ### T3 — Client 卡片（新 `src/client.js`，约 200 行）
 
@@ -70,7 +70,7 @@ picker 可见性由 provider models 经 `PiAiAdapter` 驱动，无现成开关�
 - Change（抄 gitbash 结构，全部模块顶层、手写、`createElement`）：
   1. 单次 `window.__ModuleLoader__.load({ id: "dsh-opencode-free", factory })`；`exports.inject = ["locale", "slots"]`。
   2. `apply` 内懒取 `configForms.get("opencode-free")`（缺失不拖卡片）；`slots.inject("plugins.bundle.config", () => slots.register({ name: "plugins.bundle.config", key: "dsh-opencode-free", locale: "opencodeFree", inject: () => ({ scope, ctx }) }, Card))`。
-  3. `Card`：标题 + 7 行（模型 id + Switch/checkbox）+ hint；`scope` 快照读 `hiddenModels`，写回整数组（保留未知 id：读-改-写时合并，不覆盖丢弃）；`QuietBoundary` + 语言切换重绘（`locale.subscribe`，gitbash `LocaleLive` 精简版）；`zh/en` 内联字典（模型 id 不翻译）；内联 `<style>`（`opf-` 前缀防冲突）。
+  3. `Card`：标题 + 12 行（模型 id + Switch/checkbox）+ hint；`scope` 快照读 `hiddenModels`，写回整数组（保留未知 id：读-改-写时合并，不覆盖丢弃）；`QuietBoundary` + 语言切换重绘（`locale.subscribe`，gitbash `LocaleLive` 精简版）；`zh/en` 内联字典（模型 id 不翻译）；内联 `<style>`（`opf-` 前缀防冲突）。
 - Verify：`node --check src/client.js` + smoke grep（单次 load、白名单 require、slot key、`opencode-free` ns）。
 
 ### T4 — 打包接线（`package.json`）
@@ -82,8 +82,8 @@ picker 可见性由 provider models 经 `PiAiAdapter` 驱动，无现成开关�
 
 - Cases（沿用 `compatibility.test.mjs` 的 fakeCtx + 真 `PiAiAdapter` 模式）：
   1. `hiddenModels: ["big-pickle"]` → `listModels(PROVIDER_ID)` 无此 id，其余 6 个在。
-  2. 缺省/空数组 → 7 个全在。
-  3. 未知 id（`"no-such-model"`）→ 不炸，7 个全在且存储保留（读回 `hiddenModels` 原样——经 `apply` 的 Config 视角断言，或 client 合并逻辑单测，取易实现者）。
+  2. 缺省/空数组 → 12 个全在。
+  3. 未知 id（`"no-such-model"`）→ 不炸，12 个全在且存储保留（读回 `hiddenModels` 原样——经 `apply` 的 Config 视角断言，或 client 合并逻辑单测，取易实现者）。
   4. 隐藏模型 `resolveModel` → 失败（通用不可用，断言 reject/错误，不定死文案）。
 - Verify：`pnpm test`（含现有 11 个）全过。
 
