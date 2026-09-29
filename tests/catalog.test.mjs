@@ -270,14 +270,12 @@ const { getSupportedThinkingLevels, clampThinkingLevel } = await import('@earend
 test('thinkingLevelMapFor maps the published effort levels and nulls the rest', () => {
   // space-bunny-free, real record 2026-09-29.
   assert.deepEqual(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] }] }), {
-    minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+    off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
   })
   // muse-spark, real record: no `max`, so it must not be offered.
   assert.deepEqual(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }] }), {
-    minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh',
+    off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh',
   })
-  // Off is never claimed either way: it means "send no reasoning parameter".
-  assert.equal(Object.prototype.hasOwnProperty.call(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['low'] }] }), 'off'), false)
 })
 
 test('thinkingLevelMapFor claims nothing when models.dev publishes no levels', () => {
@@ -299,16 +297,33 @@ test('thinkingLevelMapFor claims nothing when models.dev publishes no levels', (
 
 test('the levels a host offers follow models.dev, per model', () => {
   // The map the record produces, read back through pi-ai's own filter.
+  // `off` is claimed as null on every produced map (matching pi-ai's own
+  // builtin opencode records): the "no level chosen" default still sends
+  // nothing — exactly like OpenCode's "Default" — it is only the explicit,
+  // selectable "off" row that is gone.
   const of = (id) => getSupportedThinkingLevels({ id, reasoning: true, thinkingLevelMap: thinkingLevelMapFor(modelsDict()[id]) })
-  assert.deepEqual(of('space-bunny-free'), ['off', 'low', 'medium', 'high', 'xhigh', 'max'])
-  assert.deepEqual(of('muse-spark-1.3-contributor-free'), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+  assert.deepEqual(of('space-bunny-free'), ['low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(of('muse-spark-1.3-contributor-free'), ['minimal', 'low', 'medium', 'high', 'xhigh'])
   // No published list: pi-ai's default set, unchanged from before this work.
   assert.deepEqual(of('big-pickle'), ['off', 'minimal', 'low', 'medium', 'high'])
   assert.deepEqual(of('ling-3.0-flash-fin-free'), ['off', 'minimal', 'low', 'medium', 'high'])
   // The derived records themselves carry the same maps.
   const derived = derive(modelsDict(), { template: template(), knownApis: new Map() })
   const spark = derived.candidates.find((m) => m.id === 'muse-spark-1.3-contributor-free')
-  assert.deepEqual(getSupportedThinkingLevels(spark), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+  assert.deepEqual(getSupportedThinkingLevels(spark), ['minimal', 'low', 'medium', 'high', 'xhigh'])
+})
+
+test('GUARD: a derived responses record sends no reasoning parameter by default', () => {
+  // pi-ai's responses transport sends `reasoning: { effort: "none" }` whenever
+  // no effort is chosen UNLESS the map's `off` is `null` — and "none" is a
+  // value neither pi-ai's own builtin map nor OpenCode's "Default" ever sends.
+  // This pins the wire shape for the one case the effort tests cannot see.
+  // (`??` cannot make this assertion: it treats an explicit `null` the same as
+  // a missing key, which is exactly the distinction being pinned.)
+  const spark = derive(modelsDict(), { template: template(), knownApis: new Map() })
+    .candidates.find((m) => m.id === 'muse-spark-1.3-contributor-free')
+  assert.equal(Object.prototype.hasOwnProperty.call(spark.thinkingLevelMap ?? {}, 'off'), true)
+  assert.equal(spark.thinkingLevelMap.off, null, 'off must be explicitly null, not absent')
 })
 
 test('GUARD: the muse-spark xhigh default is no longer silently clamped away', async () => {

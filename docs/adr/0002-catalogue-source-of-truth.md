@@ -54,6 +54,11 @@ provider 上，`deepseek-v4-flash-free`（免費層已結束、實測呼叫失�
   `UNSUPPORTED_REASONING_EFFORT`，不是夾取值。
   models.dev 沒發布等級時（`toggle`、空陣列）**不宣稱**——pi-ai 沒有「只有開」的
   等級名，亂猜會得到上游拒絕的等級。
+  `off` 固定寫 `null`（跟 pi-ai 自己的 opencode 內建紀錄一致）：這不只是把 off
+  從選項裡拿掉——pi-ai 的 responses 通道在沒選等級時會送
+  `reasoning: { effort: "none" }`，除非 map 的 `off` 是 `null`，而 "none" 是
+  pi-ai 內建紀錄和 OpenCode 的 "Default" 都不會送的值。不選等級就什麼都不送，
+  跟 "Default" 完全一樣。
   這條修掉一個實際缺陷：插件對 muse-spark 預設 `xhigh`，但派生記錄沒有等級表，
   pi-ai 的可用集合止於 `high`，請求被靜默降級。
 - 快取：`$DSH_HOME/dsh-opencode-free/catalog.json`，只存 models 段（不存

@@ -112,6 +112,13 @@ const OPT_IN_THINKING_LEVELS = new Set<string>(["xhigh", "max"]);
  * name is what goes on the wire (`reasoning_effort` on completions, `effort` on
  * responses); the map's job here is to say which levels EXIST.
  *
+ * `off` is set to `null`, matching pi-ai's own builtin opencode records. That
+ * is not a claim about models.dev (which publishes no "off") but a transport
+ * requirement: see the inline comment. The host's "no level chosen" default
+ * still sends nothing, exactly like OpenCode's "Default" — it is only the
+ * explicit, selectable "off" row that disappears, and "off" never meant
+ * anything but "no parameter" on this endpoint anyway.
+ *
  * `undefined` means "models.dev published no level list, so make no claim" —
  * pi-ai then falls back to its own default set. That is the honest answer for
  * a `toggle` model (reasoning is on or off, and pi-ai has no name for bare
@@ -136,11 +143,16 @@ export function thinkingLevelMapFor(
     }
   }
   if (published.size === 0) return undefined;
-  const map: Record<string, string | null> = {};
+  const map: Record<string, string | null> = {
+    // `off` is claimed as EXPLICITLY unsupported, and that is load-bearing
+    // beyond the offered list. pi-ai's responses transport sends
+    // `reasoning: { effort: "none" }` whenever no effort is chosen unless the
+    // map's `off` is `null` — and "none" is a value neither pi-ai's own
+    // builtin map nor OpenCode's "Default" ever sends. Absent would read as
+    // "not claimed" and still trigger the send; only `null` suppresses it.
+    off: null,
+  };
   for (const level of THINKING_LEVELS) {
-    // `off` is never claimed as published or unpublished: it means "send no
-    // reasoning parameter", which is a real choice on an OpenAI-compatible
-    // endpoint and is what pi-ai offers today for every reasoning model.
     if (level === "off") continue;
     if (published.has(level)) map[level] = level;
     else if (!OPT_IN_THINKING_LEVELS.has(level)) map[level] = null;
