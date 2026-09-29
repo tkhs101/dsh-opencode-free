@@ -472,12 +472,31 @@ const PROBE_TIMEOUT_MS = 30_000;
 const MODEL_GONE_PATTERNS: readonly RegExp[] = [
   // "Upstream request failed: Model is unavailable." — deepseek-v4-flash-free,
   // whose free tier is over. HTTP 400, credential-independent.
-  /\bmodel\b[^.]{0,40}?\b(?:is|was)\s+(?:unavailable|unsupported|disabled|retired)\b/i,
+  //
+  // The gaps are bounded but NOT dot-excluded: model ids contain dots
+  // (`kimi-k2.5-free`, `gpt-5.5-free`), so a `[^.]` class silently failed to
+  // match every real body that names the model before the predicate.
+  /\bmodel\b.{0,40}?\b(?:is|was)\s+(?:unavailable|unsupported|disabled|retired)\b/i,
+  // "Model kimi-k2.5-free is not supported" — the free route declining to serve
+  // a model models.dev still lists at zero cost. Observed 2026-09-29 on 25 of
+  // 34 catalogue models, HTTP 401. Counted as gone: from the free tier's point
+  // of view it is, and a keyed round re-probes and restores it if it answers.
+  /\bmodels?\b.{0,60}?\bnot\s+supported\b/i,
   // "model not found" / "does not exist" / "unrecognized model"
-  /\bmodels?\b[^.]{0,24}?\b(?:not\s+found|does\s+not\s+exist|unrecognized)\b/i,
+  /\bmodels?\b.{0,24}?\b(?:not\s+found|does\s+not\s+exist|unrecognized)\b/i,
   /\bno\s+longer\s+(?:available|served|supported|provided|offered)\b/i,
   /\b(?:retired|sunset|discontinued|decommissioned)\b/i,
 ];
+
+/**
+ * The same sentence about the REQUEST rather than the model. Zen answers
+ * `Model space-bunny-free is not supported for format openai` (HTTP 401) when a
+ * healthy model is sent down the wrong channel — the model is fine, the
+ * request shape is not. Counting that as death would empty the picker the
+ * moment channel inference ever picks wrong, so the format-scoped reading is
+ * excluded explicitly. Observed 2026-09-29.
+ */
+const FORMAT_SCOPED_PATTERN = /\bfor\s+format\b|\bunsupported\s+format\b|\bformat\s+is\s+not\b/i;
 
 /**
  * A failure about the ENDPOINT is not a failure about the model, and the two
@@ -488,7 +507,7 @@ const MODEL_GONE_PATTERNS: readonly RegExp[] = [
  * models, so the endpoint reading is excluded by name.
  */
 const ENDPOINT_FAILURE_PATTERN =
-  /\bendpoint\b[^.]{0,40}?\b(?:is|was)\s+(?:unavailable|unsupported|not\s+found|unreachable)\b/i;
+  /\bendpoint\b.{0,40}?\b(?:is|was)\s+(?:unavailable|unsupported|not\s+found|unreachable)\b/i;
 
 /** Statuses that mean the addressed model itself is gone. */
 const MODEL_GONE_STATUSES = new Set([404, 410]);
@@ -507,20 +526,26 @@ const MODEL_GONE_STATUSES = new Set([404, 410]);
 export function isModelUnavailableFailure(status: number, bodyText: string): boolean {
   const body = typeof bodyText === "string" ? bodyText : "";
   // A gate, an exhausted quota, or a credential problem is never evidence
-  // about the model itself.
+  // about the model itself. These run first and are stronger than any status:
+  // a body carrying both a quota marker and model wording resolves to
+  // `inconclusive`, the safe side.
   if (ANON_GATED_PATTERN.test(body)) return false;
   if (QUOTA_PATTERN.test(body)) return false;
   if (BAD_KEY_PATTERN.test(body)) return false;
   // Nor is an unreachable endpoint.
   if (ENDPOINT_FAILURE_PATTERN.test(body)) return false;
-  // 401 and 429 stay inconclusive even when the body names the model, because
-  // both are scoped to the credential rather than to the model: Zen answers
-  // `Model kimi-k2.5-free is not supported` (401) to an anonymous caller, and
-  // that same model may well answer a keyed one. Observed 2026-09-29 and
-  // deliberately NOT treated as death — the safe side is to leave it visible.
-  if (status === 429 || status === 401) return false;
   if (MODEL_GONE_STATUSES.has(status)) return true;
-  return MODEL_GONE_PATTERNS.some((pattern) => pattern.test(body));
+  if (!MODEL_GONE_PATTERNS.some((pattern) => pattern.test(body))) return false;
+  // "not supported for format openai" is the channel being wrong, not the
+  // model being gone.
+  if (FORMAT_SCOPED_PATTERN.test(body)) return false;
+  // 429 is always the shared bucket, never the model.
+  if (status === 429) return false;
+  // 401 is usually the credential, but a body that NAMES the model as
+  // unsupported is the route declining to serve it, which is the exact
+  // question this probe was sent to answer. A genuinely bad or missing key
+  // never gets here: BAD_KEY_PATTERN above claims it first.
+  return true;
 }
 
 /**

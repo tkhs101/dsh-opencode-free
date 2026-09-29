@@ -107,14 +107,27 @@ underneath.
 
 Two rules decide what you are offered:
 
-- A model is offered until it stops answering. The plugin sends each model one
-  short request and keeps the ones that reply. models.dev's `deprecated` flag
-  only decides whether a model is *in* the catalogue, never whether you see it:
-  on this provider that flag can mean the free tier ended, or only that the
-  record is stale, and no static field can tell those apart. A model that stops
-  answering is named at the bottom of the card instead of disappearing
-  silently. If a model you want is missing, that is usually why.
+- A model is offered until it stops answering **on the route you are using**.
+  The plugin sends each model one short request and keeps the ones that reply.
+  models.dev's `deprecated` flag only decides whether a model is *in* the
+  catalogue, never whether you see it: on this provider that flag can mean the
+  free tier ended, or only that the record is stale, and no static field can
+  tell those apart. A model that stops answering is named at the bottom of the
+  card instead of disappearing silently.
 - A model Zen no longer serves is not offered either, for the same reason.
+
+A model counts as gone when the route answers that it will not serve it —
+`Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. The last
+of those is what most of the catalogue currently hits: **most models models.dev
+lists at zero cost are not actually on the free route**, so a first probe
+typically narrows the list from around 34 to about 10.
+
+**If you use a Zen key, this is route-relative, not permanent.** The check runs
+with whatever credential is configured, so a model the free route refuses but
+your key can reach is probed *with that key* and stays in the list. Models
+already marked gone are re-probed every day, so adding a key brings them back
+on the next round without a restart. Conversely, a model removed while you had
+no key may well work once you add one.
 
 ### What the availability check costs you
 
@@ -129,10 +142,11 @@ answers. That is a real cost and it is worth being explicit about it:
   button asks for an extra round on demand, bypassing the daily limit. If you
   never touch the picker you never pay for it.
 - **A refused or throttled round changes nothing.** If the anonymous tier
-  gates you, the quota runs out, your key is rejected, or the network drops,
-  the plugin concludes nothing at all: the list stays exactly as it was and the
-  card says this round's results are untrustworthy. The one thing that removes
-  a model is upstream positively saying that model is gone.
+  gates you, the quota runs out, your key is rejected, the network drops, or a
+  whole endpoint is down, the plugin concludes nothing at all: the list stays
+  exactly as it was and the card says this round's results are untrustworthy.
+  The only thing that removes a model is the route positively saying that
+  model will not be served.
 - **Hiding a model is still yours to decide.** The switch on the card is
   independent of all of the above.
 

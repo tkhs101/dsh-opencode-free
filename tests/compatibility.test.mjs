@@ -360,17 +360,33 @@ test('probe verdicts: a text reply is ok, only a positive signal is dead', async
   }
   assert.equal(isModelUnavailableFailure(429, 'usage limit exceeded; model not found'), false)
 
-  // Calibrated against real Zen bodies, 2026-09-29. The two that matter are one
-  // word apart, and reading the wrong one empties the picker.
+  // Calibrated against real Zen bodies, 2026-09-29. These three are one word
+  // apart from each other, and reading any of them wrong empties the picker.
   const DEAD_400 = '{"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Model is unavailable."}}'
   const ENDPOINT_400 = '{"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Endpoint is unavailable."}}'
+  // The free route declining to serve a model models.dev still lists free.
   const UNSUPPORTED_401 = '{"type":"error","error":{"type":"ModelError","message":"Model kimi-k2.5-free is not supported"}}'
+  // The SAME sentence about the request instead of the model: a healthy model
+  // sent down the wrong channel. Never a death notice.
+  const FORMAT_401 = '{"type":"error","error":{"type":"ModelError","message":"Model space-bunny-free is not supported for format openai"}}'
   assert.equal(isModelUnavailableFailure(400, DEAD_400), true, 'the model is gone')
   assert.equal(isModelUnavailableFailure(400, ENDPOINT_400), false, 'the ENDPOINT is gone, not the model')
-  assert.equal(isModelUnavailableFailure(401, UNSUPPORTED_401), false, 'credential-scoped, not a death notice')
+  assert.equal(isModelUnavailableFailure(401, UNSUPPORTED_401), true, 'the free route will not serve it')
+  assert.equal(isModelUnavailableFailure(401, FORMAT_401), false, 'wrong channel, healthy model')
   assert.equal((await run(async () => new Response(DEAD_400, { status: 400 }))).kind, 'dead')
   assert.equal((await run(async () => new Response(ENDPOINT_400, { status: 400 }))).kind, 'inconclusive')
-  assert.equal((await run(async () => new Response(UNSUPPORTED_401, { status: 401 }))).kind, 'inconclusive')
+  assert.equal((await run(async () => new Response(UNSUPPORTED_401, { status: 401 }))).kind, 'dead')
+  assert.equal((await run(async () => new Response(FORMAT_401, { status: 401 }))).kind, 'inconclusive')
+
+  // A bad key must never empty the picker, however it is phrased.
+  for (const body of [
+    '{"error":{"message":"Invalid API key provided"}}',
+    '{"detail":"Unauthorized"}',
+    '{"error":{"type":"authentication_error","message":"bad credentials"}}',
+  ]) {
+    assert.equal(isModelUnavailableFailure(401, body), false, body)
+    assert.equal((await run(async () => new Response(body, { status: 401 }))).kind, 'inconclusive', body)
+  }
 
   // A thrown transport error concludes nothing, and never rejects.
   const thrown = await run(async () => {
