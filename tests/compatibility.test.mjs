@@ -30,7 +30,19 @@ test('targets the DSH 0.2.0-rc.1 contracts', () => {
   }
   assert.equal(pkg.peerDependencies['@earendil-works/pi-ai'], '^0.85.1')
   assert.equal(pkg.peerDependencies['react'], undefined)
-  assert.deepEqual(pkg.dsh, { bundle: { patch: './cordis.patch.yml' } })
+  assert.deepEqual(pkg.dsh, {
+    bundle: { patch: './cordis.patch.yml' },
+    client: {
+      inject: [
+        '@deepseek-ai/dsh-client-runtime',
+        '@deepseek-ai/dsh-client-locale',
+        '@deepseek-ai/dsh-client-ui-slots',
+        '@deepseek-ai/dsh-client-ui-settings',
+      ],
+      platform: 'web',
+    },
+  })
+  assert.equal(pkg.exports['./client'], './src/client.js')
 })
 
 test('registers opencode-zen-free through the PiAiAdapter seam', async () => {

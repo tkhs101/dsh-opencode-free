@@ -59,10 +59,12 @@ export const inject: readonly string[] = ["llm"];
 /** Plugin configuration: only the optional Zen key. Everything else is automatic. */
 export interface Config {
   readonly apiKey?: string | undefined;
+  readonly hiddenModels?: readonly string[] | undefined;
 }
 
 export const Config = z.object({
   apiKey: z.string(),
+  hiddenModels: z.array(z.string()).default([]),
 });
 
 const PI_AI_AUTH_CONTEXT: AuthContext = Object.freeze({
@@ -124,16 +126,24 @@ export function apply(ctx: HostContext, config?: Config): void {
   const getConfigKey = (): string | undefined => configuredKey || process.env[ZEN_API_KEY_ENV]?.trim() || undefined;
 
   const provider = zenProvider(() => undefined, getConfigKey);
+  const hidden = new Set(
+    (config?.hiddenModels ?? []).map((id) => id.trim()).filter((id) => id.length > 0),
+  );
+  const filtered = {
+    ...provider,
+    getModels: () => provider.getModels().filter((m) => !hidden.has(m.id)),
+    refreshModels: (c: unknown) => (provider as { refreshModels: (c: unknown) => unknown }).refreshModels(c),
+  };
   const auth = Object.freeze({
     credentials: new EphemeralCredentialStore() as unknown as CredentialStore,
     authContext: PI_AI_AUTH_CONTEXT,
   });
   const authModels = createModels(auth);
-  authModels.setProvider(provider as unknown as Parameters<typeof authModels.setProvider>[0]);
+  authModels.setProvider(filtered as unknown as Parameters<typeof authModels.setProvider>[0]);
   const profile = Object.freeze({
     provider: PROVIDER_ID,
     displayName: "OpenCode Zen Free",
-    piProvider: provider,
+    piProvider: filtered,
     modelErrors: /* @__PURE__ */ new Map<string, string>(),
     configuredMaxTokens: /* @__PURE__ */ new Map<string, number>(),
     streamIdleTimeoutMs: 600 * 1_000,
