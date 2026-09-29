@@ -121,13 +121,6 @@ export interface DeriveOptions {
 export interface DerivedCatalog {
   /** Free AND `status ∈ {active, deprecated}` — the pre-Zen-gate catalogue. */
   readonly candidates: Model<Api>[];
-  /**
-   * Always empty. Derivation no longer retires anything (D1 keeps deprecated
-   * models so a probe can judge them), and the panel's `excluded` list is now
-   * a probe verdict rather than a derivation output. Retained so the result
-   * shape stays stable for callers and fixtures.
-   */
-  readonly excluded: string[];
 }
 
 /**
@@ -175,7 +168,7 @@ export function derive(section: CatalogRecord, options: DeriveOptions): DerivedC
     if (!isCatalogueStatus(record)) continue;
     candidates.push(buildModel(record, options.template, options.knownApis));
   }
-  return { candidates, excluded: [] };
+  return { candidates };
 }
 
 export interface FetchLikeResponse {
@@ -368,10 +361,11 @@ export async function writeCacheAtomic(
 export interface CatalogSnapshot {
   /** Pre-Zen-gate catalogue (what `refreshModels` intersects and probes). */
   readonly models: Model<Api>[];
-  /** Post-gate ids: exactly what the picker offers. */
+  /**
+   * Post-gate, post-probe ids: exactly what the picker offers. A model a probe
+   * judged `dead` is simply absent — there is no companion list naming it.
+   */
   readonly visible: readonly string[];
-  /** Models a probe judged unusable (`dead`). */
-  readonly excluded: readonly string[];
   readonly source: CatalogSource;
   readonly updatedAt: number;
   readonly refreshing: boolean;
@@ -441,10 +435,11 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     updatedAt = record.fetchedAt;
     if (Object.keys(record.probes).length > 0) probes = { ...record.probes };
     if (record.lastProbeAt > lastProbeAt) lastProbeAt = record.lastProbeAt;
-    // Verdicts for models the catalogue no longer carries would otherwise sit
-    // in `excluded` forever, since a vanished model is never probed again.
-    // Dropping them is safe: a returning model starts unprobed, i.e. visible,
-    // and the next round judges it on evidence.
+    // Verdicts for models the catalogue no longer carries are dead weight: a
+    // vanished model is never probed again, so its verdict can never change.
+    // Dropping them keeps the cache file from growing without bound across
+    // upstream removals. Safe either way — a returning model starts unprobed,
+    // i.e. visible, and the next round judges it on evidence.
     const present = new Set(models.map((model) => model.id));
     for (const id of Object.keys(probes)) if (!present.has(id)) delete probes[id];
   };
@@ -508,19 +503,18 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
 
   /**
    * The one list the picker and the panel share: the catalogue, narrowed by
-   * Zen's gate, minus everything a probe judged dead. Probing only ever
-   * REMOVES (D6d) — it can never add a model back into view.
+   * Zen's gate, minus everything a probe judged dead. A dead model is dropped
+   * from here and named nowhere — the user asked for it to simply not be in the
+   * list, so there is deliberately no companion "unavailable" list to restore
+   * or to go stale.
+   *
+   * `models` itself still carries dead entries on purpose: it is the target
+   * list every round walks, so a model that comes back (or answers a Zen key
+   * that the free route refuses) is re-probed and returns on its own.
    */
   const effectiveList = (): Model<Api>[] => {
     const gated = zenIds === null ? models : models.filter((model) => zenIds!.has(model.id));
     return gated.filter((model) => probes[model.id]?.verdict !== "dead");
-  };
-
-  const effectiveExcluded = (): string[] => {
-    const present = new Set(models.map((model) => model.id));
-    return Object.keys(probes)
-      .filter((id) => probes[id].verdict === "dead" && present.has(id))
-      .sort();
   };
 
   const effectiveVisible = (): string[] => effectiveList().map((model) => model.id);
@@ -634,7 +628,6 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       return {
         models: models.slice(),
         visible: effectiveVisible(),
-        excluded: effectiveExcluded(),
         source,
         updatedAt,
         refreshing: inflight !== null,

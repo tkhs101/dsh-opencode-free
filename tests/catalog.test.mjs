@@ -211,9 +211,8 @@ test('derive keeps free-deprecated models in the catalogue and drops paid', () =
   // means both "gone" and "stale record" (muse-spark-1.2 and mimo-v2.5 are
   // deprecated and still answer; deepseek-v4-flash-free is deprecated and
   // dead), so no static field can decide visibility. `status` now only decides
-  // membership; a probe decides visibility, which is why `excluded` is empty
-  // here and only a `dead` verdict can ever fill it.
-  const { candidates, excluded } = derive(modelsDict(), { template: template() })
+  // membership; a probe decides visibility.
+  const { candidates } = derive(modelsDict(), { template: template() })
   assert.deepEqual(ids(candidates).sort(), [
     'big-pickle',
     'deepseek-v4-flash-free',
@@ -222,15 +221,13 @@ test('derive keeps free-deprecated models in the catalogue and drops paid', () =
     'muse-spark-1.3-contributor-free',
     'space-bunny-free',
   ])
-  assert.deepEqual(excluded, [], 'derivation retires nothing; only a probe may')
   assert.ok(!ids(candidates).includes('gpt-6-astra'), 'paid model must not be offered')
 })
 
 test('derive skips malformed records instead of throwing', () => {
-  const { candidates, excluded } = derive(modelsDict(), { template: template() })
+  const { candidates } = derive(modelsDict(), { template: template() })
   for (const id of ['broken-null', 'broken-array', 'broken-nocost']) {
     assert.ok(!ids(candidates).includes(id), id)
-    assert.ok(!excluded.includes(id), id)
   }
 })
 
@@ -332,9 +329,8 @@ test('GUARD: a provider record fed to derive yields an empty catalogue', () => {
   // any of {id,env,npm,api,name,doc,models} and silently returns nothing —
   // an EMPTY catalogue, worse than the 7-model offline floor.
   const provider = opencodeProvider()
-  const { candidates, excluded } = derive(provider, { template: template() })
+  const { candidates } = derive(provider, { template: template() })
   assert.deepEqual(candidates, [], 'a provider record must never look like a catalogue')
-  assert.deepEqual(excluded, [])
   // ...and the real shape does produce one, from the same response body.
   const correct = derive(provider.models, { template: template() })
   assert.ok(correct.candidates.length > 0, 'the models dictionary does produce candidates')
@@ -344,7 +340,7 @@ test('GUARD: fetchSection output feeds derive directly from a real api.json body
   const result = await fetchSection({ fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]) })
   assert.equal(result.kind, 'ok')
   assert.equal(Object.prototype.hasOwnProperty.call(result.section, 'models'), false, 'the wrapper is unwrapped here')
-  const { candidates, excluded } = derive(result.section, { template: template() })
+  const { candidates } = derive(result.section, { template: template() })
   assert.deepEqual(ids(candidates).sort(), [
     'big-pickle',
     'deepseek-v4-flash-free',
@@ -353,7 +349,6 @@ test('GUARD: fetchSection output feeds derive directly from a real api.json body
     'muse-spark-1.3-contributor-free',
     'space-bunny-free',
   ])
-  assert.deepEqual(excluded, [], 'derivation retires nothing; only a probe may')
 })
 
 test('fetchSection returns the models dictionary and the etag on 200', async () => {
@@ -492,7 +487,6 @@ test('a fresh container serves the offline floor before any sync', async () => {
     assert.equal(state.source, 'builtin-fallback')
     assert.deepEqual(ids(state.models), ['big-pickle', 'muse-spark-1.3-contributor-free'])
     assert.deepEqual(state.visible, ['big-pickle', 'muse-spark-1.3-contributor-free'])
-    assert.deepEqual(state.excluded, [])
     assert.equal(state.updatedAt, 0)
     assert.equal(state.refreshing, false)
   })
@@ -529,7 +523,6 @@ test('ensureFresh revalidates past the TTL and adopts the derived catalogue', as
       'muse-spark-1.3-contributor-free',
       'space-bunny-free',
     ])
-    assert.deepEqual(catalog.current().excluded, [], 'nothing is excluded before a probe')
     clock.t += 120_000
     await catalog.ensureFresh()
     assert.equal(fetchImpl.calls.length, 2)
@@ -619,18 +612,19 @@ test('a warm cache is adopted on start without touching the network', async () =
   })
 })
 
-test('the Zen gate narrows visible; the remainder is unprobed, not excluded', async () => {
+test('the Zen gate narrows visible, and nothing else is reported', async () => {
   await withTempDir(async (dir) => {
     const catalog = catalogWith({ dir, fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]) })
     await catalog.forceRefresh()
     catalog.applyZenGate(['big-pickle', 'space-bunny-free', 'not-in-catalogue'])
     const state = catalog.current()
     assert.deepEqual(state.visible, ['big-pickle', 'space-bunny-free'])
-    // D1 dropped the old "free but not offered" bucket on purpose: a model Zen
-    // does not list is indistinguishable from one it deleted outright, and a
-    // probe settles that (404 -> dead -> excluded). Do not resurrect the
-    // bucket just to keep the list explicable.
-    assert.deepEqual(state.excluded, [], 'excluded is a probe verdict, not a gate artifact')
+    // There is no companion list naming what was dropped — not for a gate
+    // artifact, not for a dead verdict. A model that is not offered is simply
+    // not in `visible`.
+    assert.deepEqual(Object.keys(state).sort(), [
+      'models', 'probeInconclusive', 'probedAt', 'refreshing', 'source', 'updatedAt', 'visible',
+    ])
     assert.deepEqual(ids(catalog.effectiveModels()), ['big-pickle', 'space-bunny-free'])
   })
 })
@@ -661,11 +655,9 @@ test('effectiveModels and visible stay the same set after a re-sync', async () =
     const state = catalog.current()
     assert.deepEqual(state.visible, ['big-pickle'], 'the re-derived catalogue was re-gated')
     assert.deepEqual(ids(catalog.effectiveModels()), state.visible, 'picker and panel read one set')
-    // Per the spec, `excluded` explains models we still know are free but are
-    // not offered (deprecated, or absent from Zen's list). A model models.dev
-    // dropped altogether is in neither bucket, so it leaves both.
-    assert.deepEqual(state.excluded, [])
-    assert.ok(!state.excluded.includes('space-bunny-free'), 'absent upstream is not "free but unavailable"')
+    // A model models.dev dropped altogether is simply gone: it leaves the
+    // catalogue, the visible list, and every other report.
+    assert.ok(!state.models.some((m) => m.id === 'space-bunny-free'))
   })
 })
 
@@ -763,7 +755,7 @@ test('a round covers the whole pre-gate catalogue, in order, one at a time', asy
   })
 })
 
-test('dead removes a model from the picker and names it in excluded; ok changes nothing', async () => {
+test('dead removes a model from every list; ok changes nothing', async () => {
   await withTempDir(async (dir) => {
     const probe = recordingProber({ 'deepseek-v4-flash-free': DEAD(404) })
     const catalog = await probedCatalog(dir, probe)
@@ -772,7 +764,12 @@ test('dead removes a model from the picker and names it in excluded; ok changes 
     await catalog.forceProbes()
     const state = catalog.current()
     assert.ok(!state.visible.includes('deepseek-v4-flash-free'), 'a dead model leaves the picker')
-    assert.deepEqual(state.excluded, ['deepseek-v4-flash-free'], 'and is reported, not silently dropped')
+    // "Not in the list" is the whole contract: the snapshot carries no
+    // companion list of unavailable models that could drift or be re-shown.
+    assert.equal(Object.prototype.hasOwnProperty.call(state, 'excluded'), false)
+    // It stays in the pre-gate catalogue, which is the target list every round
+    // walks — otherwise it could never be re-probed and could never return.
+    assert.ok(state.models.some((m) => m.id === 'deepseek-v4-flash-free'))
     assert.equal(state.visible.length, before.length - 1, 'an ok verdict adds nothing back')
     assert.equal(state.probeInconclusive, false)
     assert.equal(state.probedAt, 1_000_000)
@@ -791,7 +788,6 @@ test('D5 GUARD: an all-gated round leaves visibility unchanged and persists no v
     await catalog.forceProbes()
     const after = catalog.current()
     assert.deepEqual(after.visible, before.visible, 'visibility unchanged')
-    assert.deepEqual(after.excluded, [], 'nothing excluded')
     assert.equal(after.probeInconclusive, true, 'the panel is told the round is untrustworthy')
     // `inconclusive` is never persisted, only the round marker — so a fully
     // gated day does not re-probe on every read.
@@ -909,7 +905,6 @@ test('verdicts round-trip through the cache file and survive a restart', async (
       },
     })
     assert.equal(await waitFor(() => restarted.current().source === 'models.dev'), true)
-    assert.deepEqual(restarted.current().excluded, ['muse-spark-1.2-contributor-free'])
     assert.ok(!restarted.current().visible.includes('muse-spark-1.2-contributor-free'))
   })
 })
@@ -925,7 +920,6 @@ test('a cache with no probes field is "never probed", not an error', async () =>
     assert.equal(await waitFor(() => catalog.current().source === 'models.dev'), true)
     const state = catalog.current()
     assert.deepEqual(state.visible.slice().sort(), DERIVED, 'everything is offered again')
-    assert.deepEqual(state.excluded, [])
     assert.equal(state.probedAt, 0)
   })
 })
@@ -939,21 +933,24 @@ test('effectiveModels and the panel visible stay one set after a probe', async (
   })
 })
 
-test('a verdict for a model the catalogue dropped is discarded, not kept forever', async () => {
+test('a verdict for a model the catalogue dropped is pruned from the cache', async () => {
   await withTempDir(async (dir) => {
     const probe = recordingProber({ 'space-bunny-free': DEAD(404) })
     const catalog = await probedCatalog(dir, probe)
     await catalog.forceProbes()
-    assert.ok(catalog.current().excluded.includes('space-bunny-free'))
-    // Upstream removes it entirely; nothing will ever probe it again, so its
-    // verdict would sit in `excluded` forever.
+    assert.ok(!catalog.current().visible.includes('space-bunny-free'))
+    // Upstream removes it entirely. Nothing will ever probe it again, so its
+    // verdict can never change — keeping it would grow the cache file without
+    // bound across upstream removals.
     const reSynced = catalogWith({
       dir,
       fetchImpl: scriptedFetch([fakeResponse({ body: apiBodyWith({ 'big-pickle': modelsDict()['big-pickle'] }) })]),
       baselineModels: [],
     })
     await reSynced.forceRefresh()
-    assert.deepEqual(reSynced.current().excluded, [], 'a vanished model leaves the report too')
+    assert.deepEqual(reSynced.current().visible, ['big-pickle'])
+    const onDisk = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+    assert.deepEqual(Object.keys(onDisk.probes ?? {}), ['big-pickle'], 'the dead verdict for a vanished model is gone')
   })
 })
 

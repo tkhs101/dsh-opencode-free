@@ -68,7 +68,8 @@ const API_FIXTURE = {
         limit: { context: 1048576, output: 524288 },
         modalities: { input: ['text', 'image', 'video'], output: ['text'] },
       },
-      // Free but retired upstream: D2 excludes it, D9 lists it in `excluded`.
+      // Free but retired upstream: it stays in the catalogue until a probe
+      // judges it, then simply is not in the list.
       'deepseek-v4-flash-free': {
         id: 'deepseek-v4-flash-free',
         name: 'DeepSeek V4 Flash Free',
@@ -285,11 +286,12 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
     assert.ok(ids.includes('space-bunny-free'), 'a newly published free model must appear')
     assert.ok(ids.includes('deepseek-v4-flash-free'), 'D1: a deprecated free model stays until a probe judges it')
     assert.ok(!ids.includes('gpt-6-astra'), 'a paid model must never enter the catalogue')
-    // Derivation retires nothing, so `excluded` stays empty until a round
-    // returns a `dead` verdict. On this fixture no probe has run, and the
-    // lazy trigger cannot have fired: the round is async and this assertion is
-    // reached immediately after the refresh answered.
-    assert.deepEqual(refreshed.body.excluded, [], 'no probe verdict yet, so nothing is excluded')
+    // The payload names the offered models and nothing else. There is no list
+    // of unavailable models, so a model that is not offered is simply absent —
+    // and the panel has no second source that could disagree with the picker.
+    assert.deepEqual(Object.keys(refreshed.body).sort(), [
+      'probeInconclusive', 'probedAt', 'refreshing', 'source', 'updatedAt', 'visible',
+    ])
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]
@@ -320,7 +322,6 @@ test('the panel endpoint reports exactly what the picker offers', async () => {
     const read = await callRoute(host, CATALOG_ROUTE, 'GET')
     assert.equal(read.status, 200)
     assert.deepEqual(read.body.visible.slice().sort(), (await listedIds(host)).slice().sort())
-    assert.ok(Array.isArray(read.body.excluded))
     assert.equal(typeof read.body.source, 'string')
     // Provenance and freshness are part of the contract the panel renders.
     assert.equal(read.body.source, 'builtin-fallback')

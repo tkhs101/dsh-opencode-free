@@ -102,8 +102,7 @@ through. If you do not choose one, Muse Spark uses `xhigh`.
 **This table is a snapshot, not a contract.** It is here so you can recognise
 what you are picking; the live list is whatever the plugin last read. The
 plugin's detail page is where you see and change it: every model there has a
-switch that hides it from the picker, and the ones held back are named
-underneath.
+switch that hides it from the picker.
 
 Two rules decide what you are offered:
 
@@ -112,9 +111,13 @@ Two rules decide what you are offered:
   models.dev's `deprecated` flag only decides whether a model is *in* the
   catalogue, never whether you see it: on this provider that flag can mean the
   free tier ended, or only that the record is stale, and no static field can
-  tell those apart. A model that stops answering is named at the bottom of the
-  card instead of disappearing silently.
+  tell those apart.
 - A model Zen no longer serves is not offered either, for the same reason.
+
+A model that is not offered is simply **not in the list**. There is no second
+list naming what was dropped, so there is nothing that can disagree with the
+picker or go stale — if a model you expected is missing, re-probe and it either
+reappears or the card tells you the round was untrustworthy.
 
 A model counts as gone when the route answers that it will not serve it —
 `Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. The last

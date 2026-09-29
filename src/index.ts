@@ -185,12 +185,13 @@ function sendJson(res: RouteResponse, code: number, payload: unknown): void {
  *
  * One shape for all three routes: the probe route repaints from what it returns,
  * so a panel that got a differently-shaped body would have to re-read anyway.
+ * There is no list of unavailable models — a dead model is simply absent from
+ * `visible`, so there is nothing for the panel to reconcile.
  */
 function catalogPayload(catalog: Catalog): Record<string, unknown> {
   const snapshot = catalog.current();
   return {
     visible: [...snapshot.visible],
-    excluded: [...snapshot.excluded],
     source: snapshot.source,
     updatedAt: snapshot.updatedAt,
     refreshing: snapshot.refreshing,

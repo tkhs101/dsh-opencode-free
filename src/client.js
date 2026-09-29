@@ -76,8 +76,6 @@ window.__ModuleLoader__.load({
 			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
 			"probeUntrusted": "本轮探测结论不可信（上游限流、匿名额度被闸或网络异常），模型显示保持不变。",
 			"probedAt": "上次探测",
-			"excluded": "探测判定不可用",
-			"excluded.hint": "上次探测判定这些模型已不可用（已下线或上游拒绝），或当前不在 Zen 列表中。",
 			"empty": "当前没有可显示的模型。"
 		};
 
@@ -98,8 +96,6 @@ window.__ModuleLoader__.load({
 			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
 			"probeUntrusted": "This round's probe results were untrustworthy (upstream throttling, the anonymous tier refusing, or a network error), so visibility is unchanged.",
 			"probedAt": "Last probe",
-			"excluded": "Unavailable per probe",
-			"excluded.hint": "The last probe found these unavailable (retired or refused upstream), or they are not in Zen's list right now.",
 			"empty": "No models are available right now."
 		};
 
@@ -159,10 +155,7 @@ window.__ModuleLoader__.load({
 			".opf-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}",
 			".opf-btn{font:inherit;font-size:12px;padding:4px 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}",
 			".opf-btn[disabled]{opacity:.55;cursor:default}",
-			".opf-note{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}",
-			".opf-excluded{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin:0;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-tertiary);word-break:break-all}",
-			".opf-excludedLabel{color:var(--dsw-alias-label-secondary)}",
-			".opf-excluded .opf-note{flex-basis:100%}"
+			".opf-note{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}"
 		].join("\n");
 
 		function ensureStyles() {
@@ -248,7 +241,6 @@ window.__ModuleLoader__.load({
 			};
 			return {
 				visible: names(payload.visible),
-				excluded: names(payload.excluded),
 				source: typeof payload.source === "string" ? payload.source : "unknown",
 				/* Probe facts are OPTIONAL: a host older than the probe feature
 				   simply omits them, and the card degrades to "never probed"
@@ -469,7 +461,6 @@ window.__ModuleLoader__.load({
 			void Chevron;
 
 			var visible = catalog !== undefined && catalog !== null ? catalog.visible : [];
-			var excluded = catalog !== undefined && catalog !== null ? catalog.excluded : [];
 
 			var rows = visible.map(function (id) {
 				var shown = !hasOwnKey(hidden, id);
@@ -516,13 +507,6 @@ window.__ModuleLoader__.load({
 				}
 			}
 
-			var excludedNote = excluded.length > 0
-				? E("div", { className: "opf-excluded" },
-					E("span", { className: "opf-excludedLabel" }, t("excluded")),
-					E("span", null, excluded.join(", ")),
-					E("div", { className: "opf-note" }, t("excluded.hint")))
-				: null;
-
 			return E("div",
 				{ className: "opf-card" },
 				E("div", { className: "opf-title" }, t("title")),
@@ -546,7 +530,6 @@ window.__ModuleLoader__.load({
 				listArea,
 				error ? E("p", { className: "opf-error" }, error) : null,
 				probeError ? E("p", { className: "opf-error" }, probeError) : null,
-				excludedNote,
 				E("p", { className: "opf-hint" }, t("hint")));
 		}
 
