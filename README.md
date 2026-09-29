@@ -99,11 +99,10 @@ Models currently listed as free and not retired upstream:
 All models support reasoning and tool calls. DSH passes your reasoning level
 through, and the levels it offers come from models.dev per model — Muse Spark
 gets `minimal`…`xhigh`, Space Bunny gets `low`…`max`, and a level a model does
-not publish is never offered. There is no explicit "off" row: leaving the level
-unselected sends no reasoning parameter at all, exactly like OpenCode's
-"Default". (An earlier build left that row in, which made the responses channel
-send `effort: "none"` by default — a value neither pi-ai's own records nor
-OpenCode ever send.) If you do not choose one, Muse Spark uses `xhigh`.
+not publish is never offered. `off` stays offered as an explicit choice; it
+sends no reasoning parameter at all, exactly like OpenCode's "Default" (the
+request path strips the placeholder efforts pi-ai would otherwise put on the
+wire for it). If you do not choose one, Muse Spark uses `xhigh`.
 
 Each model's picture support, context size and maximum output are read from
 models.dev as well, so a screenshot is only attached to a model that declares

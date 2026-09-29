@@ -326,6 +326,40 @@ test('GUARD: the probe request carries the read+bash gate, streams, and asks for
   assert.equal(body.model, model.id)
 })
 
+test('GUARD: placeholder efforts never reach the wire', async () => {
+  // "off" is offered as an explicit level, but pi-ai renders it as
+  // `reasoning: { effort: "none" }` when nothing is chosen and as
+  // `effort: "off"` when it is explicitly chosen on the responses channel.
+  // Neither value is ever sent by pi-ai's own records or by OpenCode, so the
+  // request path strips exactly those two back to "no reasoning object".
+  // Real levels pass through untouched.
+  const p = plugin.zenProvider(() => 's', () => undefined)
+  const base = p.getModels().find((m) => m.api === 'openai-responses')
+  // A map with `off` absent (offered), like every derived record carries —
+  // and an id outside the muse-spark xhigh default, so nothing is chosen.
+  const { off: _dropped, ...rest } = base.thinkingLevelMap ?? {}
+  const model = { ...base, id: 'probe-responses-free', thinkingLevelMap: rest }
+  const ctx = { messages: [{ role: 'user', content: 'hi', timestamp: 1 }] }
+  // Run each case and read the captured body. The stub answers 400 so the
+  // stream settles immediately; onPayload has already run by then.
+  const bodies = {}
+  for (const [key, opts] of [['default', {}], ['explicit-off', { reasoning: 'off' }], ['real-level', { reasoning: 'low' }]]) {
+    let body
+    await p.streamSimple(model, ctx, {
+      ...opts,
+      maxRetries: 0,
+      fetch: async (_url, init) => {
+        body = JSON.parse(init.body)
+        return new Response('{"error":{"message":"stop here"}}', { status: 400 })
+      },
+    }).result()
+    bodies[key] = body
+  }
+  assert.equal(bodies.default.reasoning, undefined, 'no effort chosen sends no reasoning object')
+  assert.equal(bodies['explicit-off'].reasoning, undefined, 'explicit "off" sends no reasoning object')
+  assert.equal(bodies['real-level'].reasoning?.effort, 'low', 'a real level passes through')
+})
+
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(() => 'probe-session', () => undefined)
   const model = p.getModels().find((m) => m.api === 'openai-completions')
@@ -404,8 +438,7 @@ test('probe verdicts: a text reply is ok, only a positive signal is dead', async
   assert.equal(empty.kind, 'inconclusive')
 })
 
-test('a socket failure reports its cause instead of a bare "Connection error."', async () => {
-  // The chain this exists for, recorded live 2026-09-29: undici rejects, the
+test('a socket failure reports its cause instead of a bare "Connection error."', async () => {  // The chain this exists for, recorded live 2026-09-29: undici rejects, the
   // OpenAI SDK flattens it to `APIConnectionError { message: 'Connection
   // error.' }` and keeps the reason in `cause`, and pi-ai reads only
   // `error.message`. Without the recorder the user saw those four words for

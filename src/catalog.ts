@@ -112,12 +112,13 @@ const OPT_IN_THINKING_LEVELS = new Set<string>(["xhigh", "max"]);
  * name is what goes on the wire (`reasoning_effort` on completions, `effort` on
  * responses); the map's job here is to say which levels EXIST.
  *
- * `off` is set to `null`, matching pi-ai's own builtin opencode records. That
- * is not a claim about models.dev (which publishes no "off") but a transport
- * requirement: see the inline comment. The host's "no level chosen" default
- * still sends nothing, exactly like OpenCode's "Default" — it is only the
- * explicit, selectable "off" row that disappears, and "off" never meant
- * anything but "no parameter" on this endpoint anyway.
+ * `off` is deliberately left absent (offered) rather than nulled: it means
+ * "send no reasoning parameter", which is a real choice the user asked to keep
+ * as an explicit row. The placeholder effort pi-ai would otherwise put on the
+ * wire for it (`"none"` by default, `"off"` when explicitly chosen — neither of
+ * which pi-ai's own builtin records nor OpenCode ever send) is stripped back
+ * to "no reasoning object" by the plugin's onPayload guard in zen-provider.ts,
+ * so offering it is safe.
  *
  * `undefined` means "models.dev published no level list, so make no claim" —
  * pi-ai then falls back to its own default set. That is the honest answer for
@@ -143,16 +144,12 @@ export function thinkingLevelMapFor(
     }
   }
   if (published.size === 0) return undefined;
-  const map: Record<string, string | null> = {
-    // `off` is claimed as EXPLICITLY unsupported, and that is load-bearing
-    // beyond the offered list. pi-ai's responses transport sends
-    // `reasoning: { effort: "none" }` whenever no effort is chosen unless the
-    // map's `off` is `null` — and "none" is a value neither pi-ai's own
-    // builtin map nor OpenCode's "Default" ever sends. Absent would read as
-    // "not claimed" and still trigger the send; only `null` suppresses it.
-    off: null,
-  };
+  const map: Record<string, string | null> = {};
   for (const level of THINKING_LEVELS) {
+    // `off` stays absent (offered) rather than nulled: the user asked to keep
+    // it as an explicit choice. The placeholder effort this would otherwise
+    // put on the wire is stripped back to "no reasoning object" by the
+    // plugin's onPayload guard (see zen-provider.ts), so offering it is safe.
     if (level === "off") continue;
     if (published.has(level)) map[level] = level;
     else if (!OPT_IN_THINKING_LEVELS.has(level)) map[level] = null;

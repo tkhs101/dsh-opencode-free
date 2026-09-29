@@ -93,10 +93,9 @@ dsh plugin --profile web remove dsh-opencode-free
 
 所有模型都支援推理和工具呼叫。DSH 的推理等級會直接傳給上游；可選的等級逐模型取自
 models.dev——Muse Spark 是 `minimal`…`xhigh`，Space Bunny 是 `low`…`max`，模型沒
-發布的等級不會出現在選項裡。沒有明確的 "off" 選項：不選等級就不送推理參數，跟
-OpenCode 的 "Default" 完全一樣。（之前的版本留著 off，結果 responses 通道在沒選等
-級時會送 `effort: "none"`——這是 pi-ai 自己的紀錄和 OpenCode 都不會送的值。）沒有選
-的話，Muse Spark 使用 `xhigh`。
+發布的等級不會出現在選項裡。`off` 保留為顯式選項；選它或不選等級都不送推理參數，
+跟 OpenCode 的 "Default" 完全一樣（請求路徑會把 pi-ai 原本要送的佔位 effort 拿掉）。
+沒有選的話，Muse Spark 使用 `xhigh`。
 
 每個模型的識圖能力、上下文大小與最大輸出同樣讀自 models.dev：只有在模型宣告支援
 圖片時才會附上截圖，選擇器裡的上下文數字也是該模型自己的，而不是抄另一個模型的。

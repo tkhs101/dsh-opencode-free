@@ -721,6 +721,7 @@ function compatRequestOptions<T extends StreamOptions>(
   // stale incoming header can never mismatch it.
   const rawKey = (options as { apiKey?: unknown } | undefined)?.apiKey;
   const effectiveApiKey = typeof rawKey === "string" && rawKey.trim() ? rawKey : "public";
+  const incomingPayload = (options as { onPayload?: unknown } | undefined)?.onPayload;
   return {
     ...options,
     apiKey: effectiveApiKey,
@@ -735,6 +736,29 @@ function compatRequestOptions<T extends StreamOptions>(
       options?.fetch as FetchFunction | undefined,
       recorder,
     ) as T["fetch"],
+    // "off" is offered as an explicit level (the user asked to keep it), but
+    // pi-ai renders it as `reasoning: { effort: "none" }` by default and as
+    // `effort: "off"` when explicitly chosen on the responses channel — two
+    // values neither pi-ai's own records nor OpenCode ever send. This strips
+    // exactly those placeholders back to "no reasoning object", which is what
+    // OpenCode's "Default" sends. Real levels pass through untouched, and a
+    // caller-provided onPayload runs first so its edits are what get checked.
+    onPayload: (async (payload: unknown, model: never) => {
+      let next = payload as Record<string, unknown>;
+      if (typeof incomingPayload === "function") {
+        const out = await (incomingPayload as (p: never, m: never) => unknown)(payload as never, model);
+        if (out !== undefined) next = out as Record<string, unknown>;
+      }
+      const reasoning = next?.reasoning;
+      if (reasoning !== null && typeof reasoning === "object") {
+        const effort = (reasoning as { effort?: unknown }).effort;
+        if (effort === "none" || effort === "off") {
+          const { reasoning: _dropped, ...rest } = next;
+          return rest;
+        }
+      }
+      return next === payload ? undefined : next;
+    }) as T["onPayload"],
     headers: {
       ...headers,
       Authorization: `Bearer ${effectiveApiKey}`,
