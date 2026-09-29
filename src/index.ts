@@ -115,6 +115,7 @@ interface HostContext {
   readonly llm: {
     readonly registerAdapter: (providers: readonly string[], adapter: unknown) => unknown;
   };
+  readonly get: (key: string) => unknown;
   readonly [key: string]: unknown;
 }
 
@@ -156,7 +157,7 @@ export function apply(ctx: HostContext, config?: Config): void {
         throw new LlmError("OpenCode Zen authorization failed", "AUTH_FAILED");
       }
     },
-    resolveAttachments: () => undefined,
+    resolveAttachments: () => ctx.get("attachments"),
   } as unknown as PiAiAdapterOptions);
   ctx.llm.registerAdapter([PROVIDER_ID], adapter);
 
