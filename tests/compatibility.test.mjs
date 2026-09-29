@@ -440,6 +440,115 @@ test('GUARD: the availability check is one cheap catalogue GET, in 9router\'s sh
   assert.deepEqual([...mixed], ['big-pickle'])
 })
 
+test('GUARD: a model that only answers on another channel is alive, not dead', async () => {
+  // The bug this whole change exists for. Our channel comes from the
+  // models.dev record, and Zen publishes no way to look up which endpoint a
+  // model is served on — 9router hard-codes it, we infer it. A wrong inference
+  // is answered with "model not supported", the same sentence a dead model
+  // produces, so one wrong guess did not report a routing mistake: it removed a
+  // working model from the picker PERMANENTLY. A liveness check that can be
+  // defeated by its own routing is not a liveness check.
+  //
+  // A stub prober, deliberately: this asserts the ROUTING DECISION, and
+  // hand-writing fixtures for three different SDK stream parsers would test the
+  // SDKs instead. The error classification is covered by the real-wire tests
+  // below.
+  const model = { id: 'mystery-free', api: 'openai-completions' }
+  const asked = []
+  const provider = {
+    streamSimple: (m) => {
+      asked.push(m.api)
+      return {
+        result: async () => (m.api === 'openai-completions'
+          ? { stopReason: 'error', content: [] }              // refused here
+          : { stopReason: 'stop', content: [{ type: 'text', text: 'OK' }] }),
+      }
+    },
+  }
+  const outcome = await probeModel(model, { provider, apiKey: 'public' })
+  assert.equal(outcome.kind, 'ok', 'a model alive on another channel is ok')
+  assert.equal(asked[0], 'openai-completions', 'the inferred channel is tried first')
+  assert.ok(asked.length >= 2, `an unanswered channel does not end the sweep (asked ${asked.length})`)
+  assert.ok(new Set(asked).size === asked.length, 'no channel is asked twice')
+  // A channel swap must not carry the previous channel's transport overrides.
+  const swapped = asked.slice(1)
+  assert.ok(swapped.length > 0 && !swapped.includes('openai-completions'))
+})
+
+test('GUARD: dead is only concluded after every channel has refused', async () => {
+  // The other half of the guarantee: the retry must not become a loophole that
+  // makes a genuinely gone model immortal. Three refusals, then gone.
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  let calls = 0
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => {
+      calls += 1
+      return new Response(JSON.stringify({ error: { message: 'model not found' } }), {
+        status: 404, headers: { 'Content-Type': 'application/json' },
+      })
+    },
+  })
+  assert.equal(outcome.kind, 'dead', 'a model no channel serves is dead')
+  assert.equal(outcome.code, 'dead')
+  assert.equal(outcome.http, 404)
+  assert.ok(calls >= 2, `all channels were asked (asked ${calls})`)
+})
+
+test('GUARD: a gate or a quota wall is never retried on another channel', async () => {
+  // Both are properties of the caller, not the model, and retrying would spend
+  // the very quota that is already exhausted — three times over.
+  for (const [status, body, expect] of [
+    [403, '{"error":{"type":"FreeTierError","message":"only be used in OpenCode"}}', 'anon-gated'],
+    [429, '{"error":{"type":"FreeUsageLimitError"}}', 'quota-exhausted'],
+    [401, '{"error":{"message":"Invalid API key provided"}}', 'bad-key'],
+  ]) {
+    const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+    const model = p.getModels().find((m) => m.api === 'openai-completions')
+    let calls = 0
+    const outcome = await probeModel(model, {
+      provider: p,
+      apiKey: 'public',
+      fetchImpl: async () => {
+        calls += 1
+        return new Response(body, { status, headers: { 'Content-Type': 'application/json' } })
+      },
+    })
+    assert.equal(outcome.code, expect, `HTTP ${status}`)
+    assert.equal(calls, 1, `HTTP ${status} costs exactly one request, not one per channel`)
+  }
+})
+
+test('GUARD: the strongest conclusion across channels wins, not the last one', async () => {
+  // Three channels produce three different failures, and the last is not
+  // automatically the truest. A positive "gone" must not be overwritten by a
+  // later "no conclusion" — that verdict is the only one that removes a model.
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  let calls = 0
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => {
+      calls += 1
+      // First channel: positive gone. Later ones: an empty stream, which is
+      // only "no conclusion".
+      if (calls === 1) {
+        return new Response(JSON.stringify({ error: { message: 'Model does not exist' } }), {
+          status: 404, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    },
+  })
+  assert.ok(calls >= 2, 'it retried')
+  assert.equal(outcome.kind, 'dead', 'the positive signal survives the weaker later ones')
+})
+
 test('GUARD: placeholder efforts never reach the wire', async () => {
   // "off" is offered as an explicit level, but pi-ai renders it as
   // `reasoning: { effort: "none" }` when nothing is chosen and as

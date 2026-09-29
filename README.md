@@ -171,8 +171,12 @@ them all again. This is the only way back, so it is worth knowing before you
 rely on the smaller list.
 
 A model counts as gone when the route answers that it will not serve it —
-`Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. The last
-of those is what most of the catalogue currently hits: **most models models.dev
+`Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. Zen does
+not publish which endpoint serves a given model, so a wrong guess at the
+channel is answered with the same "not supported" sentence; the plugin therefore
+asks each of the three endpoints before it is willing to call a model gone, and
+a model that answers on any of them is reported alive. The last of those is what
+most of the catalogue currently hits: **most models models.dev
 lists at zero cost are not actually served on this provider at all** — with or
 without a key — so a first probe typically narrows the list from around 34 to
 about 10, and because the verdict is final that is a one-time cost rather than

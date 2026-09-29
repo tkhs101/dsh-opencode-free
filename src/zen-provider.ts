@@ -450,8 +450,14 @@ export function classifyZenFailure(status: number, bodyText: string): ZenFailure
 // requires (applyAnonymousToolGate — a tool-less probe 403s on every model,
 // see docs/reverse-engineering.md §8), and maps upstream failures to guidance.
 
-/** Shortest prompt that still yields a non-empty text reply. */
-const PROBE_PROMPT = "Reply with OK only.";
+/**
+ * The shortest thing a model will answer. A bare greeting, not an instruction:
+ * asking for a specific token ("Reply with OK only") spends reasoning budget
+ * satisfying a format the probe does not care about, and a model that reasons
+ * before it answers can run the budget out before emitting anything at all.
+ * 9router's per-model test uses `"hi"` for the same reason.
+ */
+const PROBE_PROMPT = "hi";
 /**
  * Reasoning models spend 64+ tokens thinking before any text, so a smaller
  * budget returns an empty completion and would read as "dead" (false
@@ -462,8 +468,13 @@ const PROBE_PROMPT = "Reply with OK only.";
  * #3010. See scripts/test-live.mjs for the live check.
  */
 const PROBE_MAX_TOKENS = 1024;
-/** Same per-model ceiling as scripts/test-live.mjs. */
-const PROBE_TIMEOUT_MS = 30_000;
+/**
+ * Same per-model ceiling as scripts/test-live.mjs, and the same 15s 9router's
+ * per-model test uses. The round is sequential over the whole catalogue, so the
+ * per-model ceiling is the round's worst case multiplied: 30s here was up to
+ * twice the wait for an answer that is either immediate or never coming.
+ */
+const PROBE_TIMEOUT_MS = 15_000;
 
 /**
  * Upstream wording that means *this model* is gone, as opposed to a gate, an
@@ -668,7 +679,75 @@ function hasAnswer(result: Record<string, unknown> | undefined): boolean {
  * `inconclusive` rather than rejecting, so one bad model cannot abort a
  * catalogue-wide probe run.
  */
-export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
+/**
+ * The three endpoints Zen serves a model on. A model is only alive on ONE of
+ * them, and which one is not published: 9router has to hard-code it (a set for
+ * the Muse Spark family, another for `union-alpha`, plus a family regex), while
+ * this plugin infers a channel from the models.dev record.
+ *
+ * That inference is the weak link, and it fails in the worst possible way. A
+ * request down the wrong channel is refused with "model not supported" — which
+ * reads exactly like a dead model. So a single wrong guess did not report a
+ * routing mistake, it removed a working model from the picker permanently.
+ * Asking the other channels before concluding anything is what makes the
+ * verdict mean what it says: 9router's per-model test never hits this because
+ * it always routes by its own hard-coded table, never by inference.
+ */
+const ZEN_CHANNELS: readonly Api[] = ["openai-completions", "openai-responses", "anthropic-messages"];
+
+/** The inferred channel first, then the rest. */
+function probeChannels(model: Model<Api>): Api[] {
+  return [model.api, ...ZEN_CHANNELS.filter((api) => api !== model.api)];
+}
+
+/**
+ * Whether a failure could be this channel's fault rather than the model's.
+ *
+ * Only these are worth a second request. A gate (403) or a quota wall (429) is
+ * channel-independent and retrying would spend the very quota being exhausted;
+ * a timeout or a dead socket means the channel ACCEPTED the request, so the
+ * model was reachable. Everything else — "not supported", "not found", a 4xx
+ * the route rejected, or no conclusion at all — is exactly what the wrong
+ * channel looks like.
+ */
+/**
+ * Whether a conclusion is about the CALLER rather than the model, and so would
+ * come back identical on every channel. A gate, an exhausted quota and a
+ * rejected key are the same on all three endpoints, and asking again would
+ * spend the very quota that is already gone.
+ */
+function isCallerScoped(outcome: ProbeOutcome): boolean {
+  // Only a failure carries a code; an `ok` never reaches here, but the type
+  // says so and the check should not pretend otherwise.
+  if (outcome.kind === "ok") return false;
+  if (outcome.code === "anon-gated" || outcome.code === "quota-exhausted" || outcome.code === "bad-key") return true;
+  // 403/429 only when it is NOT a "this model is gone" verdict: that sentence
+  // is the wrong channel talking, and it must still be retried elsewhere.
+  if (outcome.kind !== "dead" && (outcome.http === 403 || outcome.http === 429)) return true;
+  return false;
+}
+
+/**
+ * How much a conclusion is worth, so a later channel's weaker answer cannot
+ * overwrite a stronger one. Asking three channels means seeing three different
+ * failures, and the LAST one is not automatically the truest: a positive "this
+ * model is gone" outranks a later "no conclusion", because `dead` is the only
+ * verdict that removes a model and it must not be lost to noise.
+ */
+function strength(outcome: ProbeOutcome): number {
+  if (outcome.kind === "ok") return 3;
+  if (outcome.kind === "dead") return 2;
+  return 1;
+}
+
+/**
+ * Send one minimal request to `model` on its current channel and classify it.
+ *
+ * Never throws: a probe that cannot reach a conclusion returns
+ * `inconclusive` rather than rejecting, so one bad model cannot abort a
+ * catalogue-wide probe run.
+ */
+async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
   const recorder = createRecordingFetch(deps.fetchImpl ?? globalThis.fetch);
   const context = {
     messages: [{ role: "user", content: PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() }],
@@ -720,9 +799,6 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
       http: status,
     };
   }
-  if (isModelUnavailableFailure(status, body)) {
-    return { kind: "dead", reason: `上游回報此模型不可用（HTTP ${status}）`, code: "dead", http: status };
-  }
   // No response was ever received, so there is no status to report. Naming the
   // socket cause is the whole value of this branch: it is what separates "my
   // network is down" from "the anonymous tier is refusing", and the two need
@@ -741,12 +817,54 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
       http: 0,
     };
   }
+  if (isModelUnavailableFailure(status, body)) {
+    return {
+      kind: "dead",
+      reason: `上游回報此模型不可用（HTTP ${status}）`,
+      code: "dead",
+      http: status,
+    };
+  }
   if (status === 0) {
     const kind = classifyZenFailure(status, body);
     return { kind: "inconclusive", reason: kind, code: kind, http: 0 };
   }
   const kind = classifyZenFailure(status, body);
   return { kind: "inconclusive", reason: `${kind}（HTTP ${status}）`, code: kind, http: status };
+}
+
+/**
+ * Ask a model on each channel Zen might serve it on, and conclude only once all
+ * of them have been asked.
+ *
+ * The inferred channel goes first, so the common case still costs one request;
+ * the extra requests are spent only on a model that has already failed. A
+ * positive "this model is gone" is held, not returned, until the other channels
+ * have had their chance — because that sentence is also exactly what the wrong
+ * channel answers with, and `dead` is permanent.
+ */
+export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
+  // Null, not a placeholder conclusion: a placeholder would tie with a real
+  // inconclusive on strength and then win the "first seen wins" tie-break,
+  // replacing a transport failure with "no channel answered".
+  let last: ProbeOutcome | null = null;
+  for (const api of probeChannels(model)) {
+    // A channel swap is a different transport, so it must not inherit the
+    // previous channel's `compat` overrides — the same rule the catalogue's
+    // own builder follows when it derives a model onto a different api.
+    const variant: Model<Api> = api === model.api ? model : { ...model, api, compat: undefined };
+    const outcome = await probeOnce(variant, deps);
+    // An answer ends the question. So does anything about the caller, which
+    // every channel would report identically.
+    if (outcome.kind === "ok" || isCallerScoped(outcome)) return outcome;
+    if (last === null || strength(outcome) > strength(last)) last = outcome;
+  }
+  return last ?? {
+    kind: "inconclusive",
+    reason: "no channel answered",
+    code: "unknown",
+    http: 0,
+  };
 }
 
 /**
