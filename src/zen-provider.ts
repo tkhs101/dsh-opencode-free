@@ -26,13 +26,20 @@ import { getApiProvider, registerApiProvider } from "@earendil-works/pi-ai/compa
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import type { Catalog } from "./catalog.js";
 
 export const PROVIDER_ID = "opencode-zen-free";
 export const BASE_URL = "https://opencode.ai/zen/v1";
 const SUPPORTED_APIS = new Set(["openai-responses", "openai-completions"]);
 
-export function freeModels(): Model<Api>[] {
-  const builtin = getBuiltinModels("opencode")
+/**
+ * The pi-ai builtin free set, identity-mapped. Since the catalogue moved to
+ * `catalog.ts` (models.dev owns WHICH models are free; Zen `/models` gates
+ * availability), this is no longer the source of truth: it is the D8 offline
+ * floor and the identity `template` the derived records inherit from.
+ */
+export function builtinFreeModels(): Model<Api>[] {
+  return getBuiltinModels("opencode")
     .filter((m) => SUPPORTED_APIS.has(m.api) && Object.values(m.cost).every((cost) => cost === 0))
     .map((m) => ({
       ...m,
@@ -50,32 +57,44 @@ export function freeModels(): Model<Api>[] {
         ...STATIC_ZEN_HEADERS,
       },
     }));
-  const known = new Set(builtin.map((m) => m.id));
-  // Free-tier models that exist in the live Zen catalogue but postdate pi-ai
-  // 0.85.1's builtin list (DSH pins pi-ai, so a builtin bump is not an
-  // option). Each entry clones the mimo-v2.5-free record shape and overrides
-  // only id/name/limits. api=openai-completions is confirmed for
-  // mimo-v2.6-flash-free by pi-ai 0.87's builtin data; for the other four it
-  // is the majority-transport default (5/7 baseline entries) — a wrong guess
-  // surfaces as a model error with guidance, never silent misrouting.
-  // Limits come from models.dev (anomalyco fork, opencode provider) where
-  // published, otherwise the template's own values.
-  const template = builtin.find((m) => m.id === "mimo-v2.5-free");
-  const synthetic: Array<{ id: string; name: string; contextWindow: number; maxTokens: number }> = [
-    { id: "mimo-v2.6-flash-free", name: "MiMo-V2.6-Flash Free", contextWindow: 200_000, maxTokens: 32_000 },
-    // deepseek-v4-flash-free 已下架：models.dev 标 status="deprecated"，且实测调用失败；
-    // 只在列表里占位。合成记录只收“实时在列且未 deprecate”的模型，故不收录。
-    { id: "space-bunny-free", name: "Space Bunny Free", contextWindow: 1_048_576, maxTokens: 524_288 },
-    { id: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview Free", contextWindow: 200_000, maxTokens: 32_000 },
-    { id: "jev-1.13-free", name: "Jev 1.13 Free", contextWindow: 200_000, maxTokens: 32_000 },
-  ];
-  if (template !== undefined) {
-    for (const s of synthetic) {
-      if (known.has(s.id)) continue;
-      builtin.push({ ...template, id: s.id, name: s.name, contextWindow: s.contextWindow, maxTokens: s.maxTokens });
-    }
-  }
-  return builtin;
+}
+
+/**
+ * The identity/field template `catalog.ts` clones onto every derived record.
+ * mimo-v2.5-free is the choice because it is the most completely populated
+ * builtin free record; any builtin free record would serve. It carries the
+ * Zen identity (provider/baseUrl/headers) so catalog.ts needs no import from
+ * this module and no import cycle exists.
+ */
+export function catalogTemplate(): Model<Api> | undefined {
+  return builtinFreeModels().find((m) => m.id === "mimo-v2.5-free");
+}
+
+/**
+ * pi-ai's builtin `id -> api` table: tier 1 of D6's channel inference, and the
+ * only tier that knows a channel the published metadata cannot express.
+ */
+export function builtinKnownApis(): Map<string, Api> {
+  const known = new Map<string, Api>();
+  for (const model of getBuiltinModels("opencode")) known.set(model.id, model.api);
+  return known;
+}
+
+/**
+ * Back-compat pointer to the catalogue a live provider is using, so the
+ * exported `freeModels()` keeps reporting what the picker actually offers.
+ * It holds no state of its own — `catalog.ts` stays the single owner — and is
+ * only ever set by `zenProvider({ catalog })` at plugin startup.
+ */
+let activeCatalog: Catalog | null = null;
+
+/**
+ * The catalogue the picker offers. Post-Zen-gate when a catalogue is attached
+ * (so `listModels`, this export, and the panel's `visible` are one list), and
+ * the pi-ai builtin free set before that — the D8 offline floor.
+ */
+export function freeModels(): Model<Api>[] {
+  return activeCatalog === null ? builtinFreeModels() : activeCatalog.effectiveModels();
 }
 
 export const OPENCODE_USER_AGENT =
@@ -753,12 +772,32 @@ function withGuidance<T extends object>(stream: T, restoreShell = false): T {
 }
 
 /** Reuse pi-ai's native serializers, streaming parsers, reasoning, and tool handling. */
+export interface ZenProviderOptions {
+  /**
+   * The models.dev-derived catalogue (see `catalog.ts`). When present it owns
+   * which models are offered: `getModels()` reads its post-Zen-gate list, and
+   * `refreshModels` intersects ITS pre-gate list against Zen. Omitted, the
+   * provider falls back to the pi-ai builtin free set, which is what every
+   * pre-catalogue caller and test expects.
+   */
+  readonly catalog?: Catalog | undefined;
+}
+
 export function zenProvider(
   getSessionId: () => string | undefined = () => undefined,
   getConfigKey: () => string | undefined = () => undefined,
+  options: ZenProviderOptions = {},
 ): Provider {
   const fallbackSession = randomUUID();
-  const baseline = freeModels();
+  const catalog = options.catalog ?? null;
+  if (catalog !== null) activeCatalog = catalog;
+  // Pre-gate catalogue: the full derived set is what Zen's live list gets
+  // intersected against, so a model Zen dropped can come back when it returns.
+  const baseline = catalog === null ? builtinFreeModels() : catalog.current().models;
+  // What the picker actually offers. With no gate applied yet (first boot,
+  // or Zen never asked) this is the pre-gate list, so it is read live rather
+  // than snapshotted: a later applyZenGate() must be visible immediately.
+  const effective = (): Model<Api>[] => (catalog === null ? catalogue : catalog.effectiveModels());
   let catalogue = baseline;
   const provider = createProvider({
     id: PROVIDER_ID,
@@ -801,7 +840,9 @@ export function zenProvider(
 
   return {
     ...provider,
-    getModels: () => catalogue,
+    // With a catalogue attached this is its post-gate list, so the picker, the
+    // exported freeModels(), and the panel endpoint all report one list.
+    getModels: () => effective(),
     async refreshModels(ctx) {
       const select = (ids: Set<unknown>) => baseline.filter((m) => ids.has(m.id));
       if (ctx.stored) {
@@ -817,8 +858,16 @@ export function zenProvider(
       if (!response.ok) throw new Error(`Zen model catalogue: HTTP ${response.status}`);
       const body = (await response.json()) as { data?: { id?: unknown }[] };
       if (!Array.isArray(body.data)) throw new Error("Invalid Zen model catalogue");
-      const available = new Set(body.data.map((m) => m.id));
+      // Upstream ids are strings; anything else is not a model id we can gate on.
+      const availableIds = body.data
+        .map((m) => m.id)
+        .filter((id): id is string => typeof id === "string" && id !== "");
+      const available = new Set<unknown>(availableIds);
       const next = select(available);
+      // D3: Zen is the availability gate. Handing the live ids to the
+      // catalogue (rather than intersecting a second time here) is what keeps
+      // one computation behind both the picker and the panel's `visible`.
+      if (catalog !== null) catalog.applyZenGate(availableIds);
       await ctx.publish({
         persist: { models: next, checkedAt: Date.now() },
         update: () => { catalogue = next; },

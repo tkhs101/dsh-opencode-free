@@ -63,8 +63,11 @@ key 錯誤→檢查 key。Key 的設定路徑（plugin config 與環境變數）
   DSH 顯示訊息即指引，不另建 UI。
 - Key 設定維持雙路徑：plugin config（Desktop 可用）與環境變數（CLI 可用），
   優先順序不變；config 保持非 volatile（改 key 走 HMR 重載，現已成立）。
-- 目錄維持打包基線＋公開端點交集；不做背景自動刷新（副作用與額度成本），
+- ~~目錄維持打包基線＋公開端點交集~~；不做背景自動刷新（副作用與額度成本），
   新鮮度以重驗腳本①號燈為信號，文件載明。
+  **（已取代）** 「打包基線」改為執行時讀 models.dev 並快取，「公開端點交集」
+  仍保留為 Zen 可用性閘門；不做背景定時刷新與不耗額度的兩點不變。見
+  `docs/adr/0002-catalogue-source-of-truth.md`。
 - 訊息用語遵守專案 glossary：共用 bucket 稱匿名額度；bypass 性質在 README
   揭露一次為限，不在每次錯誤重複。
 - 尊重 ADR-0001：本版本不動會話 id 方案；匿名行為變化時重審該 ADR。

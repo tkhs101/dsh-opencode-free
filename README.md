@@ -18,7 +18,9 @@ install OpenCode, log in, get an API key, or run a separate server.
 
 ## Features
 
-- Seven free Zen models in the DSH model picker, under the `opencode-zen-free` provider.
+- Free Zen models in the DSH model picker, under the `opencode-zen-free` provider.
+  The list follows models.dev and refreshes itself; a per-model switch on the
+  plugin's detail page hides the ones you never pick.
 - Anonymous by default. A Zen API key is optional.
 - Native streaming through pi-ai: text, reasoning, tool calls, usage, and abort.
 - Tools run inside DSH. The Windows `pwsh` shell works too.
@@ -74,22 +76,49 @@ dsh plugin --profile web remove dsh-opencode-free
 Restart DSH (or let HMR reload it). Open the model picker and select a model
 under **OpenCode Zen Free**.
 
+The catalogue follows [models.dev](https://models.dev): Zen's own `/models`
+endpoint says which models exist, and models.dev says which of them are free,
+what they are called, and how large their context is. The plugin reads it in the
+background — at most once a day, never blocking a request — and caches the
+result, so a newly published free model shows up on its own. There is nothing
+to reinstall when Zen adds one.
+
+Models currently listed as free and not retired upstream:
+
 | Model | ID | Input | Context |
 |---|---|---|---|
-| Muse Spark 1.3 Free | `muse-spark-1.3-contributor-free` | text, image | 1M |
-| Muse Spark 1.2 Free | `muse-spark-1.2-contributor-free` | text, image | 1M |
-| MiMo V2.5 Free | `mimo-v2.5-free` | text, image | 200K |
+| Muse Spark 1.3 Free | `muse-spark-1.3-contributor-free` | text, image, video, audio | 1M |
+| Space Bunny Free | `space-bunny-free` | text, image, video | 1M |
+| LongCat 2.5 Preview Free | `longcat-2.5-preview-free` | text, image | 1M |
+| MiMo-V2.6-Flash Free | `mimo-v2.6-flash-free` | text, image, audio, video | 200K |
 | Nemotron 3 Ultra Free | `nemotron-3-ultra-free` | text | 1M |
-| Nemotron 3.5 Lightning Free | `nemotron-3.5-lightning-free` | text | 262K |
-| Ling 3.0 Flash Fin Free | `ling-3.0-flash-fin-free` | text | 262K |
+| Nemotron 3.5 Lightning Free | `nemotron-3.5-lightning-free` | text | 256K |
+| Ling 3.0 Flash Fin Free | `ling-3.0-flash-fin-free` | text | 256K |
 | Big Pickle | `big-pickle` | text | 200K |
 
 All models support reasoning and tool calls. DSH passes your reasoning level
 through. If you do not choose one, Muse Spark uses `xhigh`.
 
-The list is a baseline that ships with the package. The plugin does not
-refresh it in the background. When the upstream removes a model, you get a
-"model unavailable" error.
+**This table is a snapshot, not a contract.** It is here so you can recognise
+what you are picking; the live list is whatever the plugin last read. The
+plugin's detail page is where you see and change it: every model there has a
+switch that hides it from the picker, and the ones held back are named
+underneath.
+
+Two rules decide what you are offered:
+
+- A model models.dev marks `deprecated` is not offered. On this provider that
+  flag is ambiguous — it can mean the free tier ended, or only that the record
+  is stale — so retired models leave the picker and get listed by name at the
+  bottom of the card instead of disappearing silently. If a model you want is
+  missing, that is usually why; the plugin cannot tell those two cases apart
+  for you.
+- A model Zen no longer serves is not offered either, for the same reason.
+
+Offline, and on a first start: with neither network nor a cached copy, the
+plugin falls back to the model set that ships inside pi-ai, so the picker still
+works and the card says it is showing the built-in fallback. A failed refresh
+never empties the list.
 
 ## Configuration
 

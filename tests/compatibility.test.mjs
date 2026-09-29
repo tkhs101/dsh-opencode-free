@@ -70,7 +70,19 @@ test('registers opencode-zen-free through the PiAiAdapter seam', async () => {
     transport: 'sse',
   })
   const registered = []
-  const fakeCtx = { llm: { registerAdapter: (routes, adapter) => { registered.push([routes, adapter]) } } }
+  // `apply()` also wires the catalogue routes through a `webServer` inject. This
+  // stub keeps it on its normal path — and its "webServer wiring failed"
+  // degradation warn quiet — without pretending the routes are exercised here:
+  // tests/model-visibility.test.mjs is where their contract is asserted.
+  const fakeCtx = {
+    llm: { registerAdapter: (routes, adapter) => { registered.push([routes, adapter]) } },
+    get: () => undefined,
+    inject: (requires, applyChild) => {
+      if (!requires.includes('webServer')) return
+      applyChild({ webServer: { register: () => () => {} }, effect: (fn) => fn() })
+    },
+    effect: (fn) => fn(),
+  }
   plugin.apply(fakeCtx, {})
   assert.deepEqual(registered[0][0], [PROVIDER_ID])
   assert.ok(registered[0][1] instanceof PiAiAdapter)

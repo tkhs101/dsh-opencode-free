@@ -16,7 +16,9 @@
 
 ## 功能
 
-- 在 DSH 模型選單的 `opencode-zen-free` provider 下提供 7 個 Zen 免費模型。
+- 在 DSH 模型選單的 `opencode-zen-free` provider 下提供 Zen 免費模型。
+  清單跟著 models.dev 走並自行更新；插件詳情頁上每個模型都有開關，可以把不
+  會用到的隱藏起來。
 - 預設匿名使用，Zen API key 是可選的。
 - 透過 pi-ai 原生串流：文字、推理、工具呼叫、用量與中斷。
 - 工具在 DSH 內執行，Windows 的 `pwsh` 也能用。
@@ -71,21 +73,41 @@ dsh plugin --profile web remove dsh-opencode-free
 
 重啟 DSH（或等 HMR 重載），打開模型選單，選擇 **OpenCode Zen Free** 下的模型。
 
+模型清單跟著 [models.dev](https://models.dev) 走：Zen 自己的 `/models` 端點負責
+「有哪些模型」，models.dev 負責「哪些是免費的、叫什麼名字、上下文多大」。插件在背景
+讀取（最多一天一次，且不阻塞任何請求）並快取結果，所以上游新發布的免費模型會自己
+出現；Zen 加了模型不必重裝插件。
+
+目前被列為免費、且上游未標記停止維護的模型：
+
 | 模型 | ID | 輸入 | 上下文 |
 |---|---|---|---|
-| Muse Spark 1.3 Free | `muse-spark-1.3-contributor-free` | 文字、圖片 | 1M |
-| Muse Spark 1.2 Free | `muse-spark-1.2-contributor-free` | 文字、圖片 | 1M |
-| MiMo V2.5 Free | `mimo-v2.5-free` | 文字、圖片 | 200K |
+| Muse Spark 1.3 Free | `muse-spark-1.3-contributor-free` | 文字、圖片、影片、音訊 | 1M |
+| Space Bunny Free | `space-bunny-free` | 文字、圖片、影片 | 1M |
+| LongCat 2.5 Preview Free | `longcat-2.5-preview-free` | 文字、圖片 | 1M |
+| MiMo-V2.6-Flash Free | `mimo-v2.6-flash-free` | 文字、圖片、音訊、影片 | 200K |
 | Nemotron 3 Ultra Free | `nemotron-3-ultra-free` | 文字 | 1M |
-| Nemotron 3.5 Lightning Free | `nemotron-3.5-lightning-free` | 文字 | 262K |
-| Ling 3.0 Flash Fin Free | `ling-3.0-flash-fin-free` | 文字 | 262K |
+| Nemotron 3.5 Lightning Free | `nemotron-3.5-lightning-free` | 文字 | 256K |
+| Ling 3.0 Flash Fin Free | `ling-3.0-flash-fin-free` | 文字 | 256K |
 | Big Pickle | `big-pickle` | 文字 | 200K |
 
 所有模型都支援推理和工具呼叫。DSH 的推理等級會直接傳給上游；沒有選的話，
 Muse Spark 使用 `xhigh`。
 
-模型清單是隨套件發布的基線，插件不會在背景刷新。上游下架某個模型時，
-你會看到「模型不可用」的錯誤。
+**這張表是快照，不是合約。** 它的用途是讓你認出自己在選什麼；真正的清單是插件最後
+一次讀到的內容。到插件詳情頁就能看到並調整：每個模型都有開關，可以把它從模型選單
+隱藏；被排除的模型名稱會列在卡片下方。
+
+決定你拿到什麼的規則有兩條：
+
+- models.dev 標記 `deprecated` 的模型不會出現在選單。這家 provider 的這個標記有歧義
+  ——可能是免費層結束，也可能只是那條紀錄過時——所以被排除的模型不會無聲消失，而是
+  把名稱列在卡片下方。少了你想要的模型時，通常就是這個原因；插件無法替你分辨這兩種
+  情況。
+- Zen 已經不提供的模型同樣不會出現在選單。
+
+離線或首次啟動：既沒有網路也沒有快取時，插件會退回 pi-ai 內建的模型集，模型選單仍然
+可用，卡片會說明目前顯示的是內建兜底目錄。重新整理失敗不會讓清單變空。
 
 ## 設定
 

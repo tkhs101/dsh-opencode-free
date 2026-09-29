@@ -130,11 +130,13 @@ Pi core 壓縮時強制 `cacheRetention: "none"`，pi-ai 會吞掉自己的親�
 
 - 活目錄：`GET https://opencode.ai/zen/v1/models`（免認證公開端點，
   本機實測回 200）取 `data[].id`。
-- 過濾：只收錄 Pi 內建 `opencode` 目錄中 `api ∈ {openai-responses,
-  openai-completions}` 且 `cost` 全零的模型——能力與限額沿用 Pi 官方
-  元數據，不自己猜。
-- 對應：`freeModels()` + `zenProvider().refreshModels()`；
-  我們原樣移植（`src/zen-provider.ts`）。
+- 過濾（已改）：不再只認 Pi 內建 `opencode` 目錄。現行做法是
+  `src/catalog.ts` 讀 models.dev 的 `opencode.models`（`cost` 全零且
+  `status ≠ deprecated` 為預設可見），Pi 內建表降級為「已知通道覆蓋表」
+  與離線兜底基線。見 ADR-0002。
+- 對應：`catalog.ts` 的 `derive()`（判定與元數據映射）+
+  `zenProvider().refreshModels()`（Zen 在列這道閘門）；
+  傳輸與身份仍在 `src/zen-provider.ts`。
 
 ### 5. 加密重播：後端輪轉的 400 重試
 

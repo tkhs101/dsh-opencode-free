@@ -48,7 +48,6 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "prebuild": "tsx scripts/gen-client-models.mjs",
     "pretest": "pnpm run build",
     "prepack": "pnpm run build",
     "test": "tsx --test tests/*.test.mjs",
