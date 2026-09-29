@@ -107,13 +107,34 @@ underneath.
 
 Two rules decide what you are offered:
 
-- A model models.dev marks `deprecated` is not offered. On this provider that
-  flag is ambiguous — it can mean the free tier ended, or only that the record
-  is stale — so retired models leave the picker and get listed by name at the
-  bottom of the card instead of disappearing silently. If a model you want is
-  missing, that is usually why; the plugin cannot tell those two cases apart
-  for you.
+- A model is offered until it stops answering. The plugin sends each model one
+  short request and keeps the ones that reply. models.dev's `deprecated` flag
+  only decides whether a model is *in* the catalogue, never whether you see it:
+  on this provider that flag can mean the free tier ended, or only that the
+  record is stale, and no static field can tell those apart. A model that stops
+  answering is named at the bottom of the card instead of disappearing
+  silently. If a model you want is missing, that is usually why.
 - A model Zen no longer serves is not offered either, for the same reason.
+
+### What the availability check costs you
+
+Once a day, the plugin asks Zen one short question per model and waits for the
+answers. That is a real cost and it is worth being explicit about it:
+
+- **One round per local day, sent one at a time.** The requests are sequential
+  on purpose — they share one anonymous quota bucket, so firing them all at
+  once would spend it faster and hammer upstream.
+- **It can be turned off by not using it.** There is no separate switch: the
+  round runs when you read the model list, and the detail page's **Probe now**
+  button asks for an extra round on demand, bypassing the daily limit. If you
+  never touch the picker you never pay for it.
+- **A refused or throttled round changes nothing.** If the anonymous tier
+  gates you, the quota runs out, your key is rejected, or the network drops,
+  the plugin concludes nothing at all: the list stays exactly as it was and the
+  card says this round's results are untrustworthy. The one thing that removes
+  a model is upstream positively saying that model is gone.
+- **Hiding a model is still yours to decide.** The switch on the card is
+  independent of all of the above.
 
 Offline, and on a first start: with neither network nor a cached copy, the
 plugin falls back to the model set that ships inside pi-ai, so the picker still

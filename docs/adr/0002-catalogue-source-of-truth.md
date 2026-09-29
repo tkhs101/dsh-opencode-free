@@ -20,8 +20,8 @@ status）完全取不到，只能靠猜。
 要點在於 `status: "deprecated"` 的語義有歧義：在 opencode 這家
 provider 上，`deepseek-v4-flash-free`（免費層已結束、實測呼叫失敗）與
 `muse-spark-1.2-contributor-free`／`mimo-v2.5-free`（當時仍可用）
-被寫成同一個值。任何外部資料源都無法自動分辨這兩種情況——這是本決策
-的已知邊界，不是可以靠換資料源解決的問題。
+被寫成同一個值。這正是後來「以實測探針取代 status 判定可見性」的理由
+（見下「可見性判據（2026-09-29 修訂）」）。
 
 **Considered Options**
 
@@ -38,7 +38,7 @@ provider 上，`deepseek-v4-flash-free`（免費層已結束、實測呼叫失�
 
 **決策細節**
 
-- 免費判定：`cost` 全零。預設可見：免費且 `status ≠ "deprecated"`。
+- 免費判定：`cost` 全零。目錄 membership：`status ∈ {active, deprecated}`。
 - 可用性閘門：與 Zen `/models` 在列求交集；Zen 抓取失敗時保持現有清單，
   不收窄。交集只算一次，模型選單與詳情頁讀同一份快照。
 - 通道推導三級：Pi 內建表命中 → models.dev 訊號（有 `interleaved` 或
@@ -48,16 +48,36 @@ provider 上，`deepseek-v4-flash-free`（免費層已結束、實測呼叫失�
 - 快取：`$DSH_HOME/dsh-opencode-free/catalog.json`，只存 models 段（不存
   provider 包裝層），臨時檔＋rename 原子寫，附 ETag 做條件重驗證。
 - 失效：讀目錄時若快取超過 24h 則背景重拉，不阻塞當次請求，不設定時器
-  （延續 v0.2「不做背景自動刷新」的決定）。
+  （延續 v0.2「不做背景自動刷新」的決定；探針是唯一的例外，見下）。
 - 降級：無網路、無快取、畸形回應 → 退回 Pi 內建免費集。任何失敗都不得
   讓模型選單變空。
 
+**可見性判據（2026-09-29 修訂，取代本節原「免費且 `status ≠
+deprecated` 即預設可見」）**
+
+`status` 降級為「是否在目錄內」，可見性改由實測決定：
+
+- 每日至多一輪探針，對目錄全集按順序各發一次最小請求
+  （`max_tokens: 512`、30s 超時、帶 `read`+`bash` 工具名——匿名層沒有這兩
+  個工具名就一律 403，見 `docs/reverse-engineering.md` §8）。
+- 三態結論：`ok`（有非空文字回覆）／`dead`（**只接受正信號**：404、410，
+  或報文明確指此模型不存在／已下線）／`inconclusive`（被閘、額度用完、
+  key 失效、5xx、傳輸異常、空回覆）。`dead` 是唯一會讓模型離開選單的結論，
+  且預設不成立——單一被閘的 IP 會讓所有模型同時 403，若這算 `dead`，
+  整份清單會清空。
+- `inconclusive` 永不落盤、可見性逐字不變，只留一個「本輪不可信」旗標給
+  面板。`dead` 落盤到同一個快取檔，重啟後仍然生效。
+- 面板另有「立即探測」按鈕繞過每日限制；使用者不點也會在讀取目錄時自動觸
+  發一輪。
+- 代價要講清楚：這是每天對共享的匿名額度桶多打 N 次請求（N = 目錄集
+  合），已在 README 與 Cost Statement 披露。順序發送是刻意的限流手段。
+
 **Consequences**
 
-- 好處：新增免費模型自動出現；名稱與上限來自上游，不必手抄。
+- 好處：新增免費模型自動出現；名稱與上限來自上游，不必手抄；免費層結束
+  的模型會自己消失，不必等上游修 `status`。
 - 代價：目錄檔案多了 `$DSH_HOME` 下一份插件私有快取；首次同步要下
-  5.2MB；`status` 歧義導致部分仍可用模型被排除（面板底部列出被排除者名
-  稱，使用者需自行以 key 或等上游恢復）。
+  5.2MB；每天一輪探針請求。
 - 監控：`scripts/reverify.sh` 仍是上游行為的漂移偵測器；models.dev 改
   schema 時症狀為「清單退回兜底基線」，由 catalog 的失敗降級路徑吸收。
 
@@ -67,3 +87,7 @@ provider 上，`deepseek-v4-flash-free`（免費層已結束、實測呼叫失�
 - `package.json` 的 `prebuild` hook
 - `src/client.js` 的內聯 `MODELS` 常量（改讀宿主端點）
 - `src/zen-provider.ts` 的手寫 synthetic 列表
+- D2「`status ≠ deprecated` 才可見」規則（被上面的探針判據取代；
+  `grep -c 'isActive(record)' src/catalog.ts` = 0）
+- 面板「上游停止維護／已排除」灰字（改為「探測判定不可用」；
+  `grep -c '已停止维护' src/client.js` = 0）

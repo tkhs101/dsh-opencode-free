@@ -206,15 +206,23 @@ test('isActive retires only status=deprecated', () => {
   assert.equal(isActive({ status: 'preview' }), true)
 })
 
-test('derive splits free-active candidates from free-retired, and drops paid', () => {
+test('derive keeps free-deprecated models in the catalogue and drops paid', () => {
+  // D1 (model-probe) flipped the old D2 rule: `deprecated` on this provider
+  // means both "gone" and "stale record" (muse-spark-1.2 and mimo-v2.5 are
+  // deprecated and still answer; deepseek-v4-flash-free is deprecated and
+  // dead), so no static field can decide visibility. `status` now only decides
+  // membership; a probe decides visibility, which is why `excluded` is empty
+  // here and only a `dead` verdict can ever fill it.
   const { candidates, excluded } = derive(modelsDict(), { template: template() })
   assert.deepEqual(ids(candidates).sort(), [
     'big-pickle',
+    'deepseek-v4-flash-free',
     'ling-3.0-flash-fin-free',
+    'muse-spark-1.2-contributor-free',
     'muse-spark-1.3-contributor-free',
     'space-bunny-free',
   ])
-  assert.deepEqual(excluded, ['deepseek-v4-flash-free', 'muse-spark-1.2-contributor-free'])
+  assert.deepEqual(excluded, [], 'derivation retires nothing; only a probe may')
   assert.ok(!ids(candidates).includes('gpt-6-astra'), 'paid model must not be offered')
 })
 
@@ -339,11 +347,13 @@ test('GUARD: fetchSection output feeds derive directly from a real api.json body
   const { candidates, excluded } = derive(result.section, { template: template() })
   assert.deepEqual(ids(candidates).sort(), [
     'big-pickle',
+    'deepseek-v4-flash-free',
     'ling-3.0-flash-fin-free',
+    'muse-spark-1.2-contributor-free',
     'muse-spark-1.3-contributor-free',
     'space-bunny-free',
   ])
-  assert.deepEqual(excluded, ['deepseek-v4-flash-free', 'muse-spark-1.2-contributor-free'])
+  assert.deepEqual(excluded, [], 'derivation retires nothing; only a probe may')
 })
 
 test('fetchSection returns the models dictionary and the etag on 200', async () => {
@@ -462,7 +472,7 @@ test('readCache rejects a file still carrying the old `opencode` field', async (
 
 // ── T3 state container ──────────────────────────────────────────────────────
 
-function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baselineModels = baseline() } = {}) {
+function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baselineModels = baseline(), probe } = {}) {
   return createCatalog({
     template: template(),
     builtinBaseline: baselineModels,
@@ -471,6 +481,7 @@ function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baseline
     fetchImpl,
     now: () => clock.t,
     ...(ttlMs === undefined ? {} : { ttlMs }),
+    ...(probe === undefined ? {} : { probe }),
   })
 }
 
@@ -512,11 +523,13 @@ test('ensureFresh revalidates past the TTL and adopts the derived catalogue', as
     await catalog.forceRefresh()
     assert.deepEqual(catalog.current().visible.sort(), [
       'big-pickle',
+      'deepseek-v4-flash-free',
       'ling-3.0-flash-fin-free',
+      'muse-spark-1.2-contributor-free',
       'muse-spark-1.3-contributor-free',
       'space-bunny-free',
     ])
-    assert.deepEqual(catalog.current().excluded, ['deepseek-v4-flash-free', 'muse-spark-1.2-contributor-free'])
+    assert.deepEqual(catalog.current().excluded, [], 'nothing is excluded before a probe')
     clock.t += 120_000
     await catalog.ensureFresh()
     assert.equal(fetchImpl.calls.length, 2)
@@ -606,19 +619,18 @@ test('a warm cache is adopted on start without touching the network', async () =
   })
 })
 
-test('the Zen gate narrows visible and moves the remainder into excluded', async () => {
+test('the Zen gate narrows visible; the remainder is unprobed, not excluded', async () => {
   await withTempDir(async (dir) => {
     const catalog = catalogWith({ dir, fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]) })
     await catalog.forceRefresh()
     catalog.applyZenGate(['big-pickle', 'space-bunny-free', 'not-in-catalogue'])
     const state = catalog.current()
     assert.deepEqual(state.visible, ['big-pickle', 'space-bunny-free'])
-    assert.deepEqual(state.excluded, [
-      'deepseek-v4-flash-free',
-      'ling-3.0-flash-fin-free',
-      'muse-spark-1.2-contributor-free',
-      'muse-spark-1.3-contributor-free',
-    ])
+    // D1 dropped the old "free but not offered" bucket on purpose: a model Zen
+    // does not list is indistinguishable from one it deleted outright, and a
+    // probe settles that (404 -> dead -> excluded). Do not resurrect the
+    // bucket just to keep the list explicable.
+    assert.deepEqual(state.excluded, [], 'excluded is a probe verdict, not a gate artifact')
     assert.deepEqual(ids(catalog.effectiveModels()), ['big-pickle', 'space-bunny-free'])
   })
 })
@@ -682,5 +694,308 @@ test('the snapshot is a copy, so callers cannot mutate catalogue state', async (
     state.models.push({ ...template(), id: 'injected' })
     state.visible.push('injected')
     assert.ok(!catalog.current().visible.includes('injected'))
+  })
+})
+
+// ── T4 availability probe (model-probe D2–D6) ───────────────────────────────
+
+/** The verdict text `probeModel` produces, kept out of the assertions below. */
+const DEAD = (status) => ({ kind: 'dead', reason: `probe says gone (HTTP ${status})` })
+
+/**
+ * A prober that records call order and never overlaps. The round spends a
+ * shared anonymous-quota bucket, so "sequential" is a cost property rather
+ * than a style choice — which is why it is asserted and not assumed.
+ */
+function recordingProber(verdicts = {}) {
+  const calls = []
+  let inFlight = 0
+  let overlapped = false
+  const probe = async (model) => {
+    calls.push(model.id)
+    inFlight += 1
+    if (inFlight > 1) overlapped = true
+    await tick()
+    inFlight -= 1
+    return verdicts[model.id] ?? { kind: 'ok' }
+  }
+  probe.calls = calls
+  probe.overlapped = () => overlapped
+  return probe
+}
+
+/** A catalogue carrying the real derived set, ready to probe. */
+async function probedCatalog(dir, probe, clock = { t: 1_000_000 }) {
+  const catalog = catalogWith({
+    dir,
+    clock,
+    fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]),
+    probe,
+  })
+  await catalog.forceRefresh()
+  return catalog
+}
+
+const DERIVED = [
+  'big-pickle',
+  'deepseek-v4-flash-free',
+  'ling-3.0-flash-fin-free',
+  'muse-spark-1.2-contributor-free',
+  'muse-spark-1.3-contributor-free',
+  'space-bunny-free',
+]
+
+test('a round covers the whole pre-gate catalogue, in order, one at a time', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber()
+    const catalog = await probedCatalog(dir, probe)
+    // Gate first, to prove the round covers the pre-gate set and not the
+    // narrowed one: a model Zen does not list still deserves a verdict.
+    catalog.applyZenGate(['big-pickle', 'space-bunny-free'])
+    await catalog.forceProbes()
+    assert.deepEqual(
+      probe.calls,
+      catalog.current().models.map((m) => m.id),
+      'every derived model, in catalogue order',
+    )
+    assert.deepEqual(probe.calls.slice().sort(), DERIVED, 'and that is the whole derived set')
+    assert.equal(probe.overlapped(), false, 'requests must not overlap')
+  })
+})
+
+test('dead removes a model from the picker and names it in excluded; ok changes nothing', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber({ 'deepseek-v4-flash-free': DEAD(404) })
+    const catalog = await probedCatalog(dir, probe)
+    const before = catalog.current().visible.slice().sort()
+    assert.deepEqual(before, DERIVED)
+    await catalog.forceProbes()
+    const state = catalog.current()
+    assert.ok(!state.visible.includes('deepseek-v4-flash-free'), 'a dead model leaves the picker')
+    assert.deepEqual(state.excluded, ['deepseek-v4-flash-free'], 'and is reported, not silently dropped')
+    assert.equal(state.visible.length, before.length - 1, 'an ok verdict adds nothing back')
+    assert.equal(state.probeInconclusive, false)
+    assert.equal(state.probedAt, 1_000_000)
+  })
+})
+
+test('D5 GUARD: an all-gated round leaves visibility unchanged and persists no verdict', async () => {
+  await withTempDir(async (dir) => {
+    // The failure this whole design exists to prevent: one gated egress IP
+    // makes every model answer 403 at once, and if that reached `dead` the
+    // entire catalogue would empty itself.
+    const gated = { kind: 'inconclusive', reason: 'anon-gated (HTTP 403)' }
+    const probe = recordingProber(Object.fromEntries(DERIVED.map((id) => [id, gated])))
+    const catalog = await probedCatalog(dir, probe)
+    const before = catalog.current()
+    await catalog.forceProbes()
+    const after = catalog.current()
+    assert.deepEqual(after.visible, before.visible, 'visibility unchanged')
+    assert.deepEqual(after.excluded, [], 'nothing excluded')
+    assert.equal(after.probeInconclusive, true, 'the panel is told the round is untrustworthy')
+    // `inconclusive` is never persisted, only the round marker — so a fully
+    // gated day does not re-probe on every read.
+    const onDisk = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+    assert.equal(onDisk.probes, undefined, 'no inconclusive verdict is ever written')
+    assert.equal(onDisk.lastProbeAt, 1_000_000, 'the round marker is written anyway')
+  })
+})
+
+test('a prober that rejects is treated as no conclusion, not as dead', async () => {
+  await withTempDir(async (dir) => {
+    const probe = async (model) => {
+      if (model.id === 'big-pickle') throw new Error('probe transport exploded')
+      return { kind: 'ok' }
+    }
+    const catalog = await probedCatalog(dir, probe)
+    const before = catalog.current().visible.slice()
+    await catalog.forceProbes()
+    const after = catalog.current()
+    assert.deepEqual(after.visible, before, 'a thrown prober must not narrow anything')
+    assert.equal(after.probeInconclusive, true)
+  })
+})
+
+test('probing is a no-op without a prober, and never throws', async () => {
+  await withTempDir(async (dir) => {
+    const catalog = await probedCatalog(dir, undefined)
+    await catalog.forceProbes()
+    await catalog.runProbes()
+    assert.equal(catalog.current().probedAt, 0, 'no prober, no round marker')
+  })
+})
+
+test('runProbes allows one round per local day; forceProbes ignores the gate', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber()
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.runProbes()
+    assert.equal(probe.calls.length, DERIVED.length)
+    await catalog.runProbes()
+    assert.equal(probe.calls.length, DERIVED.length, 'same day: no second round')
+    await catalog.forceProbes()
+    assert.equal(probe.calls.length, DERIVED.length * 2, 'the manual button always asks')
+    probe.calls.length = 0
+    const clock = { t: new Date(2026, 8, 30, 12, 0, 0).getTime() }
+    const later = catalogWith({
+      dir,
+      clock,
+      fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]),
+      probe,
+    })
+    await later.forceRefresh()
+    await later.runProbes()
+    assert.equal(probe.calls.length, DERIVED.length, 'a new local day permits one round')
+  })
+})
+
+test('the daily gate compares local calendar days, not a rolling 24 hours', async () => {
+  await withTempDir(async (dir) => {
+    // Pinned deliberately: a rolling 24h window would allow a second round
+    // 23h59m after the first. The other edge, 23:50 then 00:10, IS allowed,
+    // because those are different days — see probedToday() in catalog.ts.
+    const probe = recordingProber()
+    const catalog = await probedCatalog(dir, probe, { t: new Date(2026, 8, 29, 12, 0, 0).getTime() })
+    await catalog.runProbes()
+    assert.equal(probe.calls.length, DERIVED.length)
+    const sameDay = catalogWith({
+      dir,
+      clock: { t: new Date(2026, 8, 29, 23, 50, 0).getTime() },
+      fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]),
+      probe,
+    })
+    await sameDay.forceRefresh()
+    await sameDay.runProbes()
+    assert.equal(probe.calls.length, DERIVED.length, 'same local day: no second round')
+    const nextDay = catalogWith({
+      dir,
+      clock: { t: new Date(2026, 8, 30, 0, 10, 0).getTime() },
+      fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]),
+      probe,
+    })
+    await nextDay.forceRefresh()
+    await nextDay.runProbes()
+    assert.equal(probe.calls.length, DERIVED.length * 2, 'a new local day permits one round')
+  })
+})
+
+test('concurrent probe calls share one round', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber()
+    const catalog = await probedCatalog(dir, probe)
+    await Promise.all([catalog.forceProbes(), catalog.forceProbes(), catalog.forceProbes()])
+    assert.equal(probe.calls.length, DERIVED.length, 'one round, not three')
+  })
+})
+
+test('verdicts round-trip through the cache file and survive a restart', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber({ 'muse-spark-1.2-contributor-free': DEAD(410) })
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.forceProbes()
+    const onDisk = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+    assert.deepEqual(Object.keys(onDisk.probes).sort(), DERIVED.slice().sort(), 'ok is recorded too')
+    assert.equal(onDisk.probes['muse-spark-1.2-contributor-free'].verdict, 'dead')
+    assert.equal(onDisk.probes['muse-spark-1.2-contributor-free'].at, 1_000_000)
+
+    // A restart adopts the verdicts without probing: the dead model must not
+    // reappear just because the process restarted.
+    const restarted = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([]),
+      baselineModels: [],
+      probe: async () => {
+        throw new Error('must not probe on a warm start')
+      },
+    })
+    assert.equal(await waitFor(() => restarted.current().source === 'models.dev'), true)
+    assert.deepEqual(restarted.current().excluded, ['muse-spark-1.2-contributor-free'])
+    assert.ok(!restarted.current().visible.includes('muse-spark-1.2-contributor-free'))
+  })
+})
+
+test('a cache with no probes field is "never probed", not an error', async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({ version: CACHE_VERSION, etag: '"v1"', fetchedAt: 1_000_000, models: modelsDict() }),
+      'utf8',
+    )
+    const catalog = catalogWith({ dir, fetchImpl: scriptedFetch([]), baselineModels: [] })
+    assert.equal(await waitFor(() => catalog.current().source === 'models.dev'), true)
+    const state = catalog.current()
+    assert.deepEqual(state.visible.slice().sort(), DERIVED, 'everything is offered again')
+    assert.deepEqual(state.excluded, [])
+    assert.equal(state.probedAt, 0)
+  })
+})
+
+test('effectiveModels and the panel visible stay one set after a probe', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber({ 'big-pickle': DEAD(404), 'muse-spark-1.2-contributor-free': DEAD(404) })
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.forceProbes()
+    assert.deepEqual(ids(catalog.effectiveModels()), catalog.current().visible)
+  })
+})
+
+test('a verdict for a model the catalogue dropped is discarded, not kept forever', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber({ 'space-bunny-free': DEAD(404) })
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.forceProbes()
+    assert.ok(catalog.current().excluded.includes('space-bunny-free'))
+    // Upstream removes it entirely; nothing will ever probe it again, so its
+    // verdict would sit in `excluded` forever.
+    const reSynced = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([fakeResponse({ body: apiBodyWith({ 'big-pickle': modelsDict()['big-pickle'] }) })]),
+      baselineModels: [],
+    })
+    await reSynced.forceRefresh()
+    assert.deepEqual(reSynced.current().excluded, [], 'a vanished model leaves the report too')
+  })
+})
+
+test('GUARD: a warm start landing after a sync cannot resurrect the older catalogue', async () => {
+  await withTempDir(async (dir) => {
+    // The container must answer synchronously, so the warm start reads the
+    // cache in the background while the first ensureFresh downloads. If the
+    // warm start then adopts, the OLDER section replaces the fresher one and
+    // the picker keeps offering a model upstream has removed for a whole TTL.
+    // The download below yields, which is exactly the window: the warm start
+    // lands second.
+    const path = join(dir, 'catalog.json')
+    await writeFile(
+      path,
+      JSON.stringify({ version: CACHE_VERSION, etag: '"old"', fetchedAt: 1, models: modelsDict() }),
+      'utf8',
+    )
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const fetchImpl = scriptedFetch([
+      async () => {
+        await gate
+        return fakeResponse({ etag: '"new"', body: apiBodyWith({ 'big-pickle': modelsDict()['big-pickle'] }) })
+      },
+    ])
+    const catalog = catalogWith({ dir, fetchImpl, baselineModels: [] })
+    const syncing = catalog.forceRefresh()
+    await tick()
+    release()
+    await syncing
+    assert.deepEqual(catalog.current().visible, ['big-pickle'], 'the sync won, not the warm start')
+    // The stale record must not have been kept either: the next conditional
+    // request has to carry the etag the sync just stored.
+    const onDisk = JSON.parse(await readFile(path, 'utf8'))
+    assert.equal(onDisk.etag, '"new"')
+    const revalidated = scriptedFetch([fakeResponse({ status: 304 })])
+    const second = catalogWith({ dir, fetchImpl: revalidated, baselineModels: [] })
+    await waitFor(() => second.current().source === 'models.dev')
+    await second.forceRefresh()
+    assert.equal(revalidated.calls.length, 1)
+    assert.equal(revalidated.calls[0].headers['if-none-match'], '"new"', 'the fresh etag survived')
   })
 })

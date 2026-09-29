@@ -251,7 +251,7 @@ test('a failed fetch leaves the pi-ai builtin floor in place (D8 offline floor)'
   assert.deepEqual(ids, builtinFreeModels().map((m) => m.id).slice().sort())
 })
 
-test('derived catalogue: deprecated and paid models drop out, the rest resolve', async () => {
+test('derived catalogue: deprecated stays until a probe judges it, paid drops out', async () => {
   // The Zen identity guard (zen-provider.ts) captures the FIRST global fetch it
   // ever sees into `__dshOpenCodeFreeFetchOriginal` and delegates to it for
   // every later call, re-wrapping on each apply(). Swapping `globalThis.fetch`
@@ -283,15 +283,20 @@ test('derived catalogue: deprecated and paid models drop out, the rest resolve',
 
     const ids = await listedIds(host)
     assert.ok(ids.includes('space-bunny-free'), 'a newly published free model must appear')
-    assert.ok(!ids.includes('deepseek-v4-flash-free'), 'a deprecated free model must be dropped')
+    assert.ok(ids.includes('deepseek-v4-flash-free'), 'D1: a deprecated free model stays until a probe judges it')
     assert.ok(!ids.includes('gpt-6-astra'), 'a paid model must never enter the catalogue')
-    assert.ok(refreshed.body.excluded.includes('deepseek-v4-flash-free'), 'retired id is reported, not silently dropped')
+    // Derivation retires nothing, so `excluded` stays empty until a round
+    // returns a `dead` verdict. On this fixture no probe has run, and the
+    // lazy trigger cannot have fired: the round is async and this assertion is
+    // reached immediately after the refresh answered.
+    assert.deepEqual(refreshed.body.excluded, [], 'no probe verdict yet, so nothing is excluded')
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]
     const derived = await adapter.resolveModel(PROVIDER_ID, 'space-bunny-free')
     assert.equal(derived.id, 'space-bunny-free')
-    await assert.rejects(adapter.resolveModel(PROVIDER_ID, 'deepseek-v4-flash-free'))
+    const deprecated = await adapter.resolveModel(PROVIDER_ID, 'deepseek-v4-flash-free')
+    assert.equal(deprecated.id, 'deepseek-v4-flash-free', 'it resolves until a probe says otherwise')
 
     // Field-level mapping (channel + limits) is asserted on the seam that
     // actually owns it — the catalogue's own model records — not on the

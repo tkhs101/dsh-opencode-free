@@ -71,6 +71,19 @@ export function isActive(record: CatalogRecord): boolean {
   return record.status !== "deprecated";
 }
 
+/**
+ * D1: what the catalogue keeps — `status` absent (how models.dev says active),
+ * `active`, or `deprecated`. A `deprecated` model STAYS in the catalogue:
+ * only a probe can tell a finished free tier from a stale upstream record, and
+ * a model dropped here could never be probed or brought back (D6a). Any other
+ * status value is discarded outright.
+ */
+export function isCatalogueStatus(record: CatalogRecord): boolean {
+  const status = record.status;
+  if (status === undefined) return true;
+  return status === "active" || status === "deprecated";
+}
+
 function reasoningOptionTypes(record: CatalogRecord): string[] {
   const options = record.reasoning_options;
   if (!Array.isArray(options)) return [];
@@ -106,9 +119,14 @@ export interface DeriveOptions {
 }
 
 export interface DerivedCatalog {
-  /** Free AND active — the pre-Zen-gate catalogue. */
+  /** Free AND `status ∈ {active, deprecated}` — the pre-Zen-gate catalogue. */
   readonly candidates: Model<Api>[];
-  /** Free but not active, sorted for a stable panel rendering. */
+  /**
+   * Always empty. Derivation no longer retires anything (D1 keeps deprecated
+   * models so a probe can judge them), and the panel's `excluded` list is now
+   * a probe verdict rather than a derivation output. Retained so the result
+   * shape stays stable for callers and fixtures.
+   */
   readonly excluded: string[];
 }
 
@@ -144,24 +162,20 @@ function buildModel(record: CatalogRecord, template: Model<Api>, knownApis?: Rea
   };
 }
 
-/** Pure: models.dev models dictionary → pre-gate catalogue + retired ids. */
+/** Pure: models.dev models dictionary → pre-gate catalogue. */
 export function derive(section: CatalogRecord, options: DeriveOptions): DerivedCatalog {
   const candidates: Model<Api>[] = [];
-  const excluded: string[] = [];
   for (const [key, value] of Object.entries(section)) {
     if (!isPlainObject(value)) continue;
     const id = typeof value.id === "string" && value.id !== "" ? value.id : key;
     if (id === "") continue;
     const record: CatalogRecord = { ...value, id };
     if (!isFree(record)) continue;
-    if (!isActive(record)) {
-      excluded.push(id);
-      continue;
-    }
+    // D1: `deprecated` is kept (a probe judges it); anything else is discarded.
+    if (!isCatalogueStatus(record)) continue;
     candidates.push(buildModel(record, options.template, options.knownApis));
   }
-  excluded.sort();
-  return { candidates, excluded };
+  return { candidates, excluded: [] };
 }
 
 export interface FetchLikeResponse {
@@ -242,6 +256,49 @@ export interface CatalogCacheRecord {
   readonly fetchedAt: number;
   /** The `opencode.models` dictionary — named for what it holds, not the slice it came from. */
   readonly models: CatalogRecord;
+  /** Conclusive verdicts only; empty means "no history", i.e. all unprobed. */
+  readonly probes: ProbeMap;
+  /** When the last probe ROUND ran, whether or not it concluded anything. */
+  readonly lastProbeAt: number;
+}
+
+/** A conclusive verdict. `inconclusive` is deliberately NOT one of them. */
+export type ProbeVerdict = "ok" | "dead";
+
+export interface ProbeRecord {
+  readonly verdict: ProbeVerdict;
+  readonly at: number;
+  readonly reason?: string;
+}
+
+export type ProbeMap = Record<string, ProbeRecord>;
+
+/**
+ * What the transport layer reports for one probe. Structurally compatible with
+ * `zen-provider`'s `ProbeOutcome`; declared here so this module keeps no
+ * dependency on the transport and no import cycle is introduced. A prober may
+ * also reject, which is treated as "no conclusion" (D5).
+ */
+export interface ProbeResult {
+  readonly kind: ProbeVerdict | "inconclusive";
+  readonly reason?: string;
+}
+
+/** Read persisted verdicts defensively: a damaged entry is dropped, not fatal. */
+function readProbes(value: unknown): ProbeMap {
+  if (!isPlainObject(value)) return {};
+  const probes: ProbeMap = {};
+  for (const [id, entry] of Object.entries(value)) {
+    if (!isPlainObject(entry)) continue;
+    if (entry.verdict !== "ok" && entry.verdict !== "dead") continue;
+    if (typeof entry.at !== "number" || !Number.isFinite(entry.at)) continue;
+    probes[id] = {
+      verdict: entry.verdict,
+      at: entry.at,
+      ...(typeof entry.reason === "string" && entry.reason !== "" ? { reason: entry.reason } : {}),
+    };
+  }
+  return probes;
 }
 
 /** D5: `$DSH_HOME/dsh-opencode-free/catalog.json` (same convention as dsh-pocket). */
@@ -265,6 +322,8 @@ export async function readCache(path: string): Promise<CatalogCacheRecord | null
       etag: typeof parsed.etag === "string" ? parsed.etag : undefined,
       fetchedAt: typeof parsed.fetchedAt === "number" ? parsed.fetchedAt : 0,
       models: parsed.models,
+      probes: readProbes(parsed.probes),
+      lastProbeAt: typeof parsed.lastProbeAt === "number" && Number.isFinite(parsed.lastProbeAt) ? parsed.lastProbeAt : 0,
     };
   } catch {
     return null;
@@ -274,16 +333,30 @@ export async function readCache(path: string): Promise<CatalogCacheRecord | null
 /** Temp file + rename, so a crash mid-write can never leave a torn cache. */
 export async function writeCacheAtomic(
   path: string,
-  record: { etag: string | undefined; fetchedAt: number; models: CatalogRecord },
+  record: {
+    etag: string | undefined;
+    fetchedAt: number;
+    models: CatalogRecord;
+    probes?: ProbeMap;
+    lastProbeAt?: number;
+  },
 ): Promise<boolean> {
   const temporary = `${path}.${process.pid}.tmp`;
   try {
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(
-      temporary,
-      JSON.stringify({ version: CACHE_VERSION, etag: record.etag, fetchedAt: record.fetchedAt, models: record.models }),
-      "utf8",
-    );
+    const payload: Record<string, unknown> = {
+      version: CACHE_VERSION,
+      etag: record.etag,
+      fetchedAt: record.fetchedAt,
+      models: record.models,
+    };
+    // Probe fields are omitted until a round has something to record, so a
+    // never-probed cache keeps exactly the file shape it had before probing
+    // existed (and a catalogue sync must carry the current verdicts forward
+    // rather than silently dropping them).
+    if (record.probes !== undefined && Object.keys(record.probes).length > 0) payload.probes = record.probes;
+    if (record.lastProbeAt !== undefined && record.lastProbeAt > 0) payload.lastProbeAt = record.lastProbeAt;
+    await writeFile(temporary, JSON.stringify(payload), "utf8");
     await rename(temporary, path);
     return true;
   } catch {
@@ -293,15 +366,19 @@ export async function writeCacheAtomic(
 }
 
 export interface CatalogSnapshot {
-  /** Pre-Zen-gate catalogue (what `refreshModels` intersects). */
+  /** Pre-Zen-gate catalogue (what `refreshModels` intersects and probes). */
   readonly models: Model<Api>[];
   /** Post-gate ids: exactly what the picker offers. */
   readonly visible: readonly string[];
-  /** Free but not offered: deprecated, or absent from Zen's list. */
+  /** Models a probe judged unusable (`dead`). */
   readonly excluded: readonly string[];
   readonly source: CatalogSource;
   readonly updatedAt: number;
   readonly refreshing: boolean;
+  /** When the last probe round ran; 0 means never. */
+  readonly probedAt?: number;
+  /** The last round reached no conclusion (gated, quota, bad key, network). */
+  readonly probeInconclusive?: boolean;
 }
 
 export interface CreateCatalogOptions {
@@ -312,6 +389,12 @@ export interface CreateCatalogOptions {
   readonly knownApis?: ReadonlyMap<string, Api>;
   readonly cachePath: string;
   readonly fetchImpl: FetchLike;
+  /**
+   * Sends one minimal request per model and classifies the answer. Injected so
+   * this module keeps no transport dependency; when absent, probing is simply
+   * unavailable and every probe entry point is a no-op.
+   */
+  readonly probe?: ((model: Model<Api>) => Promise<ProbeResult>) | undefined;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly userAgent?: string;
@@ -325,6 +408,10 @@ export interface Catalog {
   ensureFresh(): Promise<void>;
   /** Ignores the TTL and waits for the sync to settle. */
   forceRefresh(): Promise<void>;
+  /** One ordered probe round; at most one per local day (D2). */
+  runProbes(): Promise<void>;
+  /** Ignores the daily gate; used by the panel button (D8). */
+  forceProbes(): Promise<void>;
   /** `null` means Zen failed: keep the current gate rather than narrowing. */
   applyZenGate(ids: readonly string[] | null): void;
 }
@@ -333,50 +420,117 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
   const { template, builtinBaseline, knownApis, cachePath: path, fetchImpl, ttlMs = DEFAULT_TTL_MS } = options;
   const now = options.now ?? Date.now;
   const userAgent = options.userAgent;
+  const probe = options.probe;
 
   let cache: CatalogCacheRecord | null = null;
   let models: Model<Api>[] = builtinBaseline.slice();
-  let retired: string[] = [];
   let source: CatalogSource = "builtin-fallback";
   let updatedAt = 0;
   let zenIds: ReadonlySet<string> | null = null;
   let inflight: Promise<void> | null = null;
+  let probes: ProbeMap = {};
+  let lastProbeAt = 0;
+  let probeUntrusted = false;
+  let probeInflight: Promise<void> | null = null;
 
   // Warm start: a valid cache restores the catalogue without any network.
   const adopt = (record: CatalogCacheRecord): void => {
     const derived = derive(record.models, { knownApis, template });
     models = derived.candidates;
-    retired = derived.excluded;
     source = "models.dev";
     updatedAt = record.fetchedAt;
+    if (Object.keys(record.probes).length > 0) probes = { ...record.probes };
+    if (record.lastProbeAt > lastProbeAt) lastProbeAt = record.lastProbeAt;
+    // Verdicts for models the catalogue no longer carries would otherwise sit
+    // in `excluded` forever, since a vanished model is never probed again.
+    // Dropping them is safe: a returning model starts unprobed, i.e. visible,
+    // and the next round judges it on evidence.
+    const present = new Set(models.map((model) => model.id));
+    for (const id of Object.keys(probes)) if (!present.has(id)) delete probes[id];
   };
 
+  /**
+   * Resolves once the warm cache read has settled.
+   *
+   * The warm start is deliberately fire-and-forget — a container must answer
+   * synchronously — but that left it free to land AFTER a sync and replace the
+   * fresher section with the older cached one, holding a removed model in the
+   * picker for a whole TTL. `sync()` therefore waits for this before fetching.
+   * The wait is one local `readFile` of the cache (megabytes, not a download)
+   * and is bounded, so a wedged filesystem delays a sync rather than hanging
+   * it forever.
+   */
+  const WARM_READ_TIMEOUT_MS = 2_000;
+  let settleWarm: () => void = () => undefined;
+  const warm = new Promise<void>((resolve) => {
+    settleWarm = resolve;
+  });
+
   const warmStart = (): void => {
-    void readCache(path).then((found) => {
-      if (found === null) return;
-      cache = found;
-      // Adopted whatever its age: a stale cache is still a far better answer
-      // than the offline floor, and `ensureFresh` revalidates on the first read
-      // in the background rather than making the user wait for 5.2MB.
-      adopt(found);
-    });
+    void readCache(path)
+      .then((found) => {
+        if (found === null) return;
+        cache = found;
+        // Adopted whatever its age: a stale cache is still a far better answer
+        // than the offline floor, and `ensureFresh` revalidates on the first read
+        // in the background rather than making the user wait for 5.2MB.
+        adopt(found);
+      })
+      .catch(() => undefined)
+      .finally(settleWarm);
   };
   warmStart();
 
   const stale = (): boolean => now() - updatedAt > ttlMs;
 
-  const effectiveExcluded = (): string[] => {
-    const excluded = new Set(retired);
-    if (zenIds !== null) for (const model of models) if (!zenIds.has(model.id)) excluded.add(model.id);
-    return [...excluded].sort();
+  /**
+   * D2: at most one round per LOCAL calendar day — the plan's rule, compared
+   * against the previous round's local day via the injected `now` so a test can
+   * place both ends exactly.
+   *
+   * Calendar day, not a rolling 24h window: the bound is on how much of the
+   * shared anonymous bucket one day's sweep may spend, and "same day" is what a
+   * user reading the panel would expect. The known edge is a round at 23:50
+   * followed by one at 00:10 — different days, so both run. That is deliberate,
+   * not an oversight; `forceProbes` bypasses this gate entirely, so a manual
+   * click is never blocked either way.
+   */
+  const probedToday = (): boolean => {
+    if (lastProbeAt <= 0) return false;
+    const previous = new Date(lastProbeAt);
+    const today = new Date(now());
+    return (
+      previous.getFullYear() === today.getFullYear() &&
+      previous.getMonth() === today.getMonth() &&
+      previous.getDate() === today.getDate()
+    );
   };
 
-  const effectiveVisible = (): string[] => {
-    if (zenIds === null) return models.map((model) => model.id);
-    return models.filter((model) => zenIds!.has(model.id)).map((model) => model.id);
+  /**
+   * The one list the picker and the panel share: the catalogue, narrowed by
+   * Zen's gate, minus everything a probe judged dead. Probing only ever
+   * REMOVES (D6d) — it can never add a model back into view.
+   */
+  const effectiveList = (): Model<Api>[] => {
+    const gated = zenIds === null ? models : models.filter((model) => zenIds!.has(model.id));
+    return gated.filter((model) => probes[model.id]?.verdict !== "dead");
   };
+
+  const effectiveExcluded = (): string[] => {
+    const present = new Set(models.map((model) => model.id));
+    return Object.keys(probes)
+      .filter((id) => probes[id].verdict === "dead" && present.has(id))
+      .sort();
+  };
+
+  const effectiveVisible = (): string[] => effectiveList().map((model) => model.id);
 
   const sync = async (): Promise<void> => {
+    // Never fetch before the warm read settles: the response below is built
+    // from `cache` (for the conditional etag) and adopted over whatever the
+    // warm start installed, so letting the two interleave either resurrects a
+    // removed model or drops the persisted probe history.
+    await Promise.race([warm, new Promise<void>((resolve) => setTimeout(resolve, WARM_READ_TIMEOUT_MS).unref?.())]);
     // R5: without a cache there is nothing a 304 could rebuild, so the
     // conditional header must not be sent at all.
     const result = await fetchSection({ fetchImpl, etag: cache?.etag, userAgent });
@@ -388,15 +542,21 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       // would revalidate again despite the catalogue being current.
       if (cache !== null) {
         cache = { ...cache, fetchedAt: stamp };
-        await writeCacheAtomic(path, { etag: cache.etag, fetchedAt: stamp, models: cache.models });
+        await writeCacheAtomic(path, {
+          etag: cache.etag,
+          fetchedAt: stamp,
+          models: cache.models,
+          probes,
+          lastProbeAt,
+        });
       }
       return;
     }
     // Retain the etag: without this every revalidation would be a full
     // 5.2MB download instead of a conditional request.
-    cache = { version: CACHE_VERSION, etag: result.etag, fetchedAt: stamp, models: result.section };
+    cache = { version: CACHE_VERSION, etag: result.etag, fetchedAt: stamp, models: result.section, probes, lastProbeAt };
     adopt(cache);
-    await writeCacheAtomic(path, { etag: result.etag, fetchedAt: stamp, models: result.section });
+    await writeCacheAtomic(path, { etag: result.etag, fetchedAt: stamp, models: result.section, probes, lastProbeAt });
   };
 
   const runSingle = (): Promise<void> => {
@@ -405,6 +565,68 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       inflight = null;
     });
     return inflight;
+  };
+
+  /**
+   * D2/D6b: one ordered round over the whole pre-gate catalogue.
+   *
+   * Sequential `for…await` on purpose (no concurrency, no batching): the round
+   * spends a shared anonymous-quota bucket, and firing 30+ requests at once
+   * would both exhaust it faster and hammer upstream.
+   *
+   * Only conclusive verdicts are recorded. An `inconclusive` — or a prober that
+   * rejects — leaves the model exactly as it was (D5): one gated IP must never
+   * empty the picker.
+   */
+  const runProbeRound = async (): Promise<void> => {
+    const stamp = now();
+    const targets = models.slice();
+    let untrusted = false;
+    for (const model of targets) {
+      let outcome: ProbeResult;
+      try {
+        outcome = await probe!(model);
+      } catch {
+        untrusted = true;
+        continue;
+      }
+      if (outcome === undefined || outcome === null || outcome.kind === "inconclusive") {
+        untrusted = true;
+        continue;
+      }
+      if (outcome.kind !== "ok" && outcome.kind !== "dead") {
+        untrusted = true;
+        continue;
+      }
+      probes[model.id] = {
+        verdict: outcome.kind,
+        at: stamp,
+        ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
+      };
+    }
+    // The round marker is written even when nothing concluded: it is the only
+    // thing that stops a fully-gated day from re-probing on every single read.
+    lastProbeAt = stamp;
+    probeUntrusted = untrusted;
+    // One atomic write per round, never per model: a half-finished round must
+    // not be read back as a complete set of verdicts.
+    if (cache !== null) {
+      await writeCacheAtomic(path, {
+        etag: cache.etag,
+        fetchedAt: cache.fetchedAt,
+        models: cache.models,
+        probes,
+        lastProbeAt,
+      });
+    }
+  };
+
+  const runProbeSingle = (): Promise<void> => {
+    if (probeInflight !== null) return probeInflight;
+    probeInflight = runProbeRound().finally(() => {
+      probeInflight = null;
+    });
+    return probeInflight;
   };
 
   return {
@@ -416,11 +638,12 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         source,
         updatedAt,
         refreshing: inflight !== null,
+        probedAt: lastProbeAt,
+        probeInconclusive: probeUntrusted,
       };
     },
     effectiveModels(): Model<Api>[] {
-      if (zenIds === null) return models.slice();
-      return models.filter((model) => zenIds!.has(model.id));
+      return effectiveList();
     },
     async ensureFresh(): Promise<void> {
       if (inflight !== null) return inflight;
@@ -429,6 +652,16 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     },
     async forceRefresh(): Promise<void> {
       return runSingle();
+    },
+    async runProbes(): Promise<void> {
+      if (probe === undefined) return;
+      if (probeInflight !== null) return probeInflight;
+      if (probedToday()) return;
+      return runProbeSingle();
+    },
+    async forceProbes(): Promise<void> {
+      if (probe === undefined) return;
+      return runProbeSingle();
     },
     applyZenGate(ids: readonly string[] | null): void {
       if (ids === null) return; // Zen failed: keep whatever gate is in force

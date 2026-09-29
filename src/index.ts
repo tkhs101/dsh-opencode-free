@@ -18,6 +18,7 @@ import type {
   Credential,
   CredentialInfo,
   CredentialStore,
+  Provider,
 } from "@earendil-works/pi-ai";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -34,8 +35,10 @@ import {
   patchCompatDirectTransport,
   patchGlobalFetchForZen,
   patchNodeHttpForZen,
+  probeModel,
   zenProvider,
 } from "./zen-provider.js";
+import type { ProbeStreamer } from "./zen-provider.js";
 
 export {
   BASE_URL,
@@ -47,13 +50,18 @@ export {
   STATIC_ZEN_HEADERS,
   ZEN_API_KEY_ENV,
   ZEN_FAILURE_GUIDANCE,
+  ZEN_TRANSPORT_GUIDANCE,
   builtinFreeModels,
   builtinKnownApis,
   catalogTemplate,
   classifyZenFailure,
+  createTransportRecorder,
+  describeTransportCause,
   freeModels,
   isEncryptedContentError,
+  isModelUnavailableFailure,
   mapTransportErrorToGuidance,
+  probeModel,
   requestHeader,
   resolveZenApiKey,
   sessionHeader,
@@ -61,6 +69,7 @@ export {
   swapCompactionPrompt,
   zenProvider,
 } from "./zen-provider.js";
+export type { ProbeDeps, ProbeOutcome, ProbeStreamer } from "./zen-provider.js";
 
 export const name = "opencode-free";
 // `webServer` backs the two read/refresh routes the detail-page panel reads;
@@ -70,6 +79,7 @@ export const inject: readonly string[] = ["llm", "webServer"];
 /** Panel routes. The prefix is package-scoped, so it cannot collide. */
 const CATALOG_ROUTE = "/dsh-opencode-free/api/catalog";
 const REFRESH_ROUTE = "/dsh-opencode-free/api/refresh";
+const PROBE_ROUTE = "/dsh-opencode-free/api/probe";
 
 /** Plugin configuration: only the optional Zen key. Everything else is automatic. */
 export interface Config {
@@ -172,6 +182,9 @@ function sendJson(res: RouteResponse, code: number, payload: unknown): void {
  * The catalogue payload the panel reads. Names and provenance only — never a
  * config value, and never the full model records (which carry request-shaping
  * internals the browser has no use for).
+ *
+ * One shape for all three routes: the probe route repaints from what it returns,
+ * so a panel that got a differently-shaped body would have to re-read anyway.
  */
 function catalogPayload(catalog: Catalog): Record<string, unknown> {
   const snapshot = catalog.current();
@@ -181,6 +194,10 @@ function catalogPayload(catalog: Catalog): Record<string, unknown> {
     source: snapshot.source,
     updatedAt: snapshot.updatedAt,
     refreshing: snapshot.refreshing,
+    // Present only once a round has run; the panel treats absence as
+    // "never probed" rather than as a fault.
+    ...(snapshot.probedAt === undefined ? {} : { probedAt: snapshot.probedAt }),
+    ...(snapshot.probeInconclusive === undefined ? {} : { probeInconclusive: snapshot.probeInconclusive }),
   };
 }
 
@@ -230,9 +247,32 @@ function registerCatalogRoutes(ctx: HostContext, catalog: Catalog): void {
             .catch(() => undefined)
             .then(() => sendJson(res, 200, catalogPayload(catalog)));
         };
+        // `runProbes`, not `forceProbes`: the button is the user's explicit
+        // "ask upstream now", so the daily gate must not swallow it. (The
+        // automatic daily round is the lazy trigger in apply() instead.)
+        const probeHandler: RouteHandler = (req, res) => {
+          if ((req.method ?? "GET").toUpperCase() !== "POST") {
+            sendJson(res, 405, { error: "method not allowed" });
+            return;
+          }
+          if (!sameOrigin(req)) {
+            sendJson(res, 403, { error: "forbidden", reason: "cross-origin" });
+            return;
+          }
+          // A round is one request per model, so it is genuinely slow; the
+          // panel shows a busy button rather than a timeout. Failures are
+          // swallowed and reported as the unchanged snapshot plus
+          // `probeInconclusive`, never as a 5xx: the round is designed to
+          // conclude nothing without that being an error (D5).
+          catalog
+            .forceProbes()
+            .catch(() => undefined)
+            .then(() => sendJson(res, 200, catalogPayload(catalog)));
+        };
         const disposers = [
           wctx.webServer.register({ kind: "prefix", path: CATALOG_ROUTE, handler: readHandler }),
           wctx.webServer.register({ kind: "prefix", path: REFRESH_ROUTE, handler: refreshHandler }),
+          wctx.webServer.register({ kind: "prefix", path: PROBE_ROUTE, handler: probeHandler }),
         ];
         wctx.effect(() => () => {
           for (const dispose of disposers) {
@@ -261,6 +301,12 @@ export function apply(ctx: HostContext, config?: Config): void {
   // Built eagerly so the provider, the picker and the panel share one instance:
   // nobody here keeps a second copy of the list.
   const template = catalogTemplate();
+  // The probe is the one thing that needs the provider, and the provider needs
+  // the catalogue, so the two are wired by handing `createCatalog` a closure
+  // that reads `provider` at call time. There is still exactly one owner of the
+  // verdicts (the catalogue) and one owner of transport (the provider): the
+  // provider is asked for a conclusion, it never remembers one.
+  let provider: Provider = undefined as unknown as Provider;
   const catalog = createCatalog({
     template: template ?? builtinFreeModels()[0]!,
     builtinBaseline: builtinFreeModels(),
@@ -268,10 +314,17 @@ export function apply(ctx: HostContext, config?: Config): void {
     cachePath: cachePath(),
     fetchImpl: ((url, init) => fetch(url, init as RequestInit) as unknown as Promise<FetchLikeResponse>) as FetchLike,
     now: Date.now,
+    // Never rejects: `probeModel` converts every failure mode, including a
+    // thrown transport error, into a three-state conclusion.
+    probe: async (model) =>
+      await probeModel(model, {
+        provider: provider as unknown as ProbeStreamer,
+        apiKey: getConfigKey() ?? "public",
+      }),
   });
   registerCatalogRoutes(ctx, catalog);
 
-  const provider = zenProvider(() => undefined, getConfigKey, { catalog });
+  provider = zenProvider(() => undefined, getConfigKey, { catalog });
   // hiddenModels arrives as a live Volatile ref under DSH (see Config docs
   // above); unwrap tolerantly so plain arrays keep working in tests.
   const rawHidden: unknown = config?.hiddenModels;
@@ -289,6 +342,13 @@ export function apply(ctx: HostContext, config?: Config): void {
       // never delays the read that triggered it. A first boot legitimately
       // reports the builtin floor until a sync lands.
       void catalog.ensureFresh().catch(() => undefined);
+      // D2: one availability round per local day, triggered the same way.
+      // Gated on a real catalogue first: probing the offline builtin floor
+      // would spend the shared anonymous bucket to re-confirm models the
+      // picker is already offering. `runProbes` no-ops when today's round
+      // already ran, so this stays a single cheap check per read.
+      const snapshot = catalog.current();
+      if (snapshot.source !== "builtin-fallback") void catalog.runProbes().catch(() => undefined);
       return provider.getModels().filter((m) => !hidden.has(m.id));
     },
     refreshModels: (c: unknown) => (provider as { refreshModels: (c: unknown) => unknown }).refreshModels(c),

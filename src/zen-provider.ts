@@ -178,8 +178,11 @@ export function stripStaleReasoning(payload: unknown): unknown | null {
 }
 
 /** Wrap fetch with a single retry that drops stale reasoning on Zen rotation. */
-export function withEncryptedContentFallback(inner?: FetchFunction): FetchFunction {
-  const base: FetchFunction = inner ?? globalThis.fetch;
+export function withEncryptedContentFallback(inner?: FetchFunction, recorder?: TransportRecorder): FetchFunction {
+  // The recorder wraps whatever fetch is really used, so it observes the same
+  // rejection the transport sees. With one, it is the base and `inner` is
+  // already folded into it — wrapping twice would only cost a hop.
+  const base: FetchFunction = recorder === undefined ? (inner ?? globalThis.fetch) : recorder.fetch;
   return (async (url: unknown, init?: unknown) => {
     const first = await (base as (u: never, i: never) => Promise<Response>)(url as never, init as never);
     if (first.status !== 400) return first;
@@ -207,6 +210,90 @@ export function withEncryptedContentFallback(inner?: FetchFunction): FetchFuncti
 
 type CompatApiEntry = ReturnType<typeof getApiProvider>;
 type SessionGetter = () => string | undefined;
+
+// ── transport-failure diagnosis ─────────────────────────────────────────────
+//
+// A socket-level failure reaches the user as a bare `Connection error.` — that
+// is the OpenAI SDK's `APIConnectionError` default message, and the SDK keeps
+// the real reason in `cause`. pi-ai then reads only `error.message`, so the
+// cause is gone by the time DSH classifies the failure. Observed live
+// 2026-09-29: a 45-minute outage rendered as nothing but "Connection error.",
+// with no way to tell a reset socket from DNS, TLS, or a proxy.
+//
+// This plugin's fetch wrapper is the last place on the request path that can
+// still see the cause, so it records it there and re-attaches it to the
+// terminal error. Nothing else about the failure is changed: the class the host
+// derives must stay exactly as it was.
+
+/**
+ * DSH classifies a failure by scanning its message for 4xx/5xx literals
+ * (`/\b5\d\d\b/`, `/\b400\b/`, `/\b429\b/`, …) BEFORE it reaches the transport
+ * rule. This detail is appended to a message whose class is already decided, so
+ * a cause carrying digits of its own — a port, a byte count — must not be able
+ * to re-file a socket kill as an upstream status error. Masking every bare
+ * three-digit run keeps the original wording authoritative.
+ *
+ * A cause that says "timeout" is the one deliberate exception: naming a
+ * connect timeout is the whole point, and DSH classes it TIMEOUT rather than
+ * TRANSPORT — the truer of the two, and retried identically (both codes sit in
+ * the same default retryable set).
+ */
+function maskStatusLikeNumbers(text: string): string {
+  return text.replace(/\b\d{3}\b/g, "###");
+}
+
+/**
+ * Flatten an error's `cause` chain into one short line: name, `code`, message.
+ * Sizes and shapes only — a transport failure carries no request body, and the
+ * Authorization value is never read from an error.
+ */
+export function describeTransportCause(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 3 && current !== undefined && current !== null; depth++) {
+    const value = current as { name?: unknown; message?: unknown; code?: unknown; cause?: unknown };
+    const name = typeof value.name === "string" && value.name !== "" ? value.name : undefined;
+    const code = typeof value.code === "string" && value.code !== "" ? value.code : undefined;
+    const message = typeof value.message === "string" ? value.message : "";
+    // A bare `TypeError: fetch failed` names no cause at all; the next link
+    // (SocketError, ECONNRESET, ENOTFOUND, …) is the actionable half.
+    const head = [name, code].filter((part) => part !== undefined).join("/") || (current instanceof Error ? "Error" : typeof current);
+    const text = message === "" || message === head ? head : `${head}: ${message}`;
+    if (!parts.includes(text)) parts.push(text);
+    current = value.cause;
+  }
+  if (parts.length === 0) return "";
+  return maskStatusLikeNumbers(parts.join(" <- "));
+}
+
+/** A fetch that remembers why it failed, for the terminal error to report. */
+export interface TransportRecorder {
+  /** The fetch to hand pi-ai: the original one, plus cause capture. */
+  readonly fetch: FetchFunction;
+  /** The recorded cause chain; undefined when no transport failure happened. */
+  detail(): string | undefined;
+}
+
+export function createTransportRecorder(inner?: FetchFunction): TransportRecorder {
+  const base: FetchFunction = inner ?? globalThis.fetch;
+  let detail: string | undefined;
+  return {
+    fetch: (async (url: unknown, init?: unknown) => {
+      try {
+        return await (base as (u: never, i: never) => Promise<Response>)(url as never, init as never);
+      } catch (error) {
+        // First cause wins: a retry that fails the same way must not replace the
+        // original diagnosis with a downstream symptom of it.
+        if (detail === undefined) {
+          const described = describeTransportCause(error);
+          if (described !== "") detail = described;
+        }
+        throw error;
+      }
+    }) as FetchFunction,
+    detail: () => detail,
+  };
+}
 
 /** Pristine compat entries, stashed on globalThis so reloads re-wrap the original. */
 const COMPAT_ORIGINALS_KEY = "__dshOpenCodeFreeCompatOriginals";
@@ -324,6 +411,16 @@ const QUOTA_PATTERN = /FreeUsageLimitError|usage[\s\S]{0,40}(exceeded|limit)|rat
 const BAD_KEY_PATTERN = /invalid[\s\S]{0,60}key|unauthorized|authentication_error/i;
 
 /**
+ * Advice for a socket-level failure, kept out of {@link ZenFailureKind} on
+ * purpose: no status was ever received, so this is not one of the HTTP classes
+ * `classifyZenFailure` decides between, and it says nothing about the request
+ * Zen would have accepted.
+ */
+export const ZEN_TRANSPORT_GUIDANCE =
+  "請求未送出或連線被中斷，沒有收到任何 HTTP 回應。這是本機到 Zen 的網路層問題，與模型、額度、key 無關；" +
+  "請檢查代理、VPN、防火牆與 DNS 後重試。";
+
+/**
  * Map an upstream failure to its actionable class. Body markers win over
  * status: a 403 carrying key text is still key trouble only when no
  * anonymity-gate marker is present, and an unrecognized 403 stays unknown
@@ -335,6 +432,221 @@ export function classifyZenFailure(status: number, bodyText: string): ZenFailure
   if (status === 429 || QUOTA_PATTERN.test(body)) return "quota-exhausted";
   if (status === 401 || BAD_KEY_PATTERN.test(body)) return "bad-key";
   return "unknown";
+}
+
+// ── availability probe (spec model-probe D3/D4/D5) ──────────────────────────
+//
+// The probe answers one question per model: can it still answer at all? That
+// is the only ground truth for "the free tier ended" — `status: "deprecated"`
+// on models.dev means both "gone" and "stale record" (muse-spark-1.2 and
+// mimo-v2.5 are deprecated and still working; deepseek-v4-flash-free is
+// deprecated and dead), so no static field can decide it.
+//
+// Everything here runs through `provider.streamSimple`, never a hand-built
+// request: that path already applies the OpenCode CLI identity
+// (requestOptions), injects the `read` + `bash` tool names the anonymous gate
+// requires (applyAnonymousToolGate — a tool-less probe 403s on every model,
+// see docs/reverse-engineering.md §8), and maps upstream failures to guidance.
+
+/** Shortest prompt that still yields a non-empty text reply. */
+const PROBE_PROMPT = "Reply with OK only.";
+/**
+ * Reasoning models spend 64+ tokens thinking before any text, so a smaller
+ * budget returns an empty completion and would read as "dead" (false
+ * negative). See scripts/test-live.mjs, which uses the same floor.
+ */
+const PROBE_MAX_TOKENS = 512;
+/** Same per-model ceiling as scripts/test-live.mjs. */
+const PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * Upstream wording that means *this model* is gone, as opposed to a gate, an
+ * exhausted quota, or a bad credential. Deliberately narrow: an unrecognized
+ * failure must never read as "dead" (see {@link isModelUnavailableFailure}).
+ *
+ * Calibrated against real Zen bodies on 2026-09-29 rather than written from
+ * imagination — the P6 acceptance target was `deepseek-v4-flash-free` dying,
+ * and it did not, because the wording is "Model is unavailable." with a
+ * filler between the subject and the predicate.
+ */
+const MODEL_GONE_PATTERNS: readonly RegExp[] = [
+  // "Upstream request failed: Model is unavailable." — deepseek-v4-flash-free,
+  // whose free tier is over. HTTP 400, credential-independent.
+  /\bmodel\b[^.]{0,40}?\b(?:is|was)\s+(?:unavailable|unsupported|disabled|retired)\b/i,
+  // "model not found" / "does not exist" / "unrecognized model"
+  /\bmodels?\b[^.]{0,24}?\b(?:not\s+found|does\s+not\s+exist|unrecognized)\b/i,
+  /\bno\s+longer\s+(?:available|served|supported|provided|offered)\b/i,
+  /\b(?:retired|sunset|discontinued|decommissioned)\b/i,
+];
+
+/**
+ * A failure about the ENDPOINT is not a failure about the model, and the two
+ * are one word apart on this provider: `ling-3.0-flash-fin-free` answers
+ * "Upstream request failed: Endpoint is unavailable." while the genuinely dead
+ * `deepseek-v4-flash-free` answers the same sentence with "Model". Matching
+ * "is unavailable" without this guard would empty the picker of working
+ * models, so the endpoint reading is excluded by name.
+ */
+const ENDPOINT_FAILURE_PATTERN =
+  /\bendpoint\b[^.]{0,40}?\b(?:is|was)\s+(?:unavailable|unsupported|not\s+found|unreachable)\b/i;
+
+/** Statuses that mean the addressed model itself is gone. */
+const MODEL_GONE_STATUSES = new Set([404, 410]);
+
+/**
+ * Whether an upstream failure *positively* identifies this model as gone.
+ *
+ * `dead` is the only probe verdict that removes a model from the picker, so
+ * this predicate is the whole safety boundary: it must not fire by default.
+ * A single gated IP makes every model answer 403 `FreeTierError` at once —
+ * if that reached `dead` the whole catalogue would empty itself. Every
+ * specific marker the request path already understands is therefore excluded
+ * *before* the model-gone check, so a body carrying both a quota marker and
+ * model wording resolves to `inconclusive` (the safe side).
+ */
+export function isModelUnavailableFailure(status: number, bodyText: string): boolean {
+  const body = typeof bodyText === "string" ? bodyText : "";
+  // A gate, an exhausted quota, or a credential problem is never evidence
+  // about the model itself.
+  if (ANON_GATED_PATTERN.test(body)) return false;
+  if (QUOTA_PATTERN.test(body)) return false;
+  if (BAD_KEY_PATTERN.test(body)) return false;
+  // Nor is an unreachable endpoint.
+  if (ENDPOINT_FAILURE_PATTERN.test(body)) return false;
+  // 401 and 429 stay inconclusive even when the body names the model, because
+  // both are scoped to the credential rather than to the model: Zen answers
+  // `Model kimi-k2.5-free is not supported` (401) to an anonymous caller, and
+  // that same model may well answer a keyed one. Observed 2026-09-29 and
+  // deliberately NOT treated as death — the safe side is to leave it visible.
+  if (status === 429 || status === 401) return false;
+  if (MODEL_GONE_STATUSES.has(status)) return true;
+  return MODEL_GONE_PATTERNS.some((pattern) => pattern.test(body));
+}
+
+/**
+ * What one probe learned about a model.
+ *
+ * `inconclusive` is not a failure of the probe — it is the absence of a
+ * conclusion, and the caller must leave visibility untouched for it (D5).
+ */
+export type ProbeOutcome =
+  | { kind: "ok" }
+  | { kind: "dead"; reason: string }
+  | { kind: "inconclusive"; reason: string };
+
+/** The one provider method a probe needs; satisfied by zenProvider()'s return. */
+export interface ProbeStreamer {
+  streamSimple(
+    model: Model<Api>,
+    context: unknown,
+    options: Record<string, unknown>,
+  ): { result(): Promise<Record<string, unknown>> };
+}
+
+export interface ProbeDeps {
+  /** The provider to probe through (zenProvider()'s return value). */
+  readonly provider: ProbeStreamer;
+  /** Effective credential; "public" (the default) exercises the anonymous gate. */
+  readonly apiKey?: string | undefined;
+  /** Base fetch; defaults to the live global (already identity-guarded). */
+  readonly fetchImpl?: typeof fetch | undefined;
+  readonly timeoutMs?: number | undefined;
+  readonly now?: (() => number) | undefined;
+}
+
+/**
+ * Wrap a fetch so the probe can read what the transport saw. The response is
+ * cloned before it is handed on, so the provider still parses an untouched
+ * body; a REJECTION is recorded too, because the provider resolves a socket
+ * failure into a generic `stopReason: "error"` and the recorder is the only
+ * place the cause is still intact.
+ */
+function createRecordingFetch(base: typeof fetch): {
+  fetch: typeof fetch;
+  read: () => { status: number; body: string; cause: string | undefined };
+} {
+  let status = 0;
+  let body = "";
+  let cause: string | undefined;
+  const wrapped = (async (input: never, init?: never) => {
+    try {
+      const response = await (base as (u: never, i?: never) => Promise<Response>)(input, init);
+      try {
+        status = response.status;
+        if (!response.ok) body = await response.clone().text();
+      } catch {
+        // An unreadable error body is not a conclusion; the status still stands.
+      }
+      return response;
+    } catch (error) {
+      // A dead socket never reaches a status, so without this the probe could
+      // only say "unknown (HTTP 0)" — true, and useless to whoever has to
+      // decide whether the panel's "untrustworthy" note is their network.
+      if (cause === undefined) cause = describeTransportCause(error) || undefined;
+      throw error;
+    }
+  }) as typeof fetch;
+  return { fetch: wrapped, read: () => ({ status, body, cause }) };
+}
+
+/** Whether a settled probe result carries a real text reply. */
+function hasTextReply(result: Record<string, unknown> | undefined): boolean {
+  if (!result || result.stopReason === "error") return false;
+  const content = result.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (part) =>
+      part !== null &&
+      typeof part === "object" &&
+      (part as { type?: unknown }).type === "text" &&
+      typeof (part as { text?: unknown }).text === "string" &&
+      (part as { text: string }).text.trim() !== "",
+  );
+}
+
+/**
+ * Send one minimal request to `model` and classify the outcome.
+ *
+ * Never throws: a probe that cannot reach a conclusion returns
+ * `inconclusive` rather than rejecting, so one bad model cannot abort a
+ * catalogue-wide probe run.
+ */
+export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
+  const recorder = createRecordingFetch(deps.fetchImpl ?? globalThis.fetch);
+  const context = {
+    messages: [{ role: "user", content: PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() }],
+  };
+  let result: Record<string, unknown> | undefined;
+  try {
+    const stream = deps.provider.streamSimple(model, context, {
+      apiKey: deps.apiKey ?? "public",
+      maxTokens: PROBE_MAX_TOKENS,
+      // A probe must not spend a second call confirming anything.
+      maxRetries: 0,
+      // The default reasoning effort for muse-spark is xhigh; a probe only
+      // needs any reply, so it asks for the cheapest one.
+      reasoning: "low",
+      signal: AbortSignal.timeout(deps.timeoutMs ?? PROBE_TIMEOUT_MS),
+      fetch: recorder.fetch,
+    });
+    result = await stream.result();
+  } catch (error) {
+    const detail = error instanceof Error ? `${error.name}: ${error.message || "(empty)"}` : String(error);
+    return { kind: "inconclusive", reason: `transport failure — ${detail.slice(0, 200)}` };
+  }
+  // A reply settles the question: the model answers, so it is not dead.
+  if (hasTextReply(result)) return { kind: "ok" };
+  const { status, body, cause } = recorder.read();
+  if (isModelUnavailableFailure(status, body)) {
+    return { kind: "dead", reason: `上游回報此模型不可用（HTTP ${status}）` };
+  }
+  // No response was ever received, so there is no status to report. Naming the
+  // socket cause is the whole value of this branch: it is what separates "my
+  // network is down" from "the anonymous tier is refusing", and the two need
+  // completely different things from the reader.
+  if (cause !== undefined) return { kind: "inconclusive", reason: `transport failure — ${cause}` };
+  if (status === 0) return { kind: "inconclusive", reason: classifyZenFailure(status, body) };
+  return { kind: "inconclusive", reason: `${classifyZenFailure(status, body)}（HTTP ${status}）` };
 }
 
 /**
@@ -361,6 +673,7 @@ function compatRequestOptions<T extends StreamOptions>(
   options: T,
   getSessionId: SessionGetter,
   fallbackSession: string,
+  recorder?: TransportRecorder,
 ): T {
   const headers = Object.fromEntries(
     Object.entries(options?.headers ?? {}).filter(
@@ -391,7 +704,10 @@ function compatRequestOptions<T extends StreamOptions>(
     sessionId: opencodeSession,
     timeoutMs: options?.timeoutMs ?? 180_000,
     maxRetries: options?.maxRetries ?? 2,
-    fetch: withEncryptedContentFallback(options?.fetch as FetchFunction | undefined) as T["fetch"],
+    fetch: withEncryptedContentFallback(
+      options?.fetch as FetchFunction | undefined,
+      recorder,
+    ) as T["fetch"],
     headers: {
       ...headers,
       Authorization: `Bearer ${effectiveApiKey}`,
@@ -426,10 +742,11 @@ export function patchCompatDirectTransport(getSessionId: SessionGetter = () => u
           const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
           const gate = applyAnonymousToolGate(swapCompactionPrompt(context, key), key);
           const ctx = gate.context;
-          const processed = compatRequestOptions(options, getSessionId, fallbackSession);
+          const recorder = createTransportRecorder(options?.fetch as FetchFunction | undefined);
+          const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder);
           debugLog(`${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "compat")} ${shapeSummary(ctx, options)}`);
           const out = origStream(model as never, ctx as never, processed as never);
-          return gate.restoreShell ? withGuidance(out as object, true) : out;
+          return withGuidance(out as object, gate.restoreShell, recorder);
         }) as never,
         streamSimple: ((model: Model<Api>, context: never, options: StreamOptions) => {
           if ((model as Model<Api>).provider !== PROVIDER_ID)
@@ -438,10 +755,11 @@ export function patchCompatDirectTransport(getSessionId: SessionGetter = () => u
           const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
           const gate = applyAnonymousToolGate(swapCompactionPrompt(context, key), key);
           const ctx = gate.context;
-          const processed = compatRequestOptions(options, getSessionId, fallbackSession);
+          const recorder = createTransportRecorder(options?.fetch as FetchFunction | undefined);
+          const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder);
           debugLog(`${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "compat")} ${shapeSummary(ctx, options)}`);
           const out = origStreamSimple(model as never, ctx as never, processed as never);
-          return gate.restoreShell ? withGuidance(out as object, true) : out;
+          return withGuidance(out as object, gate.restoreShell, recorder);
         }) as never,
       },
       "dsh-opencode-free",
@@ -710,14 +1028,30 @@ export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefine
  */
 const TRANSPORT_ERROR_PATTERN = /(?:\((\d{3})\):|^(\d{3}):? )([\s\S]*)$/;
 
-export function mapTransportErrorToGuidance<T>(result: T): T {
+/**
+ * Append the recorded socket reason to a failure the HTTP classifier could not
+ * place. APPENDED, never substituted: the host derives the failure class from
+ * this very message, and the upstream wording that got here ("Connection
+ * error.", "terminated") is what carries it.
+ */
+function appendTransportDetail<T extends Record<string, unknown>>(
+  record: T,
+  message: string,
+  recorder?: TransportRecorder,
+): T {
+  const detail = recorder?.detail();
+  if (detail === undefined || message.includes(detail)) return record;
+  return { ...record, errorMessage: `${message}｜${ZEN_TRANSPORT_GUIDANCE}（${detail}）` } as T;
+}
+
+export function mapTransportErrorToGuidance<T>(result: T, recorder?: TransportRecorder): T {
   if (!result || typeof result !== "object") return result;
   const rec = result as Record<string, unknown>;
   if (rec.stopReason !== "error" || typeof rec.errorMessage !== "string") return result;
   const m = TRANSPORT_ERROR_PATTERN.exec(rec.errorMessage);
-  if (!m) return result;
+  if (!m) return appendTransportDetail(rec, rec.errorMessage, recorder) as T;
   const kind = classifyZenFailure(Number(m[1] ?? m[2]), m[3] ?? "");
-  if (kind === "unknown") return result;
+  if (kind === "unknown") return appendTransportDetail(rec, rec.errorMessage, recorder) as T;
   const status = m[1] ?? m[2];
   return {
     ...rec,
@@ -725,16 +1059,20 @@ export function mapTransportErrorToGuidance<T>(result: T): T {
   } as T;
 }
 
-function mapEventErrorToGuidance<T>(event: T): T {
+function mapEventErrorToGuidance<T>(event: T, recorder?: TransportRecorder): T {
   if (!event || typeof event !== "object") return event;
   const rec = event as Record<string, unknown>;
   if (rec.type !== "error") return event;
   const inner = rec.error as Record<string, unknown> | undefined;
   if (!inner || typeof inner !== "object" || typeof inner.errorMessage !== "string") return event;
   const m = TRANSPORT_ERROR_PATTERN.exec(inner.errorMessage);
-  if (!m) return event;
+  if (!m) {
+    return { ...rec, error: appendTransportDetail(inner, inner.errorMessage, recorder) } as T;
+  }
   const kind = classifyZenFailure(Number(m[1] ?? m[2]), m[3] ?? "");
-  if (kind === "unknown") return event;
+  if (kind === "unknown") {
+    return { ...rec, error: appendTransportDetail(inner, inner.errorMessage, recorder) } as T;
+  }
   const status = m[1] ?? m[2];
   return {
     ...rec,
@@ -745,7 +1083,7 @@ function mapEventErrorToGuidance<T>(event: T): T {
   } as T;
 }
 
-function withGuidance<T extends object>(stream: T, restoreShell = false): T {
+function withGuidance<T extends object>(stream: T, restoreShell = false, recorder?: TransportRecorder): T {
   return new Proxy(stream, {
     get(target, prop, _receiver) {
       if (prop === "result") {
@@ -753,7 +1091,7 @@ function withGuidance<T extends object>(stream: T, restoreShell = false): T {
         return async () => {
           const result = await inner.call(target);
           if (restoreShell) restoreShellCalls(result);
-          return mapTransportErrorToGuidance(result);
+          return mapTransportErrorToGuidance(result, recorder);
         };
       }
       if (prop === Symbol.asyncIterator) {
@@ -761,7 +1099,7 @@ function withGuidance<T extends object>(stream: T, restoreShell = false): T {
         return async function* () {
           for await (const event of inner()) {
             if (restoreShell) restoreShellCalls(event);
-            yield mapEventErrorToGuidance(event);
+            yield mapEventErrorToGuidance(event, recorder);
           }
         };
       }
@@ -830,12 +1168,16 @@ export function zenProvider(
     },
   });
 
-  function requestOptions<T extends StreamOptions>(options: T = {} as T, context?: unknown): T {
-    const processed = compatRequestOptions(options, getSessionId, fallbackSession);
+  function requestOptions<T extends StreamOptions>(
+    options: T = {} as T,
+    context?: unknown,
+  ): { processed: T; recorder: TransportRecorder } {
+    const recorder = createTransportRecorder(options?.fetch as FetchFunction | undefined);
+    const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder);
     debugLog(
       `${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "provider")} ${shapeSummary(context, options)}`,
     );
-    return processed;
+    return { processed, recorder };
   }
 
   return {
@@ -876,15 +1218,17 @@ export function zenProvider(
     stream(model, context, options) {
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(context, key), key);
-      return withGuidance(provider.stream(model, gate.context, requestOptions(options, gate.context)), gate.restoreShell);
+      const { processed, recorder } = requestOptions(options, gate.context);
+      return withGuidance(provider.stream(model, gate.context, processed), gate.restoreShell, recorder);
     },
     streamSimple(model, context, options) {
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(context, key), key);
+      const { processed, recorder } = requestOptions(options, gate.context);
       return withGuidance(provider.streamSimple(model, gate.context, {
-        ...requestOptions(options, gate.context),
+        ...processed,
         reasoning: options?.reasoning ?? (model.id.startsWith("muse-spark-") ? "xhigh" : undefined),
-      }), gate.restoreShell);
+      }), gate.restoreShell, recorder);
     },
   };
 }

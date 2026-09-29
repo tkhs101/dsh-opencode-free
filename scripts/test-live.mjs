@@ -1,5 +1,12 @@
 // Opt-in: sends one short anonymous request per selected free model.
 // Run after building: node scripts/test-live.mjs [model-id ...]
+//
+// NOT an availability criterion. This probe declares no tools, and Zen's
+// anonymous tier 403s (`FreeTierError`) any tool-less request on every model
+// (measured 2026-09-27, docs/reverse-engineering.md §8) — so a `replied:false`
+// here usually means "the gate said no", not "the model is gone". The real
+// availability check injects the `read` + `bash` tool names and runs through
+// `probeModel` / `catalog.forceProbes()`; see .scratch/model-probe/spec.md.
 import { zenProvider } from '../lib/zen-provider.js'
 
 const provider = zenProvider()

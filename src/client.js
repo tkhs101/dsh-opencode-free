@@ -7,9 +7,10 @@
  * `hiddenModels`; the host filters those ids out of the model picker.
  *
  * The model list itself is NOT baked in here: the host owns the catalogue
- * (models.dev + the Zen availability gate) and serves it, so the rows always
- * match what the picker can actually select. This half only reads that
- * snapshot and writes `hiddenModels`.
+ * (models.dev + the Zen availability gate + the live availability probe) and
+ * serves it, so the rows always match what the picker can actually select. This
+ * half reads that snapshot, writes `hiddenModels`, and offers the manual probe
+ * that makes the host re-ask every model whether it still answers.
  *
  * Hand-written bundle rules (same shape as dsh-gitbash-shell):
  *   - ONE window.__ModuleLoader__.load({...}) call, id = package name;
@@ -50,6 +51,7 @@ window.__ModuleLoader__.load({
 		 */
 		var CATALOG_URL = "/dsh-opencode-free/api/catalog";
 		var REFRESH_URL = "/dsh-opencode-free/api/refresh";
+		var PROBE_URL = "/dsh-opencode-free/api/probe";
 
 		// ── dictionaries (zh/en inline; model ids are never translated) ──────
 		//
@@ -69,8 +71,13 @@ window.__ModuleLoader__.load({
 			"fallback": "当前显示的是内置兜底目录，尚未与 models.dev 同步。",
 			"refresh": "立即刷新",
 			"refreshing": "刷新中…",
-			"excluded": "已排除",
-			"excluded.hint": "上游标注为停止维护，或当前不在 Zen 列表中。",
+			"probe": "立即探测",
+			"probing": "探测中…",
+			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
+			"probeUntrusted": "本轮探测结论不可信（上游限流、匿名额度被闸或网络异常），模型显示保持不变。",
+			"probedAt": "上次探测",
+			"excluded": "探测判定不可用",
+			"excluded.hint": "上次探测判定这些模型已不可用（已下线或上游拒绝），或当前不在 Zen 列表中。",
 			"empty": "当前没有可显示的模型。"
 		};
 
@@ -86,8 +93,13 @@ window.__ModuleLoader__.load({
 			"fallback": "Showing the built-in fallback catalogue; it is not synced with models.dev yet.",
 			"refresh": "Refresh now",
 			"refreshing": "Refreshing…",
-			"excluded": "Excluded",
-			"excluded.hint": "Marked deprecated upstream, or not in Zen's list right now.",
+			"probe": "Probe now",
+			"probing": "Probing…",
+			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
+			"probeUntrusted": "This round's probe results were untrustworthy (upstream throttling, the anonymous tier refusing, or a network error), so visibility is unchanged.",
+			"probedAt": "Last probe",
+			"excluded": "Unavailable per probe",
+			"excluded.hint": "The last probe found these unavailable (retired or refused upstream), or they are not in Zen's list right now.",
 			"empty": "No models are available right now."
 		};
 
@@ -238,6 +250,11 @@ window.__ModuleLoader__.load({
 				visible: names(payload.visible),
 				excluded: names(payload.excluded),
 				source: typeof payload.source === "string" ? payload.source : "unknown",
+				/* Probe facts are OPTIONAL: a host older than the probe feature
+				   simply omits them, and the card degrades to "never probed"
+				   rather than failing to render. */
+				probedAt: typeof payload.probedAt === "number" && isFinite(payload.probedAt) ? payload.probedAt : null,
+				probeInconclusive: payload.probeInconclusive === true
 			};
 		}
 
@@ -279,6 +296,31 @@ window.__ModuleLoader__.load({
 			}
 		}
 
+		/**
+		 * POST a manual probe run (the host asks every catalogue model, in
+		 * order, whether it still answers) and resolve with the snapshot it
+		 * returns.
+		 *
+		 * Distinct from refreshCatalog() on purpose: a FAILED probe must not
+		 * clobber a perfectly good list, so a null here means "no answer", not
+		 * "empty catalogue". The caller keeps what it is showing.
+		 */
+		function probeCatalog() {
+			if (typeof fetch !== "function") return Promise.resolve(null);
+			try {
+				return Promise.resolve(fetch(PROBE_URL, { method: "POST", headers: { accept: "application/json" } }))
+					.then(function (response) { return response && response.ok ? response.json() : null; })
+					.then(readSnapshot)
+					.catch(function (error) {
+						console.warn(TAG + " probe failed:", error && error.message ? error.message : error);
+						return null;
+					});
+			} catch (error) {
+				console.warn(TAG + " probe threw:", error && error.message ? error.message : error);
+				return Promise.resolve(null);
+			}
+		}
+
 		// ── models card (module-level component) ──────────────────────────────
 
 		/**
@@ -313,6 +355,17 @@ window.__ModuleLoader__.load({
 			var busy = busyState[0];
 			var setBusy = busyState[1];
 
+			/* The probe keeps its OWN busy flag and its OWN error line: it is a
+			   different action from a catalogue refresh, and a failed probe must
+			   leave the rendered list exactly as it was. */
+			var probingState = useState(false);
+			var probing = probingState[0];
+			var setProbing = probingState[1];
+
+			var probeErrorState = useState("");
+			var probeError = probeErrorState[0];
+			var setProbeError = probeErrorState[1];
+
 			useEffect(function () {
 				if (scope === undefined || scope === null || typeof scope.subscribe !== "function") return undefined;
 				var unsubscribe = scope.subscribe(function () { bumpTick(function (n) { return n + 1; }); });
@@ -331,6 +384,19 @@ window.__ModuleLoader__.load({
 				refreshCatalog().then(function (snapshot) {
 					setCatalog(snapshot);
 					setBusy(false);
+				});
+			}
+
+			/* A null answer means the host did not answer, NOT an empty
+			   catalogue: keep the rows on screen and offer the retry. */
+			function probe() {
+				if (probing) return;
+				setProbeError("");
+				setProbing(true);
+				probeCatalog().then(function (snapshot) {
+					if (snapshot !== null) setCatalog(snapshot);
+					else setProbeError(t("probeFailed"));
+					setProbing(false);
 				});
 			}
 
@@ -435,6 +501,21 @@ window.__ModuleLoader__.load({
 				? E("p", { className: "opf-note" }, t("fallback"))
 				: null;
 
+			/* Probe facts, each rendered only when the host actually reported
+			   one. An older host omits them, and then none of this shows. */
+			var untrustedNote = catalog !== undefined && catalog !== null && catalog.probeInconclusive === true
+				? E("p", { className: "opf-note" }, t("probeUntrusted"))
+				: null;
+
+			var probedAtNote = null;
+			if (catalog !== undefined && catalog !== null && typeof catalog.probedAt === "number") {
+				var when = new Date(catalog.probedAt);
+				if (!isNaN(when.getTime())) {
+					var stamp = typeof when.toLocaleString === "function" ? when.toLocaleString() : String(catalog.probedAt);
+					probedAtNote = E("p", { className: "opf-note" }, t("probedAt") + " " + stamp);
+				}
+			}
+
 			var excludedNote = excluded.length > 0
 				? E("div", { className: "opf-excluded" },
 					E("span", { className: "opf-excludedLabel" }, t("excluded")),
@@ -452,10 +533,19 @@ window.__ModuleLoader__.load({
 						className: "opf-btn",
 						disabled: busy,
 						onClick: refresh
-					}, busy ? t("refreshing") : t("refresh"))),
+					}, busy ? t("refreshing") : t("refresh")),
+					E("button", {
+						type: "button",
+						className: "opf-btn",
+						disabled: probing,
+						onClick: probe
+					}, probing ? t("probing") : t("probe"))),
 				fallbackNote,
+				probedAtNote,
+				untrustedNote,
 				listArea,
 				error ? E("p", { className: "opf-error" }, error) : null,
+				probeError ? E("p", { className: "opf-error" }, probeError) : null,
 				excludedNote,
 				E("p", { className: "opf-hint" }, t("hint")));
 		}

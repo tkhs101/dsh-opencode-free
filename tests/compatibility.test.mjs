@@ -4,6 +4,9 @@ import test from 'node:test'
 import {
   PROVIDER_ID,
   classifyZenFailure,
+  describeTransportCause,
+  isModelUnavailableFailure,
+  probeModel,
   ZEN_FAILURE_GUIDANCE,
   freeModels,
   isEncryptedContentError,
@@ -285,4 +288,152 @@ test('free catalogue is non-empty and host output carries the Zen identity', () 
   assert.match(host, /opencode-zen-free/)
   assert.match(host, /x-opencode-session/)
   assert.match(host, /registerAdapter/)
+})
+
+// ── availability probe (model-probe P5) ─────────────────────────────────────
+
+/** A completions-shaped SSE reply with real text, so a probe reads `ok`. */
+const okSse = [
+  'data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}',
+  'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+  'data: [DONE]',
+  '',
+].join('\n\n')
+
+const sseReply = () => new Response(okSse, { headers: { 'Content-Type': 'text/event-stream' } })
+
+test('GUARD: the probe request carries the read+bash gate, streams, and asks for enough tokens', async () => {
+  // A tool-less probe 403s on EVERY model at the anonymous tier (measured
+  // 2026-09-27), so a probe that skipped the tools would report the whole
+  // catalogue dead. The budget is 512 for the same reason scripts/test-live.mjs
+  // uses it: reasoning models spend 60+ tokens thinking before any text, and a
+  // tighter cap returns an empty completion that reads as "dead".
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  let body
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async (_url, init) => {
+      body = JSON.parse(init.body)
+      return sseReply()
+    },
+  })
+  assert.equal(outcome.kind, 'ok')
+  assert.deepEqual(body.tools.map((t) => t.function.name).sort(), ['bash', 'read'])
+  assert.equal(body.stream, true)
+  assert.ok(body.max_tokens >= 512, `max_tokens was ${body.max_tokens}`)
+  assert.equal(body.model, model.id)
+})
+
+test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  const run = (fetchImpl) => probeModel(model, { provider: p, apiKey: 'public', fetchImpl })
+
+  assert.equal((await run(async () => sseReply())).kind, 'ok')
+
+  // dead requires positive evidence about THIS model.
+  for (const [status, text] of [
+    [404, '{"error":{"message":"model not found"}}'],
+    [410, '{"error":{"message":"no longer available"}}'],
+    [400, '{"error":{"message":"The model has been retired"}}'],
+  ]) {
+    const outcome = await run(async () => new Response(text, { status }))
+    assert.equal(outcome.kind, 'dead', `${status} ${text}`)
+  }
+
+  // Everything the request path already understands is inconclusive: none of
+  // it is evidence about the model.
+  for (const [status, text] of [
+    [403, '{"type":"error","error":{"type":"FreeTierError","message":"only be used from within OpenCode"}}'],
+    [429, '{"error":{"type":"FreeUsageLimitError"}}'],
+    [401, '{"error":{"message":"invalid x-api-key"}}'],
+    [500, 'internal error'],
+    [403, 'something entirely new'],
+    // A body carrying BOTH a quota marker and model wording must resolve to
+    // the safe side, or one throttled minute could empty the picker.
+    [429, '{"error":{"message":"usage limit exceeded; model not found"}}'],
+  ]) {
+    const outcome = await run(async () => new Response(text, { status }))
+    assert.equal(outcome.kind, 'inconclusive', `${status} ${text}`)
+  }
+  assert.equal(isModelUnavailableFailure(429, 'usage limit exceeded; model not found'), false)
+
+  // Calibrated against real Zen bodies, 2026-09-29. The two that matter are one
+  // word apart, and reading the wrong one empties the picker.
+  const DEAD_400 = '{"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Model is unavailable."}}'
+  const ENDPOINT_400 = '{"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Endpoint is unavailable."}}'
+  const UNSUPPORTED_401 = '{"type":"error","error":{"type":"ModelError","message":"Model kimi-k2.5-free is not supported"}}'
+  assert.equal(isModelUnavailableFailure(400, DEAD_400), true, 'the model is gone')
+  assert.equal(isModelUnavailableFailure(400, ENDPOINT_400), false, 'the ENDPOINT is gone, not the model')
+  assert.equal(isModelUnavailableFailure(401, UNSUPPORTED_401), false, 'credential-scoped, not a death notice')
+  assert.equal((await run(async () => new Response(DEAD_400, { status: 400 }))).kind, 'dead')
+  assert.equal((await run(async () => new Response(ENDPOINT_400, { status: 400 }))).kind, 'inconclusive')
+  assert.equal((await run(async () => new Response(UNSUPPORTED_401, { status: 401 }))).kind, 'inconclusive')
+
+  // A thrown transport error concludes nothing, and never rejects.
+  const thrown = await run(async () => {
+    throw Object.assign(new TypeError('fetch failed'), { cause: new Error('ECONNRESET') })
+  })
+  assert.equal(thrown.kind, 'inconclusive')
+  assert.match(thrown.reason, /transport failure/)
+  assert.match(thrown.reason, /ECONNRESET/)
+
+  // An empty completion is not a reply: no text means no conclusion.
+  const empty = await run(async () => new Response(
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    { headers: { 'Content-Type': 'text/event-stream' } },
+  ))
+  assert.equal(empty.kind, 'inconclusive')
+})
+
+test('a socket failure reports its cause instead of a bare "Connection error."', async () => {
+  // The chain this exists for, recorded live 2026-09-29: undici rejects, the
+  // OpenAI SDK flattens it to `APIConnectionError { message: 'Connection
+  // error.' }` and keeps the reason in `cause`, and pi-ai reads only
+  // `error.message`. Without the recorder the user saw those four words for
+  // 45 minutes with no way to act on them.
+  const socket = () => {
+    const err = new TypeError('fetch failed')
+    err.cause = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+    throw err
+  }
+  assert.equal(
+    describeTransportCause(Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+    })),
+    'TypeError: fetch failed <- Error/UND_ERR_SOCKET: other side closed',
+  )
+  // A cause carrying its own three-digit run must not be able to re-file a
+  // socket kill as an upstream status error: the host reads 4xx/5xx literals
+  // off this message before it ever reaches the transport rule.
+  assert.doesNotMatch(describeTransportCause(
+    Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('read ECONNRESET after 500 bytes'), { code: 'ECONNRESET' }),
+    }),
+  ), /\b\d{3}\b/)
+  assert.equal(describeTransportCause('not an error'), 'string')
+
+  const p = plugin.zenProvider(() => 's', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  const ctx = { messages: [{ role: 'user', content: 'hi', timestamp: 1 }] }
+  const r = await p.streamSimple(model, ctx, { fetch: socket, maxRetries: 0 }).result()
+  assert.equal(r.stopReason, 'error')
+  assert.match(r.errorMessage, /Connection error\./)
+  assert.match(r.errorMessage, /UND_ERR_SOCKET/)
+  assert.match(r.errorMessage, /other side closed/)
+  assert.match(r.errorMessage, /網路層/)
+  // APPENDED, not substituted: the host classifies from this message, and the
+  // original wording is what still carries the transport class.
+  assert.ok(r.errorMessage.startsWith('Connection error.'), r.errorMessage)
+
+  // A healthy request records nothing and is left exactly as it was.
+  const sse = 'data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+  const ok = await p.streamSimple(model, ctx, {
+    maxRetries: 0,
+    fetch: async () => new Response(sse, { headers: { 'Content-Type': 'text/event-stream' } }),
+  }).result()
+  assert.equal(ok.stopReason, 'stop')
+  assert.equal(ok.errorMessage, undefined)
 })

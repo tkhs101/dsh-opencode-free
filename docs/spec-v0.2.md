@@ -66,8 +66,13 @@ key 錯誤→檢查 key。Key 的設定路徑（plugin config 與環境變數）
 - ~~目錄維持打包基線＋公開端點交集~~；不做背景自動刷新（副作用與額度成本），
   新鮮度以重驗腳本①號燈為信號，文件載明。
   **（已取代）** 「打包基線」改為執行時讀 models.dev 並快取，「公開端點交集」
-  仍保留為 Zen 可用性閘門；不做背景定時刷新與不耗額度的兩點不變。見
+  仍保留為 Zen 可用性閘門。見
   `docs/adr/0002-catalogue-source-of-truth.md`。
+  **「不做背景自動刷新」中的不耗額度一點已被
+  `.scratch/model-probe/spec.md` 顯式取代**：目錄同步仍不耗額度（單次條
+  件式 GET models.dev），但模型可見性現在由每日至多一輪、按順序發送的
+  最小探針決定，這一輪確實花匿名額度。取捨與防護（`inconclusive` 絕不改
+  可見性）寫在該 spec 的 Cost Statement 與 D5，並在 README 披露。
 - 訊息用語遵守專案 glossary：共用 bucket 稱匿名額度；bypass 性質在 README
   揭露一次為限，不在每次錯誤重複。
 - 尊重 ADR-0001：本版本不動會話 id 方案；匿名行為變化時重審該 ADR。
@@ -87,6 +92,8 @@ key 錯誤→檢查 key。Key 的設定路徑（plugin config 與環境變數）
 - 設定頁／client UI、額度卡片、`/login` 持久登入、OAuth。
 - pi-ai 0.86 transcript 升級（被 DSH peer 鎖版擋住）。
 - 背景自動刷新目錄、多 key、按模型分流。
+  （背景「定時」刷新目錄仍不做；但每日一輪的可用性探針已由
+  `.scratch/model-probe/spec.md` 引入，見上。）
 - 匿名恢復後的自動切回（維持手動，行為可預測）。
 
 ## Further Notes
