@@ -15,6 +15,7 @@ import {
   isActive,
   isFree,
   readCache,
+  thinkingLevelMapFor,
   writeCacheAtomic,
 } from '../src/catalog.ts'
 
@@ -253,6 +254,100 @@ test('channelFor defaults to completions (opencode is openai-compatible)', () =>
   assert.equal(channelFor({ id: 'x' }), 'openai-completions')
   assert.equal(channelFor({ id: 'x', reasoning_options: [] }), 'openai-completions')
   assert.equal(channelFor({ id: 'x', reasoning_options: 'nonsense' }), 'openai-completions')
+})
+
+// ── capability alignment (models.dev is the source for all four) ────────────
+
+/**
+ * pi-ai's own reader, used as the oracle: these tests assert the LEVELS A HOST
+ * WILL OFFER, not just the shape of the map we hand it. The two differ —
+ * `xhigh`/`max` are opt-in (absent ⇒ not offered) while the lower levels are
+ * offered unless explicitly nulled — and getting that backwards is exactly the
+ * bug this alignment fixes.
+ */
+const { getSupportedThinkingLevels, clampThinkingLevel } = await import('@earendil-works/pi-ai')
+
+test('thinkingLevelMapFor maps the published effort levels and nulls the rest', () => {
+  // space-bunny-free, real record 2026-09-29.
+  assert.deepEqual(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] }] }), {
+    minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+  })
+  // muse-spark, real record: no `max`, so it must not be offered.
+  assert.deepEqual(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }] }), {
+    minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh',
+  })
+  // Off is never claimed either way: it means "send no reasoning parameter".
+  assert.equal(Object.prototype.hasOwnProperty.call(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['low'] }] }), 'off'), false)
+})
+
+test('thinkingLevelMapFor claims nothing when models.dev publishes no levels', () => {
+  // A `toggle` model is reasoning on/off and pi-ai has no name for bare "on";
+  // guessing would offer levels upstream rejects, which the host reports as
+  // UNSUPPORTED_REASONING_EFFORT rather than clamping.
+  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'toggle' }] }), undefined)
+  assert.equal(thinkingLevelMapFor({ reasoning_options: [] }), undefined)
+  assert.equal(thinkingLevelMapFor({ reasoning_options: undefined }), undefined)
+  assert.equal(thinkingLevelMapFor({ reasoning_options: 'nonsense' }), undefined)
+  // An effort option with no usable level names is not a level list.
+  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort' }] }), undefined)
+  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: [] }] }), undefined)
+  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['turbo', 7, null] }] }), undefined)
+  // Levels pi-ai does not know cannot be expressed, so a list of only those
+  // makes no claim rather than producing an empty map.
+  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['turbo'] }] }), undefined)
+})
+
+test('the levels a host offers follow models.dev, per model', () => {
+  // The map the record produces, read back through pi-ai's own filter.
+  const of = (id) => getSupportedThinkingLevels({ id, reasoning: true, thinkingLevelMap: thinkingLevelMapFor(modelsDict()[id]) })
+  assert.deepEqual(of('space-bunny-free'), ['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(of('muse-spark-1.3-contributor-free'), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+  // No published list: pi-ai's default set, unchanged from before this work.
+  assert.deepEqual(of('big-pickle'), ['off', 'minimal', 'low', 'medium', 'high'])
+  assert.deepEqual(of('ling-3.0-flash-fin-free'), ['off', 'minimal', 'low', 'medium', 'high'])
+  // The derived records themselves carry the same maps.
+  const derived = derive(modelsDict(), { template: template(), knownApis: new Map() })
+  const spark = derived.candidates.find((m) => m.id === 'muse-spark-1.3-contributor-free')
+  assert.deepEqual(getSupportedThinkingLevels(spark), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+})
+
+test('GUARD: the muse-spark xhigh default is no longer silently clamped away', async () => {
+  // The plugin asks for `xhigh` on muse-spark (zen-provider streamSimple). With
+  // no thinkingLevelMap, pi-ai's supported set tops out at `high` and the
+  // request was quietly downgraded — the model never got the effort it was
+  // asked for. Aligning the map from models.dev is what fixes it.
+  const spark = derive(modelsDict(), { template: template(), knownApis: new Map() })
+    .candidates.find((m) => m.id === 'muse-spark-1.3-contributor-free')
+  assert.equal(clampThinkingLevel(spark, 'xhigh'), 'xhigh', 'the requested level survives')
+  const bunny = derive(modelsDict(), { template: template(), knownApis: new Map() })
+    .candidates.find((m) => m.id === 'space-bunny-free')
+  assert.equal(clampThinkingLevel(bunny, 'max'), 'max', 'a published opt-in level is reachable')
+  // A level the model does not publish clamps DOWN rather than being offered.
+  assert.equal(getSupportedThinkingLevels(bunny).includes('minimal'), false)
+})
+
+test('a derived record carries all four capabilities from models.dev', () => {
+  const { candidates } = derive(modelsDict(), { template: template(), knownApis: new Map() })
+  const bunny = candidates.find((m) => m.id === 'space-bunny-free')
+  // modalities.input: pi-ai knows text/image only, so video is dropped rather
+  // than passed through as a capability the transport cannot honour.
+  assert.deepEqual(bunny.input, ['text', 'image'])
+  assert.equal(bunny.contextWindow, 1048576, 'limit.context')
+  assert.equal(bunny.maxTokens, 524288, 'limit.output')
+  assert.equal(bunny.reasoning, true)
+  // A model with no image support must not inherit the template's.
+  const pickle = candidates.find((m) => m.id === 'big-pickle')
+  assert.deepEqual(pickle.input, ['text'], 'text-only stays text-only')
+  assert.equal(pickle.contextWindow, 200000)
+  assert.equal(pickle.maxTokens, 32000)
+  // A record that publishes nothing falls back to the template per field.
+  const bare = derive({ 'bare-free': { id: 'bare-free', cost: { input: 0, output: 0 } } }, { template: template() })
+    .candidates[0]
+  assert.equal(bare.contextWindow, template().contextWindow)
+  assert.equal(bare.maxTokens, template().maxTokens)
+  assert.deepEqual(bare.input, template().input)
+  // The template's level map is never inherited: it belongs to another model.
+  assert.equal(bare.thinkingLevelMap, undefined)
 })
 
 test('channelFor prefers the pi-ai builtin table over any signal', () => {

@@ -97,7 +97,14 @@ Models currently listed as free and not retired upstream:
 | Big Pickle | `big-pickle` | text | 200K |
 
 All models support reasoning and tool calls. DSH passes your reasoning level
-through. If you do not choose one, Muse Spark uses `xhigh`.
+through, and the levels it offers come from models.dev per model — Muse Spark
+gets `minimal`…`xhigh`, Space Bunny gets `low`…`max`, and a level a model does
+not publish is never offered. If you do not choose one, Muse Spark uses `xhigh`.
+
+Each model's picture support, context size and maximum output are read from
+models.dev as well, so a screenshot is only attached to a model that declares
+image input and the context figure in the picker is the model's real one rather
+than a copy of another model's.
 
 **This table is a snapshot, not a contract.** It is here so you can recognise
 what you are picking; the live list is whatever the plugin last read. The

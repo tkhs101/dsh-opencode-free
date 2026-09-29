@@ -92,6 +92,62 @@ function reasoningOptionTypes(record: CatalogRecord): string[] {
     .filter((type): type is string => type !== undefined);
 }
 
+/** pi-ai's level vocabulary, in the order it filters them. */
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * `getSupportedThinkingLevels` treats `xhigh` and `max` as opt-in — absent from
+ * the map means NOT offered — but includes `off`/`minimal`/`low`/`medium`/`high`
+ * unless they are explicitly mapped to `null`. A faithful map therefore has to
+ * null out the ones models.dev does not publish; leaving them absent would
+ * offer a level the model rejects.
+ */
+const OPT_IN_THINKING_LEVELS = new Set<string>(["xhigh", "max"]);
+
+/**
+ * D6: the thinking levels models.dev publishes for this model, as pi-ai's
+ * `thinkingLevelMap`.
+ *
+ * The values are identity because OpenCode is OpenAI-compatible and the level
+ * name is what goes on the wire (`reasoning_effort` on completions, `effort` on
+ * responses); the map's job here is to say which levels EXIST.
+ *
+ * `undefined` means "models.dev published no level list, so make no claim" —
+ * pi-ai then falls back to its own default set. That is the honest answer for
+ * a `toggle` model (reasoning is on or off, and pi-ai has no name for bare
+ * "on") and for a record with `reasoning_options: []`. Guessing there would
+ * offer levels upstream rejects, which surfaces as an
+ * `UNSUPPORTED_REASONING_EFFORT` failure rather than as a clamp.
+ */
+export function thinkingLevelMapFor(
+  record: CatalogRecord,
+): Record<string, string | null> | undefined {
+  const options = record.reasoning_options;
+  if (!Array.isArray(options)) return undefined;
+  const published = new Set<string>();
+  for (const option of options) {
+    if (!isPlainObject(option) || option.type !== "effort") continue;
+    const values = option.values;
+    if (!Array.isArray(values)) continue;
+    for (const value of values) {
+      if (typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value)) {
+        published.add(value);
+      }
+    }
+  }
+  if (published.size === 0) return undefined;
+  const map: Record<string, string | null> = {};
+  for (const level of THINKING_LEVELS) {
+    // `off` is never claimed as published or unpublished: it means "send no
+    // reasoning parameter", which is a real choice on an OpenAI-compatible
+    // endpoint and is what pi-ai offers today for every reasoning model.
+    if (level === "off") continue;
+    if (published.has(level)) map[level] = level;
+    else if (!OPT_IN_THINKING_LEVELS.has(level)) map[level] = null;
+  }
+  return map;
+}
+
 /**
  * D6, three tiers: the pi-ai builtin table when it knows the model, then
  * models.dev signals, then the provider's own default. Validated 7/7 against
@@ -128,6 +184,22 @@ export interface DerivedCatalog {
  * and every field models.dev does not publish. A record whose fields have the
  * wrong type falls back per-field rather than failing the whole catalogue.
  */
+/**
+ * One models.dev record → one pi-ai model. Everything the plugin can learn
+ * about a model's CAPABILITIES is taken from the record rather than inherited:
+ *
+ *   - image input      ← `modalities.input` (pi-ai knows only text/image, so
+ *                        audio/video/pdf are dropped, not silently kept)
+ *   - context window   ← `limit.context`
+ *   - max output       ← `limit.output`
+ *   - thinking levels  ← `reasoning_options[].values`
+ *
+ * A field models.dev does not publish falls back to the template, and the
+ * template is one fixed record — so `thinkingLevelMap` is set EXPLICITLY in
+ * both branches. Inheriting another model's level list would offer levels this
+ * model rejects, which the host reports as `UNSUPPORTED_REASONING_EFFORT`
+ * rather than clamping.
+ */
 function buildModel(record: CatalogRecord, template: Model<Api>, knownApis?: ReadonlyMap<string, Api>): Model<Api> {
   const id = typeof record.id === "string" && record.id !== "" ? record.id : "";
   const api = channelFor(record, knownApis);
@@ -136,6 +208,7 @@ function buildModel(record: CatalogRecord, template: Model<Api>, knownApis?: Rea
   const declaredInput = Array.isArray(modalities.input)
     ? modalities.input.filter((entry): entry is "text" | "image" => entry === "text" || entry === "image")
     : [];
+  const levels = thinkingLevelMapFor(record);
   return {
     ...template,
     id,
@@ -148,6 +221,7 @@ function buildModel(record: CatalogRecord, template: Model<Api>, knownApis?: Rea
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: finitePositive(limit.context) ?? template.contextWindow,
     maxTokens: finitePositive(limit.output) ?? template.maxTokens,
+    thinkingLevelMap: (levels ?? undefined) as Model<Api>["thinkingLevelMap"],
     // `compat` is transport-specific. Carrying the template's completions
     // overrides onto a responses model would misconfigure it, so a channel
     // change drops them and lets pi-ai auto-detect from baseUrl.

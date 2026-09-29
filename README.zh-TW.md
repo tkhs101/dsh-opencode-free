@@ -91,8 +91,12 @@ dsh plugin --profile web remove dsh-opencode-free
 | Ling 3.0 Flash Fin Free | `ling-3.0-flash-fin-free` | 文字 | 256K |
 | Big Pickle | `big-pickle` | 文字 | 200K |
 
-所有模型都支援推理和工具呼叫。DSH 的推理等級會直接傳給上游；沒有選的話，
-Muse Spark 使用 `xhigh`。
+所有模型都支援推理和工具呼叫。DSH 的推理等級會直接傳給上游；可選的等級逐模型取自
+models.dev——Muse Spark 是 `minimal`…`xhigh`，Space Bunny 是 `low`…`max`，模型沒
+發布的等級不會出現在選項裡。沒有選的話，Muse Spark 使用 `xhigh`。
+
+每個模型的識圖能力、上下文大小與最大輸出同樣讀自 models.dev：只有在模型宣告支援
+圖片時才會附上截圖，選擇器裡的上下文數字也是該模型自己的，而不是抄另一個模型的。
 
 **這張表是快照，不是合約。** 它的用途是讓你認出自己在選什麼；真正的清單是插件最後
 一次讀到的內容。到插件詳情頁就能看到並調整：每個模型都有開關，可以把它從模型選單

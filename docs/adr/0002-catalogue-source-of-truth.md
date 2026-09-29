@@ -45,6 +45,17 @@ provider 上，`deepseek-v4-flash-free`（免費層已結束、實測呼叫失�
   `reasoning_options=[{type:"toggle"}]` 為 completions；`effort` 為
   responses）→ 兜底 completions（依據 `provider.npm =
   "@ai-sdk/openai-compatible"`）。已對 7 個已知模型驗證 7/7 吻合。
+- **能力欄位一律取自 models.dev，不繼承模板**：識圖 ← `modalities.input`
+  （pi-ai 只認 text/image，audio/video/pdf 被丟棄而非原樣透傳）、上下文 ←
+  `limit.context`、最大輸出 ← `limit.output`、思考等級 ←
+  `reasoning_options[type=effort].values` → pi-ai 的 `thinkingLevelMap`。
+  模板是固定一筆記錄，所以 `thinkingLevelMap` 兩個分支都顯式賦值：繼承別人的
+  等級表會供應本模型不支援的等級，而 host 對此報
+  `UNSUPPORTED_REASONING_EFFORT`，不是夾取值。
+  models.dev 沒發布等級時（`toggle`、空陣列）**不宣稱**——pi-ai 沒有「只有開」的
+  等級名，亂猜會得到上游拒絕的等級。
+  這條修掉一個實際缺陷：插件對 muse-spark 預設 `xhigh`，但派生記錄沒有等級表，
+  pi-ai 的可用集合止於 `high`，請求被靜默降級。
 - 快取：`$DSH_HOME/dsh-opencode-free/catalog.json`，只存 models 段（不存
   provider 包裝層），臨時檔＋rename 原子寫，附 ETag 做條件重驗證。
 - 失效：讀目錄時若快取超過 24h 則背景重拉，不阻塞當次請求，不設定時器
