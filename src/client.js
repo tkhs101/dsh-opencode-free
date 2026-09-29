@@ -85,6 +85,9 @@ window.__ModuleLoader__.load({
 			"probing.removed": "本轮下架",
 			"probing.unprobed": "本轮未探测",
 			"probing.andMore": "等",
+			"probing.unmeasured": "未测到",
+			"probing.roundRefused": "本轮没能测到这些模型",
+			"probing.notModelFault": "这是当时的网络状况，不是该模型的结论",
 			"reason.dead": "已下架",
 			"reason.notlisted": "Zen 未提供",
 			"reason.timeout": "探测超时",
@@ -131,6 +134,9 @@ window.__ModuleLoader__.load({
 			"probing.removed": "Removed this round",
 			"probing.unprobed": "Not probed",
 			"probing.andMore": "and",
+			"probing.unmeasured": "Not measured",
+			"probing.roundRefused": "These models could not be measured this round",
+			"probing.notModelFault": "that was the network at the time, not a verdict on the model",
 			"reason.dead": "Gone",
 			"reason.notlisted": "Not offered",
 			"reason.timeout": "Timed out",
@@ -267,6 +273,7 @@ window.__ModuleLoader__.load({
 			".opf-capsule-badnum{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#FF3B30}",
 			".opf-summaryline{display:flex;align-items:baseline;gap:6px;margin:0;font-size:12px;line-height:1.6;color:#86868B}",
 			".opf-capsule-gone{color:#FF9500;font-weight:500;padding-left:2px;border-left:1px solid rgba(0,0,0,.08)}",
+			".opf-capsule-skip{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#86868B}",
 			".opf-row-probing{background:rgba(0,113,227,.02)}",
 			".opf-row-probing:hover{background:rgba(0,113,227,.04)}",
 			".opf-row-waiting{opacity:.8}"
@@ -577,6 +584,15 @@ window.__ModuleLoader__.load({
 		    named in the report instead. */
 		var GONE_CODES = { "dead": true, "not-listed": true };
 
+		/**
+		 * Failure codes that say nothing about the model. The tier refused, the
+		 * quota was gone, or the key was rejected — the same answer every
+		 * channel would have given. Painting these red on a row reads as "this
+		 * model is bad" when the round actually learned nothing about it, which
+		 * is exactly how a working model ends up wearing a failure badge.
+		 */
+		var CALLER_CODES = { "anon-gated": true, "quota-exhausted": true, "bad-key": true };
+
 		function failureText(t, result) {
 			var key = typeof result.code === "string" && hasOwnKey(FAILURE_WORDS, result.code)
 				? FAILURE_WORDS[result.code]
@@ -862,15 +878,28 @@ window.__ModuleLoader__.load({
 							checkIcon(),
 							E("span", { className: "opf-probe-ms" }, ms === null ? "" : ms + "ms")));
 					} else if (status === "failed") {
-						/* Red, but never mute: the badge names the reason and
-						   the full story (status + what to do about it) rides
-						   along as the tooltip, because a red dot that says
-						   only "failed" is not a report. */
-						left.push(E("span", {
-							key: "probe",
-							className: "opf-probe opf-probe-fail",
-							title: failureDetail(t, verdict)
-						}, crossIcon(), E("span", null, failureText(t, verdict))));
+						if (CALLER_CODES[verdict.code] === true) {
+							/* Grey, never red: the round learned nothing about
+							   this model, so the row must not wear a failure.
+							   The reason and the "not about the model" banner
+							   below carry the story instead. */
+							left.push(E("span", {
+								key: "probe",
+								className: "opf-probe opf-probe-wait",
+								title: failureDetail(t, verdict)
+							}, E("span", { className: "opf-waitdot" }),
+								E("span", null, t("probing.unmeasured"))));
+						} else {
+							/* Red, but never mute: the badge names the reason and
+							   the full story (status + what to do about it) rides
+							   along as the tooltip, because a red dot that says
+							   only "failed" is not a report. */
+							left.push(E("span", {
+								key: "probe",
+								className: "opf-probe opf-probe-fail",
+								title: failureDetail(t, verdict)
+							}, crossIcon(), E("span", null, failureText(t, verdict))));
+						}
 					} else if (status === "probing") {
 						rowClass += " opf-row-probing";
 						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-busy" },
@@ -952,6 +981,8 @@ window.__ModuleLoader__.load({
 			   fact on screen instead of a flash that vanishes on completion.
 			   Both sit next to the last-probe timestamp. */
 			var capsule = null;
+			var unmeasuredCount = 0;
+			var unmeasuredWords = {};
 			if (progress !== null && progress.total > 0) {
 				if (progress.running === true) {
 					var pct = Math.max(0, Math.min(100, Math.round((progress.done / progress.total) * 100)));
@@ -969,11 +1000,22 @@ window.__ModuleLoader__.load({
 					var okCount = 0;
 					var badCount = 0;
 					var goneCount = 0;
+					unmeasuredCount = 0;
+					unmeasuredWords = {};
 					for (var rid in liveResults) {
 						if (!hasOwnKey(liveResults, rid)) continue;
 						var entry = liveResults[rid];
 						if (entry !== null && entry.status === "ok") {
 							okCount += 1;
+							continue;
+						}
+						// A refusal is not a model verdict, so it is not a
+						// "failure" of anything but the round itself. Counting
+						// it separately is what stops a gated window from
+						// painting the whole list red.
+						if (entry !== null && CALLER_CODES[entry.code] === true) {
+							unmeasuredCount += 1;
+							unmeasuredWords[failureText(t, entry)] = true;
 							continue;
 						}
 						badCount += 1;
@@ -995,12 +1037,30 @@ window.__ModuleLoader__.load({
 							" ",
 							E("span", { className: "opf-capsule-oknum" }, String(okCount)),
 							" ",
-							E("span", { className: "opf-capsule-badnum" }, String(badCount))),
+							E("span", { className: "opf-capsule-badnum" }, String(badCount)),
+							unmeasuredCount > 0
+								? E("span", { className: "opf-capsule-skip" },
+									"· " + t("probing.unmeasured") + " " + String(unmeasuredCount))
+								: null),
 						goneCount > 0
 							? E("span", { className: "opf-capsule-gone" },
 								t("probing.removed") + " " + String(goneCount))
 							: null);
 				}
+			}
+
+			/* When the tier refused, said the quota was gone, or rejected the key,
+			   the round learned nothing about those models — so it says exactly
+			   that, once, instead of stamping each row with a red verdict that a
+			   later working call would prove wrong. */
+			var refusedNote = null;
+			if (progress !== null && !progress.running && unmeasuredCount > 0) {
+				var refusedWords = [];
+				for (var word in unmeasuredWords) {
+					if (hasOwnKey(unmeasuredWords, word)) refusedWords.push(word);
+				}
+				refusedNote = E("p", { className: "opf-note" },
+					t("probing.roundRefused") + "：" + refusedWords.join("、") + " —— " + t("probing.notModelFault"));
 			}
 
 			/* Why a vanished model vanished. Rendered only when the last round
@@ -1052,6 +1112,7 @@ window.__ModuleLoader__.load({
 					fallbackNote,
 					untrustedNote,
 					removedNote,
+					refusedNote,
 					listArea,
 					error ? E("p", { className: "opf-error" }, error) : null,
 					probeError ? E("p", { className: "opf-error" }, probeError) : null),

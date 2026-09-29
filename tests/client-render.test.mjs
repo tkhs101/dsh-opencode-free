@@ -395,6 +395,51 @@ test('a finished round stays on screen: tally, per-row reasons, and the dead mod
   }
 });
 
+test('a refused round accuses no model: grey rows, one banner, separate count', async () => {
+  // The reported bug. A round that ran into a gated window learned nothing
+  // about any model, and for a while the card painted exactly that ignorance
+  // red on every row — so a model that works in DSH wore a failure badge. The
+  // refusal is a fact about the round, and it renders as one banner plus grey
+  // "unmeasured" rows, never as red verdicts.
+  const refused = {
+    running: false,
+    total: 3,
+    done: 3,
+    current: null,
+    results: {
+      'space-bunny-free': { status: 'ok', ms: 218 },
+      'big-pickle': { status: 'failed', ms: 12, code: 'anon-gated', http: 403 },
+      'muse-spark-1.3-contributor-free': { status: 'failed', ms: 9, code: 'quota-exhausted', http: 429 },
+    },
+    startedAt: 1,
+  }
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'GET') return { ok: true, json: async () => refused }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    await mounted.fireTimers()
+    const end = collect(mounted.rerender())
+    const endHas = (cls) => end.classes.includes(cls)
+    // The banner says what happened and, crucially, what it does NOT mean.
+    assert.ok(end.texts.some((t) => t.includes('本轮没能测到')), 'the round-level refusal is announced');
+    assert.ok(end.texts.some((t) => t.includes('不是该模型的结论')), 'and disowned as a verdict');
+    // The refused rows are grey "unmeasured", never red.
+    assert.ok(end.texts.some((t) => t.includes('未测到')), 'refused rows read as unmeasured');
+    const failBadges = [...walk(mounted.rerender())].filter((n) => String(n.props?.className ?? '')
+      .split(' ').includes('opf-probe-fail'))
+    assert.equal(failBadges.length, 0, 'no row wears red for a refusal');
+    // The answered row still shows its latency; the tally keeps the categories apart.
+    assert.ok(end.texts.some((t) => t.includes('218ms')), 'the answered row is unaffected');
+    assert.ok(endHas('opf-capsule'), 'the capsule still reports the round');
+  } finally {
+    mounted.dispose()
+  }
+});
+
 test('zh and en dictionaries carry the same key set', async () => {
   const src = await readFile(CLIENT_URL, 'utf8')
   const grab = (tag) => {

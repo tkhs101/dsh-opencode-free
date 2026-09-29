@@ -129,7 +129,10 @@ green with the answering latency, a spinner on the model being asked right now,
 grey for the ones still queued. A red row never says only "failed": it names the
 reason (gone, timed out, connection failed, the anonymous tier refusing, quota
 used up, a bad key) and carries the HTTP status plus what to do about it in its
-tooltip. Once the round ends the pill turns into its tally and stays on screen
+tooltip. A round that ran into one of those learns nothing about any model, so
+those rows are deliberately grey "unmeasured" rather than red: a refusal is
+reported once, as a banner that also disowns it as a verdict, instead of
+stamping every row with a failure a later working call would prove wrong. Once the round ends the pill turns into its tally and stays on screen
 instead of blinking away, and the capability badges return beside the outcome
 badges. A model the round took out of the list is named in a "removed this
 round" line, because a row that silently disappears has no way to explain
