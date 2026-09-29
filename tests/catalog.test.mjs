@@ -776,6 +776,38 @@ test('dead removes a model from every list; ok changes nothing', async () => {
   })
 })
 
+test('a dead verdict is final: the model is never probed again', async () => {
+  await withTempDir(async (dir) => {
+    // The cost argument, pinned: re-asking a model the route already refused
+    // spends the shared bucket to re-learn a settled fact. A catalogue whose
+    // first round kills 24 of 34 must probe 10 the next day, not 34.
+    const probe = recordingProber({ 'deepseek-v4-flash-free': DEAD(404) })
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.forceProbes()
+    assert.equal(probe.calls.length, DERIVED.length, 'round one covers everything')
+    probe.calls.length = 0
+    await catalog.forceProbes()
+    assert.deepEqual(probe.calls.slice().sort(), DERIVED.filter((id) => id !== 'deepseek-v4-flash-free'))
+    assert.ok(!catalog.current().visible.includes('deepseek-v4-flash-free'))
+
+    // Still final after a re-sync and across a restart — including the case
+    // that used to resurrect it: `adopt` prunes verdicts for models the
+    // catalogue lacks, so a dead model must NOT be dropped from `models`.
+    const resynced = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v2"', body: apiBody() })]),
+      probe,
+      baselineModels: [],
+    })
+    await waitFor(() => resynced.current().source === 'models.dev')
+    assert.ok(resynced.current().models.some((m) => m.id === 'deepseek-v4-flash-free'), 'the record is kept')
+    assert.ok(!resynced.current().visible.includes('deepseek-v4-flash-free'), 'the verdict survived the re-sync')
+    probe.calls.length = 0
+    await resynced.forceProbes()
+    assert.ok(!probe.calls.includes('deepseek-v4-flash-free'), 'and it is not re-asked')
+  })
+})
+
 test('D5 GUARD: an all-gated round leaves visibility unchanged and persists no verdict', async () => {
   await withTempDir(async (dir) => {
     // The failure this whole design exists to prevent: one gated egress IP

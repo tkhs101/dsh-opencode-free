@@ -116,21 +116,31 @@ Two rules decide what you are offered:
 
 A model that is not offered is simply **not in the list**. There is no second
 list naming what was dropped, so there is nothing that can disagree with the
-picker or go stale — if a model you expected is missing, re-probe and it either
-reappears or the card tells you the round was untrustworthy.
+picker or go stale.
+
+**A dead verdict is final.** Once the route has refused a model, the plugin
+never asks about it again — re-asking a settled question would spend the shared
+quota for nothing, and on this provider it is the difference between roughly 34
+requests a day and roughly 10. Nothing brings a removed model back on its own,
+**not even adding a Zen key**.
+
+If you add a key and want the whole catalogue re-judged against it, delete the
+plugin's cache file and restart DSH once:
+
+```
+%USERPROFILE%\.dsh\dsh-opencode-free\catalog.json
+```
+
+The next start re-reads models.dev, treats every model as unprobed, and probes
+them all again. This is the only way back, so it is worth knowing before you
+rely on the smaller list.
 
 A model counts as gone when the route answers that it will not serve it —
 `Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. The last
 of those is what most of the catalogue currently hits: **most models models.dev
 lists at zero cost are not actually on the free route**, so a first probe
-typically narrows the list from around 34 to about 10.
-
-**If you use a Zen key, this is route-relative, not permanent.** The check runs
-with whatever credential is configured, so a model the free route refuses but
-your key can reach is probed *with that key* and stays in the list. Models
-already marked gone are re-probed every day, so adding a key brings them back
-on the next round without a restart. Conversely, a model removed while you had
-no key may well work once you add one.
+typically narrows the list from around 34 to about 10 — and because the verdict
+is final, that is a one-time cost rather than a daily one.
 
 ### What the availability check costs you
 
@@ -139,7 +149,8 @@ answers. That is a real cost and it is worth being explicit about it:
 
 - **One round per local day, sent one at a time.** The requests are sequential
   on purpose — they share one anonymous quota bucket, so firing them all at
-  once would spend it faster and hammer upstream.
+  once would spend it faster and hammer upstream. The round only covers models
+  that have never been judged, so it shrinks as models are retired.
 - **It can be turned off by not using it.** There is no separate switch: the
   round runs when you read the model list, and the detail page's **Probe now**
   button asks for an extra round on demand, bypassing the daily limit. If you

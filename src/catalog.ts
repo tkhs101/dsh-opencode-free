@@ -435,11 +435,10 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     updatedAt = record.fetchedAt;
     if (Object.keys(record.probes).length > 0) probes = { ...record.probes };
     if (record.lastProbeAt > lastProbeAt) lastProbeAt = record.lastProbeAt;
-    // Verdicts for models the catalogue no longer carries are dead weight: a
-    // vanished model is never probed again, so its verdict can never change.
-    // Dropping them keeps the cache file from growing without bound across
-    // upstream removals. Safe either way — a returning model starts unprobed,
-    // i.e. visible, and the next round judges it on evidence.
+    // Verdicts for models the catalogue no longer carries are dropped: a
+    // vanished model is not in any round's target list, so keeping its verdict
+    // would only grow the cache file across upstream removals. This is also
+    // why a DEAD model is not removed from `models` above — see effectiveList.
     const present = new Set(models.map((model) => model.id));
     for (const id of Object.keys(probes)) if (!present.has(id)) delete probes[id];
   };
@@ -508,9 +507,11 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    * list, so there is deliberately no companion "unavailable" list to restore
    * or to go stale.
    *
-   * `models` itself still carries dead entries on purpose: it is the target
-   * list every round walks, so a model that comes back (or answers a Zen key
-   * that the free route refuses) is re-probed and returns on its own.
+   * `models` itself still carries dead entries, and that is load-bearing rather
+   * than untidy: `adopt` prunes verdicts for models the catalogue no longer
+   * has, so a dead model physically removed from `models` would lose its
+   * verdict on the next sync, come back as a fresh candidate, and be re-probed
+   * to the same answer. Keeping the record is what makes the verdict final.
    */
   const effectiveList = (): Model<Api>[] => {
     const gated = zenIds === null ? models : models.filter((model) => zenIds!.has(model.id));
@@ -562,11 +563,20 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
   };
 
   /**
-   * D2/D6b: one ordered round over the whole pre-gate catalogue.
+   * D2/D6b: one ordered round over the models that are still unjudged.
    *
    * Sequential `for…await` on purpose (no concurrency, no batching): the round
    * spends a shared anonymous-quota bucket, and firing 30+ requests at once
    * would both exhaust it faster and hammer upstream.
+   *
+   * A model already judged `dead` is NOT re-probed. The verdict is final by
+   * design: re-asking a model the route has already refused spends the shared
+   * bucket to re-learn a settled fact, and on this provider that is the
+   * difference between ~34 requests a day and ~10. The cost is real and
+   * deliberate — a model removed this way does not come back on its own, not
+   * even when a Zen key would serve it. Recovery is manual: delete
+   * `$DSH_HOME/dsh-opencode-free/catalog.json` and the next start re-derives
+   * and re-probes the whole catalogue.
    *
    * Only conclusive verdicts are recorded. An `inconclusive` — or a prober that
    * rejects — leaves the model exactly as it was (D5): one gated IP must never
@@ -574,7 +584,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    */
   const runProbeRound = async (): Promise<void> => {
     const stamp = now();
-    const targets = models.slice();
+    const targets = models.filter((model) => probes[model.id]?.verdict !== "dead");
     let untrusted = false;
     for (const model of targets) {
       let outcome: ProbeResult;
