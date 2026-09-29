@@ -45,12 +45,17 @@
 ```ts
 export interface Config {
   readonly apiKey?: string | undefined;
-  readonly hiddenModels?: readonly string[] | undefined; // 新：隐藏的模型 id 列表
+  // volatile 必不可少，见下 schema 注释；运行时 DSH 以 live ref 交付，apply 做容错解包。
+  readonly hiddenModels?: readonly string[] | { readonly get: () => readonly string[] | undefined } | undefined;
 }
 
 export const Config = z.object({
   apiKey: z.string(),
-  hiddenModels: z.array(z.string()).default([]), // 本仓 schemastery 无 .optional()，可选语义用 .default()
+  // volatile 必不可少：dsh-settings 只为含 volatile 字段的插件服务 configForms
+  // 行（volatileForm 无 volatile 字段返回 undefined，整行被跳过），且只接受对
+  // volatile 路径的写入（否则 scope.set 抛 "not volatile"）。无此 flag 时卡片
+  // 的 scope 为空、渲染 null——即面板不显示的根因。
+  hiddenModels: z.array(z.string()).default([]).volatile(),
 });
 ```
 

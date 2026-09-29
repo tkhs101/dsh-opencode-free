@@ -59,12 +59,16 @@ export const inject: readonly string[] = ["llm"];
 /** Plugin configuration: only the optional Zen key. Everything else is automatic. */
 export interface Config {
   readonly apiKey?: string | undefined;
-  readonly hiddenModels?: readonly string[] | undefined;
+  // Volatile: DSH only serves configForms rows (and accepts live writes) for
+  // volatile fields. Without this flag the detail-page card has no scope and
+  // renders nothing. Cordis delivers a live Volatile ref at runtime; the
+  // plain-array shape below covers tests and non-volatile hosts.
+  readonly hiddenModels?: readonly string[] | { readonly get: () => readonly string[] | undefined } | undefined;
 }
 
 export const Config = z.object({
   apiKey: z.string(),
-  hiddenModels: z.array(z.string()).default([]),
+  hiddenModels: z.array(z.string()).default([]).volatile(),
 });
 
 const PI_AI_AUTH_CONTEXT: AuthContext = Object.freeze({
@@ -126,9 +130,16 @@ export function apply(ctx: HostContext, config?: Config): void {
   const getConfigKey = (): string | undefined => configuredKey || process.env[ZEN_API_KEY_ENV]?.trim() || undefined;
 
   const provider = zenProvider(() => undefined, getConfigKey);
-  const hidden = new Set(
-    (config?.hiddenModels ?? []).map((id) => id.trim()).filter((id) => id.length > 0),
-  );
+  // hiddenModels arrives as a live Volatile ref under DSH (see Config docs
+  // above); unwrap tolerantly so plain arrays keep working in tests.
+  const rawHidden: unknown = config?.hiddenModels;
+  const getFn =
+    typeof rawHidden === "object" && rawHidden !== null && "get" in rawHidden
+      ? (rawHidden as { readonly get?: unknown }).get
+      : undefined;
+  const hiddenList: readonly string[] =
+    typeof getFn === "function" ? (((getFn as () => unknown)() ?? []) as readonly string[]) : ((rawHidden ?? []) as readonly string[]);
+  const hidden = new Set(hiddenList.map((id) => id.trim()).filter((id) => id.length > 0));
   const filtered = {
     ...provider,
     getModels: () => provider.getModels().filter((m) => !hidden.has(m.id)),

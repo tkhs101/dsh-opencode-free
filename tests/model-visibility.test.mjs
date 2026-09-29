@@ -61,3 +61,18 @@ test('hidden model resolveModel fails, visible model resolves (no message assert
   const resolved = await adapter.resolveModel(PROVIDER_ID, visible)
   assert.equal(resolved.id, visible)
 })
+
+test('Volatile-ref hiddenModels (DSH live shape) unwraps via get()', async () => {
+  const adapter = await adapterFor({ hiddenModels: { get: () => ['big-pickle'] } })
+  const ids = await listedIds(adapter)
+  assert.ok(!ids.includes('big-pickle'), 'ref-wrapped hidden model must not be listed')
+  assert.equal(ids.length, baselineIds.length - 1)
+  const emptyRef = await adapterFor({ hiddenModels: { get: () => undefined } })
+  assert.deepEqual([...(await listedIds(emptyRef))].sort(), [...baselineIds].sort())
+})
+
+test('schema marks hiddenModels volatile so DSH serves the config row', async () => {
+  const { Config } = plugin
+  const node = Config.dict?.hiddenModels ?? Config.inner
+  assert.ok(node?.meta?.volatile === true, 'hiddenModels must be volatile (configForms row + live writes)')
+})
