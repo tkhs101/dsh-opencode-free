@@ -453,9 +453,13 @@ const PROBE_PROMPT = "Reply with OK only.";
 /**
  * Reasoning models spend 64+ tokens thinking before any text, so a smaller
  * budget returns an empty completion and would read as "dead" (false
- * negative). See scripts/test-live.mjs, which uses the same floor.
+ * negative). 1024 rather than 512: the 512 floor was measured against a model
+ * that thought briefly, and muse-spark defaults to xhigh — the budget has to
+ * cover the reasoning AND leave room for the answer, or the probe reports a
+ * working model as silent. Same floor 9router settled on after its own
+ * #3010. See scripts/test-live.mjs for the live check.
  */
-const PROBE_MAX_TOKENS = 512;
+const PROBE_MAX_TOKENS = 1024;
 /** Same per-model ceiling as scripts/test-live.mjs. */
 const PROBE_TIMEOUT_MS = 30_000;
 
@@ -629,18 +633,29 @@ function createRecordingFetch(base: typeof fetch): {
   return { fetch: wrapped, read: () => ({ status, body, cause }) };
 }
 
-/** Whether a settled probe result carries a real text reply. */
-function hasTextReply(result: Record<string, unknown> | undefined): boolean {
+/**
+ * Whether a settled probe result proves the model answered.
+ *
+ * A `thinking` part counts. A reasoning model can spend the entire budget on
+ * chain-of-thought and return `stopReason: "length"` with no text at all
+ * (reproduced from 9router's issue #3010, which measured the same thing): the
+ * model worked, it just never got to the answer. Requiring a text part reports
+ * those models as failed, and the free tier is mostly reasoning models — so
+ * that reading failed the models most likely to be good. `stopReason: "error"`
+ * is still the one thing that settles it as no reply.
+ */
+function hasAnswer(result: Record<string, unknown> | undefined): boolean {
   if (!result || result.stopReason === "error") return false;
   const content = result.content;
   if (!Array.isArray(content)) return false;
   return content.some(
-    (part) =>
-      part !== null &&
-      typeof part === "object" &&
-      (part as { type?: unknown }).type === "text" &&
-      typeof (part as { text?: unknown }).text === "string" &&
-      (part as { text: string }).text.trim() !== "",
+    (part) => {
+      if (part === null || typeof part !== "object") return false;
+      const typed = part as { type?: unknown; text?: unknown; thinking?: unknown };
+      if (typed.type === "text") return typeof typed.text === "string" && typed.text.trim() !== "";
+      if (typed.type === "thinking") return typeof typed.thinking === "string" && typed.thinking.trim() !== "";
+      return false;
+    },
   );
 }
 
@@ -693,7 +708,7 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
     };
   }
   // A reply settles the question: the model answers, so it is not dead.
-  if (hasTextReply(result)) return { kind: "ok" };
+  if (hasAnswer(result)) return { kind: "ok" };
   const { status, body, cause } = recorder.read();
   if (expired()) {
     return {

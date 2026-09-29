@@ -17,6 +17,19 @@ import {
   swapCompactionPrompt,
 } from '../src/zen-provider.ts'
 
+/** Header lookup that survives Headers, plain objects and header arrays. */
+function readNodeHeader(headers, name) {
+  const want = String(name).toLowerCase()
+  if (headers === null || headers === undefined) return undefined
+  if (typeof headers.get === 'function') return headers.get(want)
+  if (Array.isArray(headers)) {
+    const hit = headers.find(([k]) => String(k).toLowerCase() === want)
+    return hit ? hit[1] : undefined
+  }
+  const entry = Object.entries(headers).find(([k]) => k.toLowerCase() === want)
+  return entry ? entry[1] : undefined
+}
+
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
 const libUrl = new URL('../lib/', import.meta.url)
 const hostFiles = (await readdir(libUrl)).filter((f) => f.endsWith('.js')).sort()
@@ -324,6 +337,67 @@ test('GUARD: the probe request carries the read+bash gate, streams, and asks for
   assert.equal(body.stream, true)
   assert.ok(body.max_tokens >= 512, `max_tokens was ${body.max_tokens}`)
   assert.equal(body.model, model.id)
+})
+
+test('GUARD: a reasoning model that spends the budget thinking still counts as answered', async () => {
+  // The reference implementation's issue #3010, reproduced: a reasoning model
+  // can burn the whole token budget on chain-of-thought and return
+  // finish_reason "length" with NO text — only a `thinking` part. That is a
+  // working model, and reading it as "no reply" reported a healthy model as
+  // failed. The free tier is mostly reasoning models, so this was not an edge
+  // case: it was the common case.
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  const thinkingOnly = [
+    'data: {"choices":[{"index":0,"delta":{"reasoning_content":"let me think about OK..."},"finish_reason":null}]}',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}',
+    'data: [DONE]',
+    '',
+  ].join('\n\n')
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => new Response(thinkingOnly, { headers: { 'Content-Type': 'text/event-stream' } }),
+  })
+  assert.equal(outcome.kind, 'ok', 'a thinking-only reply is a reply')
+  // And the budget has to leave room for an answer at all: 512 was measured
+  // against a model that thought for 60 tokens, not one that thinks like
+  // muse-spark at xhigh. The reference implementation settled on 1024.
+  let body
+  await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async (_url, init) => { body = JSON.parse(init.body); return sseReply() },
+  })
+  assert.ok(body.max_tokens >= 1024, `max_tokens was ${body.max_tokens}, want room for reasoning + an answer`)
+})
+
+test('GUARD: every probe in a round shares one session instead of minting a new one', async () => {
+  // Zen accounts free-tier quota PER SESSION and routes a session to a sticky
+  // backend. A probe that mints a fresh session per model therefore (a) burns
+  // one bucket per model instead of one per round, which is how you talk
+  // yourself into the very 429 you are probing for, and (b) measures different
+  // backends, so the per-model latency the panel shows is partly a measurement
+  // of backend selection rather than of the model.
+  const p = plugin.zenProvider(() => undefined, () => undefined) // as index.ts wires it
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  const seen = []
+  for (let i = 0; i < 3; i += 1) {
+    await probeModel(model, {
+      provider: p,
+      apiKey: 'public',
+      fetchImpl: async (_url, init) => {
+        seen.push(readNodeHeader(init.headers, 'x-opencode-session'))
+        return sseReply()
+      },
+    })
+  }
+  assert.equal(seen.length, 3)
+  const distinct = new Set(seen)
+  assert.equal(distinct.size, 1, `three probes produced ${distinct.size} sessions: ${[...distinct].join(', ')}`)
+  for (const value of seen) {
+    assert.match(String(value), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/, 'and the shared one is canonical')
+  }
 })
 
 test('GUARD: placeholder efforts never reach the wire', async () => {
