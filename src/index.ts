@@ -252,8 +252,20 @@ function registerCatalogRoutes(ctx: HostContext, catalog: Catalog): void {
         // `runProbes`, not `forceProbes`: the button is the user's explicit
         // "ask upstream now", so the daily gate must not swallow it. (The
         // automatic daily round is the lazy trigger in apply() instead.)
+        //
+        // One path, two methods. POST runs a round to completion and answers
+        // with the settled snapshot (so the panel repaints once, from the
+        // answer). GET answers the LIVE progress mid-round — the panel polls
+        // it while its own POST is still in flight to paint the progress pill
+        // and the per-row badges. GET is read-only like the catalogue read, so
+        // it carries no origin fence; POST keeps the write route's.
         const probeHandler: RouteHandler = (req, res) => {
-          if ((req.method ?? "GET").toUpperCase() !== "POST") {
+          const method = (req.method ?? "GET").toUpperCase();
+          if (method === "GET") {
+            sendJson(res, 200, catalog.probeProgress());
+            return;
+          }
+          if (method !== "POST") {
             sendJson(res, 405, { error: "method not allowed" });
             return;
           }

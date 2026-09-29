@@ -970,6 +970,54 @@ test('a dead verdict is final: the model is never probed again', async () => {
   })
 })
 
+test('probeProgress tracks the round live: current, done/total and per-model results', async () => {
+  await withTempDir(async (dir) => {
+    const seen = []
+    const clock = { t: 1_000_000 }
+    const probe = async (model) => {
+      // A slow model first, so the mid-round read catches it in flight.
+      if (model.id === 'ling-3.0-flash-fin-free') await new Promise((resolve) => setTimeout(resolve, 50))
+      clock.t += model.id === 'deepseek-v4-flash-free' ? 0 : 120
+      seen.push({ ...catalog.probeProgress(), at: model.id })
+      if (model.id === 'deepseek-v4-flash-free') return DEAD(404)
+      return { kind: 'ok' }
+    }
+    const catalog = await probedCatalog(dir, probe, clock)
+    assert.deepEqual(catalog.probeProgress(), {
+      running: false, total: 0, done: 0, current: null, results: {}, startedAt: 0,
+    }, 'no round has ever run')
+    const running = catalog.forceProbes()
+    // Let the first model start, then read mid-round.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const mid = catalog.probeProgress()
+    assert.equal(mid.running, true)
+    assert.equal(mid.total, DERIVED.length)
+    assert.ok(typeof mid.current === 'string' && mid.current !== '', 'one model is in flight')
+    assert.equal(mid.startedAt, 1_000_000)
+    await running
+    const end = catalog.probeProgress()
+    assert.equal(end.running, false)
+    assert.equal(end.done, DERIVED.length)
+    assert.equal(end.current, null)
+    assert.equal(end.results['big-pickle'].status, 'ok')
+    assert.equal(end.results['big-pickle'].ms, 120)
+    assert.equal(end.results['deepseek-v4-flash-free'].status, 'failed', 'dead counts as not-answered for the row')
+    assert.equal(end.results['deepseek-v4-flash-free'].ms, 0)
+    // The verdicts (not the progress) are what persist.
+    assert.ok(!catalog.current().visible.includes('deepseek-v4-flash-free'))
+  })
+})
+
+test('probeProgress is a copy: the panel cannot mutate round state', async () => {
+  await withTempDir(async (dir) => {
+    const catalog = await probedCatalog(dir, recordingProber())
+    await catalog.forceProbes()
+    const first = catalog.probeProgress()
+    first.results['big-pickle'] = { status: 'failed', ms: 0 }
+    assert.equal(catalog.probeProgress().results['big-pickle'].status, 'ok')
+  })
+})
+
 test('D5 GUARD: an all-gated round leaves visibility unchanged and persists no verdict', async () => {
   await withTempDir(async (dir) => {
     // The failure this whole design exists to prevent: one gated egress IP

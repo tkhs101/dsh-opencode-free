@@ -117,6 +117,12 @@ a vision badge when the model declares image input, and a thinking badge naming
 its strongest published reasoning level. Models that publish no level list get
 no thinking badge rather than a guessed one.
 
+While a probe round is running, the card switches to live reporting: a progress
+pill counts finished models against the total, and every row shows its own
+state — green with the answering latency, red on failure, a spinner on the model
+being asked right now, grey for the ones still queued. When the round ends the
+card repaints from the answer and the capability badges return.
+
 Two rules decide what you are offered:
 
 - A model is offered until it stops answering **on the route you are using**.

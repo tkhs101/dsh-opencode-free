@@ -93,6 +93,7 @@ const API_FIXTURE = {
 
 const CATALOG_ROUTE = '/dsh-opencode-free/api/catalog'
 const REFRESH_ROUTE = '/dsh-opencode-free/api/refresh'
+const PROBE_ROUTE = '/dsh-opencode-free/api/probe'
 /** The slot `patchGlobalFetchForZen` pins the first-seen global fetch into. */
 const ZEN_FETCH_GUARD = '__dshOpenCodeFreeFetchOriginal'
 
@@ -344,8 +345,27 @@ test('routes are method-guarded and disposing releases them', async () => {
   try {
     assert.equal((await callRoute(host, CATALOG_ROUTE, 'POST')).status, 405, 'read route rejects writes')
     assert.equal((await callRoute(host, REFRESH_ROUTE, 'GET')).status, 405, 'refresh route rejects reads')
+    assert.equal((await callRoute(host, PROBE_ROUTE, 'PUT')).status, 405, 'probe route rejects other methods')
   } finally {
     host.dispose()
   }
   assert.equal(host.routes.size, 0, 'unload must release both routes')
+})
+
+test('GET on the probe route reports live progress without starting a round', async () => {
+  const host = mount({})
+  try {
+    // No prober is wired in this mount, so forceProbes is a no-op — but the
+    // progress shape must still answer, because the panel polls it blind.
+    const idle = await callRoute(host, PROBE_ROUTE, 'GET')
+    assert.equal(idle.status, 200)
+    assert.deepEqual(idle.body, {
+      running: false, total: 0, done: 0, current: null, results: {}, startedAt: 0,
+    })
+    // A read-only GET carries no origin fence (like the catalogue read);
+    // only the POST that spends quota does.
+    assert.equal(idle.body.running, false)
+  } finally {
+    host.dispose()
+  }
 })

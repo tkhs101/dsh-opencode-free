@@ -76,6 +76,9 @@ window.__ModuleLoader__.load({
 			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
 			"probeUntrusted": "本轮探测结论不可信（上游限流、匿名额度被闸或网络异常），模型显示保持不变。",
 			"probedAt": "上次探测",
+			"probing.now": "正在探测",
+			"probing.waiting": "等待中",
+			"probing.failed": "探测失败",
 			"badge.vision": "视觉",
 			"badge.thinking": "思考",
 			"legend.vision": "多模态视觉",
@@ -100,6 +103,9 @@ window.__ModuleLoader__.load({
 			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
 			"probeUntrusted": "This round's probe results were untrustworthy (upstream throttling, the anonymous tier refusing, or a network error), so visibility is unchanged.",
 			"probedAt": "Last probe",
+			"probing.now": "Probing",
+			"probing.waiting": "Waiting",
+			"probing.failed": "Failed",
 			"badge.vision": "Vision",
 			"badge.thinking": "Thinking",
 			"legend.vision": "Multimodal vision",
@@ -191,7 +197,31 @@ window.__ModuleLoader__.load({
 			".opf-hint{margin:0;font-size:12px;line-height:1.6;color:#86868B}",
 			".opf-legend{display:flex;align-items:center;gap:10px;flex:none}",
 			".opf-note{margin:0;font-size:12px;line-height:1.6;color:#86868B}",
-			".opf-error{margin:0;font-size:12px;color:#E0382E}"
+			".opf-error{margin:0;font-size:12px;color:#E0382E}",
+			"@keyframes opf-spin{to{transform:rotate(360deg)}}",
+			"@keyframes opf-ping{0%{transform:scale(1);opacity:.75}80%,100%{transform:scale(2.4);opacity:0}}",
+			".opf-spin{animation:opf-spin 1s linear infinite}",
+			".opf-btn-probing{color:#0071E3 !important;background:rgba(0,113,227,.10) !important;border-color:rgba(0,113,227,.30) !important}",
+			".opf-btn-probing svg{color:#0071E3 !important}",
+			".opf-capsule{display:inline-flex;align-items:center;gap:8px;background:#F5F5F7;border:1px solid #E5E5EA;border-radius:9999px;padding:4px 12px;font-size:12px;box-shadow:0 1px 2px rgba(0,0,0,.04);white-space:nowrap}",
+			".opf-pingwrap{position:relative;display:inline-flex;width:8px;height:8px;flex:none}",
+			".opf-pingring{position:absolute;display:inline-flex;width:100%;height:100%;border-radius:50%;background:#0071E3;animation:opf-ping 1.4s cubic-bezier(0,0,.2,1) infinite}",
+			".opf-pingdot{position:relative;display:inline-flex;width:8px;height:8px;border-radius:50%;background:#0071E3}",
+			".opf-capsulelabel{color:#1D1D1F;font-weight:500}",
+			".opf-count{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#0071E3}",
+			".opf-bar{width:56px;height:6px;background:#E5E5EA;border-radius:9999px;overflow:hidden;flex:none}",
+			".opf-fill{height:100%;background:#0071E3;border-radius:9999px;transition:width .3s ease-out}",
+			".opf-probe{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9999px;font-size:12px;font-weight:500;line-height:1.6;white-space:nowrap;user-select:none}",
+			".opf-probe svg{width:14px;height:14px;flex:none}",
+			".opf-probe-ms{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px}",
+			".opf-probe-ok{background:rgba(52,199,89,.10);color:#28A745}",
+			".opf-probe-fail{background:rgba(255,59,48,.10);color:#FF3B30}",
+			".opf-probe-busy{background:rgba(0,113,227,.10);color:#0071E3}",
+			".opf-probe-wait{background:rgba(229,229,234,.50);color:#86868B}",
+			".opf-waitdot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#C7C7CC;flex:none}",
+			".opf-row-probing{background:rgba(0,113,227,.02)}",
+			".opf-row-probing:hover{background:rgba(0,113,227,.04)}",
+			".opf-row-waiting{opacity:.8}"
 		].join("\n");
 
 		function ensureStyles() {
@@ -254,11 +284,32 @@ window.__ModuleLoader__.load({
 		var ICON_EYE_OUTLINE = "M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z";
 		var ICON_EYE_PUPIL = "M15 12a3 3 0 11-6 0 3 3 0 016 0z";
 		var ICON_STAR = "M12 2l2.4 6.9 7.1.3-5.5 4.5 1.9 6.9-5.9-4-5.9 4 1.9-6.9-5.5-4.5 7.1-.3L12 2z";
+		var ICON_CHECK = "M4.5 12.75l6 6 9-13.5";
+		var ICON_CROSS = "M6 18L18 6M6 6l12 12";
 
 		function refreshIcon() { return svgIcon([ICON_REFRESH], 2.2); }
 		function searchIcon() { return svgIcon([ICON_SEARCH], 2.2); }
 		function eyeIcon() { return svgIcon([ICON_EYE_OUTLINE, ICON_EYE_PUPIL], 2); }
 		function starIcon() { return svgIcon([ICON_STAR], 0); }
+		function checkIcon() { return svgIcon([ICON_CHECK], 2.4); }
+		function crossIcon() { return svgIcon([ICON_CROSS], 2.4); }
+
+		/** Loading spinner from the mock: faint ring plus a solid arc. */
+		function spinnerIcon(spinning) {
+			return E("svg",
+				{
+					className: spinning ? "opf-spin" : undefined,
+					fill: "none",
+					viewBox: "0 0 24 24",
+					"aria-hidden": "true",
+				},
+				E("circle", { cx: "12", cy: "12", r: "10", stroke: "currentColor", strokeWidth: "3.5", opacity: "0.25" }),
+				E("path", {
+					d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z",
+					fill: "currentColor",
+					opacity: "0.9",
+				}));
+		}
 
 		/** Display names for thinking levels: "xhigh" reads "XHigh", not "Xhigh". */
 		var LEVEL_LABELS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
@@ -425,6 +476,36 @@ window.__ModuleLoader__.load({
 			}
 		}
 
+		/**
+		 * GET the live progress of the current (or last) probe round. Resolves
+		 * null on any failure; the progress pill simply keeps showing the last
+		 * reading until the POST that started the round answers.
+		 */
+		function loadProgress() {
+			if (typeof fetch !== "function") return Promise.resolve(null);
+			try {
+				return Promise.resolve(fetch(PROBE_URL, { method: "GET", headers: { accept: "application/json" } }))
+					.then(function (response) { return response && response.ok ? response.json() : null; })
+					.then(function (payload) {
+						if (payload === null || typeof payload !== "object") return null;
+						return {
+							running: payload.running === true,
+							total: typeof payload.total === "number" ? payload.total : 0,
+							done: typeof payload.done === "number" ? payload.done : 0,
+							current: typeof payload.current === "string" ? payload.current : null,
+							results: payload.results !== null && typeof payload.results === "object" ? payload.results : {},
+						};
+					})
+					.catch(function (error) {
+						console.warn(TAG + " probe progress failed:", error && error.message ? error.message : error);
+						return null;
+					});
+			} catch (error) {
+				console.warn(TAG + " probe progress threw:", error && error.message ? error.message : error);
+				return Promise.resolve(null);
+			}
+		}
+
 		// ── models card (module-level component) ──────────────────────────────
 
 		/**
@@ -470,6 +551,13 @@ window.__ModuleLoader__.load({
 			var probeError = probeErrorState[0];
 			var setProbeError = probeErrorState[1];
 
+			/* Live round progress, polled while the probe POST is in flight.
+			   Null means "no reading yet" — the pill and the row badges only
+			   render once the first poll lands. */
+			var progressState = useState(null);
+			var progress = progressState[0];
+			var setProgress = progressState[1];
+
 			useEffect(function () {
 				if (scope === undefined || scope === null || typeof scope.subscribe !== "function") return undefined;
 				var unsubscribe = scope.subscribe(function () { bumpTick(function (n) { return n + 1; }); });
@@ -492,14 +580,39 @@ window.__ModuleLoader__.load({
 			}
 
 			/* A null answer means the host did not answer, NOT an empty
-			   catalogue: keep the rows on screen and offer the retry. */
+			   catalogue: keep the rows on screen and offer the retry.
+			   While the POST is in flight the progress endpoint is polled, so
+			   the pill and the per-row badges track the round live; when the
+			   POST answers, polling stops and the card repaints from the final
+			   snapshot (capability badges return). */
+			var PROGRESS_POLL_MS = 800;
+
 			function probe() {
 				if (probing) return;
 				setProbeError("");
 				setProbing(true);
+				setProgress(null);
+				var timer = null;
+				var stopped = false;
+				var poll = function () {
+					if (stopped) return;
+					loadProgress().then(function (reading) {
+						if (stopped) return;
+						if (reading !== null) setProgress(reading);
+						if (typeof setTimeout === "function" && !stopped) {
+							timer = setTimeout(poll, PROGRESS_POLL_MS);
+						}
+					});
+				};
+				poll();
 				probeCatalog().then(function (snapshot) {
+					stopped = true;
+					if (timer !== null && typeof clearTimeout === "function") {
+						try { clearTimeout(timer); } catch (error_) { /* best effort */ }
+					}
 					if (snapshot !== null) setCatalog(snapshot);
 					else setProbeError(t("probeFailed"));
+					setProgress(null);
 					setProbing(false);
 				});
 			}
@@ -575,26 +688,62 @@ window.__ModuleLoader__.load({
 			var visible = catalog !== undefined && catalog !== null ? catalog.visible : [];
 			var cards = catalog !== undefined && catalog !== null && catalog.cards !== undefined ? catalog.cards : {};
 
-			/* One row per visible id: mono id, capability badges, status word,
-			   iOS-style switch. Badge data comes from the host's `models`
-			   array; a row whose card is missing renders bare rather than
-			   failing — the toggle is the contract, badges are decoration. */
+			/* One row per visible id. At rest: mono id, capability badges, status
+			   word, iOS-style switch. While a round is running, the capability
+			   badges step aside for the probe badge — green "✓ 142ms", red
+			   "探测失败", blue spinner "探测中...", grey "等待中" — and the
+			   active row highlights while queued rows dim, per the approved
+			   mock. Badge data comes from the host's `models` array; a row
+			   whose card is missing renders bare rather than failing — the
+			   toggle is the contract, badges are decoration. */
+			var live = progress !== null && progress.running === true;
+			var liveResults = live ? progress.results : {};
+			var liveCurrent = live ? progress.current : null;
+
 			var rows = visible.map(function (id) {
 				var shown = !hasOwnKey(hidden, id);
 				var card = hasOwnKey(cards, id) ? cards[id] : null;
 				var left = [E("span", { key: "id", className: "opf-id" }, id)];
-				if (card !== null && card.image === true) {
-					left.push(E("span", { key: "vision", className: "opf-badge opf-badge-vision" },
-						eyeIcon(),
-						E("span", null, t("badge.vision"))));
-				}
-				if (card !== null && card.thinking !== null) {
-					left.push(E("span", { key: "think", className: "opf-badge opf-badge-think" },
-						starIcon(),
-						E("span", null, t("badge.thinking") + " · " + levelLabel(card.thinking))));
+				var rowClass = "opf-row";
+				if (!live) {
+					if (card !== null && card.image === true) {
+						left.push(E("span", { key: "vision", className: "opf-badge opf-badge-vision" },
+							eyeIcon(),
+							E("span", null, t("badge.vision"))));
+					}
+					if (card !== null && card.thinking !== null) {
+						left.push(E("span", { key: "think", className: "opf-badge opf-badge-think" },
+							starIcon(),
+							E("span", null, t("badge.thinking") + " · " + levelLabel(card.thinking))));
+					}
+				} else {
+					var verdict = hasOwnKey(liveResults, id) ? liveResults[id] : null;
+					var status = verdict !== null && verdict.status === "ok" ? "ok"
+						: verdict !== null ? "failed"
+						: id === liveCurrent ? "probing" : "waiting";
+					if (status === "ok") {
+						var ms = typeof verdict.ms === "number" && isFinite(verdict.ms) ? Math.max(0, Math.round(verdict.ms)) : null;
+						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-ok" },
+							checkIcon(),
+							E("span", { className: "opf-probe-ms" }, ms === null ? "" : ms + "ms")));
+					} else if (status === "failed") {
+						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-fail" },
+							crossIcon(),
+							E("span", null, t("probing.failed"))));
+					} else if (status === "probing") {
+						rowClass += " opf-row-probing";
+						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-busy" },
+							spinnerIcon(true),
+							E("span", null, t("probing"))));
+					} else {
+						rowClass += " opf-row-waiting";
+						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-wait" },
+							E("span", { className: "opf-waitdot" }),
+							E("span", null, t("probing.waiting"))));
+					}
 				}
 				return E("label",
-					{ key: id, className: "opf-row" },
+					{ key: id, className: rowClass },
 					E("span", { className: "opf-main" }, left),
 					E("span", { className: "opf-side" },
 						E("span", { className: "opf-state" + (shown ? " on" : "") }, shown ? t("row.visible") : t("row.hidden")),
@@ -649,6 +798,28 @@ window.__ModuleLoader__.load({
 				E("span", { className: "opf-badge opf-badge-vision" }, eyeIcon(), E("span", null, t("legend.vision"))),
 				E("span", { className: "opf-badge opf-badge-think" }, starIcon(), E("span", null, t("legend.thinking"))));
 
+			/* Progress capsule: pulsing dot, "正在探测", live "done/total" and a
+			   mini bar. Renders only while a polled reading says a round is
+			   running; sits next to the timestamp, per the mock. */
+			var capsule = null;
+			if (progress !== null && progress.running === true && progress.total > 0) {
+				var pct = Math.max(0, Math.min(100, Math.round((progress.done / progress.total) * 100)));
+				capsule = E("span", { className: "opf-capsule" },
+					E("span", { className: "opf-pingwrap" },
+						E("span", { className: "opf-pingring" }),
+						E("span", { className: "opf-pingdot" })),
+					E("span", { className: "opf-capsulelabel" },
+						t("probing.now"),
+						" ",
+						E("span", { className: "opf-count" }, progress.done + "/" + progress.total)),
+					E("span", { className: "opf-bar" },
+						E("span", { className: "opf-fill", style: { width: pct + "%" } })));
+			}
+
+			var toolbarRight = stamp !== null || capsule !== null
+				? E("div", { className: "opf-actions" }, capsule, stamp)
+				: null;
+
 			return E("div",
 				{ className: "opf-card" },
 				E("div", { className: "opf-head" },
@@ -659,16 +830,16 @@ window.__ModuleLoader__.load({
 							E("button", {
 								type: "button",
 								className: "opf-btn",
-								disabled: busy,
+								disabled: busy || probing,
 								onClick: refresh
 							}, refreshIcon(), E("span", null, busy ? t("refreshing") : t("refresh"))),
 							E("button", {
 								type: "button",
-								className: "opf-btn",
+								className: "opf-btn" + (probing ? " opf-btn-probing" : ""),
 								disabled: probing,
 								onClick: probe
-							}, searchIcon(), E("span", null, probing ? t("probing") : t("probe")))),
-						stamp)),
+							}, probing ? spinnerIcon(true) : searchIcon(), E("span", null, probing ? t("probing") : t("probe")))),
+						toolbarRight)),
 				E("div", { className: "opf-body" },
 					fallbackNote,
 					untrustedNote,

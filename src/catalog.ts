@@ -538,6 +538,27 @@ export interface Catalog {
   forceProbes(): Promise<void>;
   /** `null` means Zen failed: keep the current gate rather than narrowing. */
   applyZenGate(ids: readonly string[] | null): void;
+  /**
+   * The live progress of the current (or last) probe round, for the panel's
+   * progress pill and per-row badges. In-memory only — it is a transient fuel
+   * gauge, not a verdict, so it is never persisted and never narrows anything.
+   */
+  probeProgress(): ProbeProgress;
+}
+
+/**
+ * What the panel polls while a round is running. `results` holds one entry per
+ * FINISHED model; the in-flight one is `current`; everything else is waiting.
+ * `ms` is the wall time that model's probe took, for the "✓ 142ms" badge.
+ */
+export interface ProbeProgress {
+  readonly running: boolean;
+  readonly total: number;
+  readonly done: number;
+  readonly current: string | null;
+  readonly results: Readonly<Record<string, { readonly status: "ok" | "failed"; readonly ms: number }>>;
+  /** When the current (or last) round started; 0 means no round has ever run. */
+  readonly startedAt: number;
 }
 
 export function createCatalog(options: CreateCatalogOptions): Catalog {
@@ -555,6 +576,17 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
   let probes: ProbeMap = {};
   let lastProbeAt = 0;
   let probeUntrusted = false;
+  // Live round state, replaced wholesale at the start of every round. Plain
+  // mutable object on purpose: the panel polls a copy while the round mutates
+  // the original, and no verdict logic ever reads this.
+  let probeRun: {
+    running: boolean;
+    total: number;
+    done: number;
+    current: string | null;
+    results: Record<string, { status: "ok" | "failed"; ms: number }>;
+    startedAt: number;
+  } = { running: false, total: 0, done: 0, current: null, results: {}, startedAt: 0 };
   let probeInflight: Promise<void> | null = null;
 
   // Warm start: a valid cache restores the catalogue without any network.
@@ -716,28 +748,59 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
   const runProbeRound = async (): Promise<void> => {
     const stamp = now();
     const targets = models.filter((model) => probes[model.id]?.verdict !== "dead");
+    // The panel polls this while the round runs: a progress pill ("4/10") and
+    // one badge per row (ok with latency / failed / probing / waiting). It is
+    // replaced wholesale at the start of every round and frozen when the round
+    // ends, so a late poll never shows a previous round's leftovers as live.
+    probeRun = {
+      running: true,
+      total: targets.length,
+      done: 0,
+      current: null,
+      results: {},
+      startedAt: stamp,
+    };
     let untrusted = false;
-    for (const model of targets) {
-      let outcome: ProbeResult;
-      try {
-        outcome = await probe!(model);
-      } catch {
-        untrusted = true;
-        continue;
+    try {
+      for (const model of targets) {
+        probeRun.current = model.id;
+        const started = now();
+        let outcome: ProbeResult;
+        try {
+          outcome = await probe!(model);
+        } catch {
+          untrusted = true;
+          probeRun.results[model.id] = { status: "failed", ms: Math.max(0, now() - started) };
+          probeRun.done += 1;
+          continue;
+        }
+        // The row badge reports whether the model ANSWERED, not what the
+        // verdict was: `dead` removes the model from the list, but from this
+        // round's point of view it is still "did not answer usably". Only
+        // `ok` earns the green badge; everything else is red.
+        const answered = outcome !== undefined && outcome !== null && outcome.kind === "ok";
+        probeRun.results[model.id] = {
+          status: answered ? "ok" : "failed",
+          ms: Math.max(0, now() - started),
+        };
+        probeRun.done += 1;
+        if (outcome === undefined || outcome === null || outcome.kind === "inconclusive") {
+          untrusted = true;
+          continue;
+        }
+        if (outcome.kind !== "ok" && outcome.kind !== "dead") {
+          untrusted = true;
+          continue;
+        }
+        probes[model.id] = {
+          verdict: outcome.kind,
+          at: stamp,
+          ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
+        };
       }
-      if (outcome === undefined || outcome === null || outcome.kind === "inconclusive") {
-        untrusted = true;
-        continue;
-      }
-      if (outcome.kind !== "ok" && outcome.kind !== "dead") {
-        untrusted = true;
-        continue;
-      }
-      probes[model.id] = {
-        verdict: outcome.kind,
-        at: stamp,
-        ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
-      };
+    } finally {
+      probeRun.running = false;
+      probeRun.current = null;
     }
     // The round marker is written even when nothing concluded: it is the only
     // thing that stops a fully-gated day from re-probing on every single read.
@@ -800,6 +863,17 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     async forceProbes(): Promise<void> {
       if (probe === undefined) return;
       return runProbeSingle();
+    },
+    probeProgress(): ProbeProgress {
+      // A copy: the round mutates `probeRun` while the panel reads this.
+      return {
+        running: probeRun.running,
+        total: probeRun.total,
+        done: probeRun.done,
+        current: probeRun.current,
+        results: { ...probeRun.results },
+        startedAt: probeRun.startedAt,
+      };
     },
     applyZenGate(ids: readonly string[] | null): void {
       if (ids === null) return; // Zen failed: keep whatever gate is in force
