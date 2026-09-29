@@ -477,10 +477,11 @@ const MODEL_GONE_PATTERNS: readonly RegExp[] = [
   // (`kimi-k2.5-free`, `gpt-5.5-free`), so a `[^.]` class silently failed to
   // match every real body that names the model before the predicate.
   /\bmodel\b.{0,40}?\b(?:is|was)\s+(?:unavailable|unsupported|disabled|retired)\b/i,
-  // "Model kimi-k2.5-free is not supported" — the free route declining to serve
-  // a model models.dev still lists at zero cost. Observed 2026-09-29 on 25 of
-  // 34 catalogue models, HTTP 401. Counted as gone: from the free tier's point
-  // of view it is, and a keyed round re-probes and restores it if it answers.
+  // "Model kimi-k2.5-free is not supported" — the route declining to serve a
+  // model models.dev still lists at zero cost. Observed 2026-09-29 on 25 of 34
+  // catalogue models, HTTP 401. Counted as gone: on this provider a Zen key
+  // changes the quota, NOT the model list, so these models are unavailable to a
+  // keyed caller too. `ModelError` is a model-routing error, not an auth one.
   /\bmodels?\b.{0,60}?\bnot\s+supported\b/i,
   // "model not found" / "does not exist" / "unrecognized model"
   /\bmodels?\b.{0,24}?\b(?:not\s+found|does\s+not\s+exist|unrecognized)\b/i,
@@ -539,12 +540,13 @@ export function isModelUnavailableFailure(status: number, bodyText: string): boo
   // "not supported for format openai" is the channel being wrong, not the
   // model being gone.
   if (FORMAT_SCOPED_PATTERN.test(body)) return false;
-  // 429 is always the shared bucket, never the model.
+  // 429 is always the quota bucket, never the model.
   if (status === 429) return false;
   // 401 is usually the credential, but a body that NAMES the model as
-  // unsupported is the route declining to serve it, which is the exact
-  // question this probe was sent to answer. A genuinely bad or missing key
-  // never gets here: BAD_KEY_PATTERN above claims it first.
+  // unsupported is the route declining to serve it, which is the exact question
+  // this probe was sent to answer — and a key would not change the answer,
+  // since one changes the quota rather than the model list. A genuinely bad or
+  // missing key never gets here: BAD_KEY_PATTERN above claims it first.
   return true;
 }
 

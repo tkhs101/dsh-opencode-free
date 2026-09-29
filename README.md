@@ -119,13 +119,17 @@ list naming what was dropped, so there is nothing that can disagree with the
 picker or go stale.
 
 **A dead verdict is final.** Once the route has refused a model, the plugin
-never asks about it again — re-asking a settled question would spend the shared
-quota for nothing, and on this provider it is the difference between roughly 34
-requests a day and roughly 10. Nothing brings a removed model back on its own,
-**not even adding a Zen key**.
+never asks about it again — re-asking a settled question would spend quota for
+nothing, and on this provider it is the difference between roughly 34 requests
+a day and roughly 10.
 
-If you add a key and want the whole catalogue re-judged against it, delete the
-plugin's cache file and restart DSH once:
+Adding a Zen key does not bring a removed model back, because **a key changes
+your quota, not the model list**. The same models are served either way; the
+free tier and a keyed account see the same catalogue, and a key only raises how
+much you may send. A model the route refuses is refused with a key too.
+
+If you want the whole catalogue re-judged anyway — after Zen brings a model
+back, or fixes a channel — delete the plugin's cache file and restart DSH once:
 
 ```
 %USERPROFILE%\.dsh\dsh-opencode-free\catalog.json
@@ -138,9 +142,10 @@ rely on the smaller list.
 A model counts as gone when the route answers that it will not serve it —
 `Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. The last
 of those is what most of the catalogue currently hits: **most models models.dev
-lists at zero cost are not actually on the free route**, so a first probe
-typically narrows the list from around 34 to about 10 — and because the verdict
-is final, that is a one-time cost rather than a daily one.
+lists at zero cost are not actually served on this provider at all** — with or
+without a key — so a first probe typically narrows the list from around 34 to
+about 10, and because the verdict is final that is a one-time cost rather than
+a daily one.
 
 ### What the availability check costs you
 
@@ -148,9 +153,11 @@ Once a day, the plugin asks Zen one short question per model and waits for the
 answers. That is a real cost and it is worth being explicit about it:
 
 - **One round per local day, sent one at a time.** The requests are sequential
-  on purpose — they share one anonymous quota bucket, so firing them all at
+  on purpose — anonymous callers share one quota bucket, so firing them all at
   once would spend it faster and hammer upstream. The round only covers models
-  that have never been judged, so it shrinks as models are retired.
+  that have never been judged, so it shrinks as models are retired. A Zen key
+  raises your quota, which makes this round cheaper in practice, but it does not
+  change which models are in it.
 - **It can be turned off by not using it.** There is no separate switch: the
   round runs when you read the model list, and the detail page's **Probe now**
   button asks for an extra round on demand, bypassing the daily limit. If you

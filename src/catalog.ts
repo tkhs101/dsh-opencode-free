@@ -570,11 +570,12 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    * would both exhaust it faster and hammer upstream.
    *
    * A model already judged `dead` is NOT re-probed. The verdict is final by
-   * design: re-asking a model the route has already refused spends the shared
-   * bucket to re-learn a settled fact, and on this provider that is the
-   * difference between ~34 requests a day and ~10. The cost is real and
-   * deliberate — a model removed this way does not come back on its own, not
-   * even when a Zen key would serve it. Recovery is manual: delete
+   * design: re-asking a model the route has already refused spends quota to
+   * re-learn a settled fact, and on this provider that is the difference
+   * between ~34 requests a day and ~10. A Zen key does not change this — it
+   * raises the quota, not the model list, so a refused model is refused with a
+   * key too. Recovery is manual and is for upstream changes (a model coming
+   * back, a channel being fixed): delete
    * `$DSH_HOME/dsh-opencode-free/catalog.json` and the next start re-derives
    * and re-probes the whole catalogue.
    *
