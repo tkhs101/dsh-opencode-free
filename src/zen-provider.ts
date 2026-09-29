@@ -63,7 +63,8 @@ export function freeModels(): Model<Api>[] {
   const template = builtin.find((m) => m.id === "mimo-v2.5-free");
   const synthetic: Array<{ id: string; name: string; contextWindow: number; maxTokens: number }> = [
     { id: "mimo-v2.6-flash-free", name: "MiMo-V2.6-Flash Free", contextWindow: 200_000, maxTokens: 32_000 },
-    { id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash Free", contextWindow: 200_000, maxTokens: 128_000 },
+    // deepseek-v4-flash-free 已下架：models.dev 标 status="deprecated"，且实测调用失败；
+    // 只在列表里占位。合成记录只收“实时在列且未 deprecate”的模型，故不收录。
     { id: "space-bunny-free", name: "Space Bunny Free", contextWindow: 1_048_576, maxTokens: 524_288 },
     { id: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview Free", contextWindow: 200_000, maxTokens: 32_000 },
     { id: "jev-1.13-free", name: "Jev 1.13 Free", contextWindow: 200_000, maxTokens: 32_000 },

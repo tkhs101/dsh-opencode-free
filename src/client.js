@@ -48,7 +48,6 @@ var MODELS = [
   "muse-spark-1.2-contributor-free",
   "muse-spark-1.3-contributor-free",
   "mimo-v2.6-flash-free",
-  "deepseek-v4-flash-free",
   "space-bunny-free",
   "longcat-2.5-preview-free",
   "jev-1.13-free"

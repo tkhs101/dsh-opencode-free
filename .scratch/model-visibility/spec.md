@@ -8,10 +8,10 @@
 
 ## Problem Statement
 
-`opencode-zen-free` 一次给出 12 个免费模型，picker 常年全量展示，用户无法精简常用模型。
+`opencode-zen-free` 一次给出 11 个免费模型，picker 常年全量展示，用户无法精简常用模型。
 期望：在截图的插件详情页（DSH 风格）加一块控制面板，一期只做模型列表功能区，每行一个开关，控制模型显隐。
 
-当前 12 个模型（`freeModels()` 基线）：
+当前 11 个模型（`freeModels()` 基线）：
 
 - `big-pickle`
 - `ling-3.0-flash-fin-free`
@@ -89,7 +89,7 @@ profile.piProvider = filtered; // profiles() 返回的 profile 用 filtered
 - 新增手写 bundle `src/client.js`（无构建步骤）：单次 `window.__ModuleLoader__.load({ id: <包名>, factory })`，`require` 仅 `react` + `@deepseek-ai/dsh-client-ui-primitives`（白名单，smoke  enforcement），`React.createElement` 无 JSX，组件顶层声明。
 - `exports.inject = ["locale", "slots"]`；`apply` 内懒取 `configForms`（缺失不拖卡片下水），注册：
   `slots.inject("plugins.bundle.config", () => slots.register({ name: "plugins.bundle.config", key: <包名>, locale: <ns>, inject: () => ({ scope, ctx }) }, Card))`。
-- 卡片内容：一期 = 标题 + 12 行（模型 id + Switch）+ 一行 hint（“隐藏后模型选择器不可见”）。预留二期功能区插槽（注释占位，不渲染）。
+- 卡片内容：一期 = 标题 + 11 行（模型 id + Switch）+ 一行 hint（“隐藏后模型选择器不可见”）。预留二期功能区插槽（注释占位，不渲染）。
 - `package.json`：`exports["./client"]`、`dsh.client = { inject: ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-slots", "@deepseek-ai/dsh-client-ui-settings"], platform: "web" }`（以 gitbash 实测值为准，允许实现时微调）。
 - 模型列表注入：`pnpm build` 前跑 `tsx scripts/gen-client-models.mjs`（新建小脚本，只读 `freeModels()` 写常量），输出内联进 `src/client.js` 头部 `MODELS`。
 
@@ -117,7 +117,7 @@ profile.piProvider = filtered; // profiles() 返回的 profile 用 filtered
 
 ## Non-goals（一期不做）
 
-- 搜索/全选/重置/按系列分组（列表 12 行；面板留插槽，二期再加）。
+- 搜索/全选/重置/按系列分组（列表 11 行；面板留插槽，二期再加）。
 - 定制“已隐藏”错误文案（A2，已 defer）。
 - `registerConfigurableProviders` 目录切换（A3，已 defer）。
 - 额度卡片、key 设置 UI、登录/OAuth、其他功能区。
@@ -129,7 +129,7 @@ profile.piProvider = filtered; // profiles() 返回的 profile 用 filtered
 
 ## Acceptance（可观测）
 
-1. 详情页卡片出现，12 行 Switch 与 DSH 风格一致。
+1. 详情页卡片出现，11 行 Switch 与 DSH 风格一致。
 2. 关闭某模型 → 模型选择器无此模型；打开 → 恢复。
 3. 改动持久：重启 DSH 后开关状态与显隐一致。
 4. 无 `hiddenModels` 的老用户：全显，现有测试全过。
