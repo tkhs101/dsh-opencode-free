@@ -680,20 +680,26 @@ function hasAnswer(result: Record<string, unknown> | undefined): boolean {
  * catalogue-wide probe run.
  */
 /**
- * The three endpoints Zen serves a model on. A model is only alive on ONE of
- * them, and which one is not published: 9router has to hard-code it (a set for
- * the Muse Spark family, another for `union-alpha`, plus a family regex), while
- * this plugin infers a channel from the models.dev record.
+ * The endpoints a probe may ask a model on. Exactly the two this provider
+ * implements — `createProvider` below registers `openai-completions` and
+ * `openai-responses` and nothing else, so a third entry would be a promise the
+ * transport cannot keep: pi-ai throws `has no API implementation` client-side
+ * before any fetch, and the sweep would count an unasked channel as asked.
+ *
+ * A model is only alive on ONE of them, and which one is not published:
+ * 9router has to hard-code it (a set for the Muse Spark family, another for
+ * `union-alpha`, plus a family regex), while this plugin infers a channel from
+ * the models.dev record.
  *
  * That inference is the weak link, and it fails in the worst possible way. A
  * request down the wrong channel is refused with "model not supported" — which
  * reads exactly like a dead model. So a single wrong guess did not report a
  * routing mistake, it removed a working model from the picker permanently.
- * Asking the other channels before concluding anything is what makes the
+ * Asking the other channel before concluding anything is what makes the
  * verdict mean what it says: 9router's per-model test never hits this because
  * it always routes by its own hard-coded table, never by inference.
  */
-const ZEN_CHANNELS: readonly Api[] = ["openai-completions", "openai-responses", "anthropic-messages"];
+const ZEN_CHANNELS: readonly Api[] = ["openai-completions", "openai-responses"];
 
 /** The inferred channel first, then the rest. */
 function probeChannels(model: Model<Api>): Api[] {
@@ -713,7 +719,7 @@ function probeChannels(model: Model<Api>): Api[] {
 /**
  * Whether a conclusion is about the CALLER rather than the model, and so would
  * come back identical on every channel. A gate, an exhausted quota and a
- * rejected key are the same on all three endpoints, and asking again would
+ * rejected key are the same on both endpoints, and asking again would
  * spend the very quota that is already gone.
  */
 function isCallerScoped(outcome: ProbeOutcome): boolean {
@@ -729,7 +735,7 @@ function isCallerScoped(outcome: ProbeOutcome): boolean {
 
 /**
  * How much a conclusion is worth, so a later channel's weaker answer cannot
- * overwrite a stronger one. Asking three channels means seeing three different
+ * overwrite a stronger one. Asking both channels means seeing two different
  * failures, and the LAST one is not automatically the truest: a positive "this
  * model is gone" outranks a later "no conclusion", because `dead` is the only
  * verdict that removes a model and it must not be lost to noise.

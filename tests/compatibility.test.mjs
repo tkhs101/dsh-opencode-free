@@ -450,7 +450,7 @@ test('GUARD: a model that only answers on another channel is alive, not dead', a
   // defeated by its own routing is not a liveness check.
   //
   // A stub prober, deliberately: this asserts the ROUTING DECISION, and
-  // hand-writing fixtures for three different SDK stream parsers would test the
+  // hand-writing fixtures for different SDK stream parsers would test the
   // SDKs instead. The error classification is covered by the real-wire tests
   // below.
   const model = { id: 'mystery-free', api: 'openai-completions' }
@@ -477,7 +477,8 @@ test('GUARD: a model that only answers on another channel is alive, not dead', a
 
 test('GUARD: dead is only concluded after every channel has refused', async () => {
   // The other half of the guarantee: the retry must not become a loophole that
-  // makes a genuinely gone model immortal. Three refusals, then gone.
+  // makes a genuinely gone model immortal. A refusal on every implemented
+  // channel, then gone.
   const p = plugin.zenProvider(() => 'probe-session', () => undefined)
   const model = p.getModels().find((m) => m.api === 'openai-completions')
   let calls = 0
@@ -499,7 +500,7 @@ test('GUARD: dead is only concluded after every channel has refused', async () =
 
 test('GUARD: a gate or a quota wall is never retried on another channel', async () => {
   // Both are properties of the caller, not the model, and retrying would spend
-  // the very quota that is already exhausted — three times over.
+  // the very quota that is already exhausted — twice over.
   for (const [status, body, expect] of [
     [403, '{"error":{"type":"FreeTierError","message":"only be used in OpenCode"}}', 'anon-gated'],
     [429, '{"error":{"type":"FreeUsageLimitError"}}', 'quota-exhausted'],
@@ -522,7 +523,7 @@ test('GUARD: a gate or a quota wall is never retried on another channel', async 
 })
 
 test('GUARD: the strongest conclusion across channels wins, not the last one', async () => {
-  // Three channels produce three different failures, and the last is not
+  // Two channels produce two different failures, and the last is not
   // automatically the truest. A positive "gone" must not be overwritten by a
   // later "no conclusion" — that verdict is the only one that removes a model.
   const p = plugin.zenProvider(() => 'probe-session', () => undefined)
