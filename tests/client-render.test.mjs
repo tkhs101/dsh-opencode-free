@@ -411,7 +411,7 @@ test('a refused round accuses no model: grey rows, one banner, separate count', 
       'big-pickle': { status: 'failed', ms: 12, code: 'anon-gated', http: 403 },
       'muse-spark-1.3-contributor-free': { status: 'failed', ms: 9, code: 'quota-exhausted', http: 429 },
     },
-    startedAt: 1,
+    startedAt: 1759146617000,
   }
   const mounted = await renderCard({
     hidden: [],
@@ -427,6 +427,8 @@ test('a refused round accuses no model: grey rows, one banner, separate count', 
     // The banner says what happened and, crucially, what it does NOT mean.
     assert.ok(end.texts.some((t) => t.includes('本轮没能测到')), 'the round-level refusal is announced');
     assert.ok(end.texts.some((t) => t.includes('不是该模型的结论')), 'and disowned as a verdict');
+    // And WHEN, so a retained refusal cannot read as a current fact.
+    assert.ok(end.texts.some((t) => /20\d\d\/\d{1,2}\/\d{1,2}/.test(t)), 'the banner names the round time');
     // The refused rows are grey "unmeasured", never red.
     assert.ok(end.texts.some((t) => t.includes('未测到')), 'refused rows read as unmeasured');
     const failBadges = [...walk(mounted.rerender())].filter((n) => String(n.props?.className ?? '')

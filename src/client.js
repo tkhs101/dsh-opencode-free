@@ -88,6 +88,7 @@ window.__ModuleLoader__.load({
 			"probing.unmeasured": "未测到",
 			"probing.roundRefused": "本轮没能测到这些模型",
 			"probing.notModelFault": "这是当时的网络状况，不是该模型的结论",
+			"probing.retryHint": "点「立即探测」可重测",
 			"reason.dead": "已下架",
 			"reason.notlisted": "Zen 未提供",
 			"reason.timeout": "探测超时",
@@ -137,6 +138,7 @@ window.__ModuleLoader__.load({
 			"probing.unmeasured": "Not measured",
 			"probing.roundRefused": "These models could not be measured this round",
 			"probing.notModelFault": "that was the network at the time, not a verdict on the model",
+			"probing.retryHint": "press “Probe now” to retry",
 			"reason.dead": "Gone",
 			"reason.notlisted": "Not offered",
 			"reason.timeout": "Timed out",
@@ -549,6 +551,7 @@ window.__ModuleLoader__.load({
 							done: typeof payload.done === "number" ? payload.done : 0,
 							current: typeof payload.current === "string" ? payload.current : null,
 							results: payload.results !== null && typeof payload.results === "object" ? payload.results : {},
+							startedAt: typeof payload.startedAt === "number" ? payload.startedAt : 0,
 						};
 					})
 					.catch(function (error) {
@@ -1059,8 +1062,18 @@ window.__ModuleLoader__.load({
 				for (var word in unmeasuredWords) {
 					if (hasOwnKey(unmeasuredWords, word)) refusedWords.push(word);
 				}
+				/* Name WHEN, or the retained refusal reads as a current fact.
+				   A grey banner with no timestamp is how "the tier was gated
+				   for five minutes yesterday" turns into "the probe says these
+				   models don't work". */
+				var refusedWhen = typeof progress.startedAt === "number" && progress.startedAt > 0
+					? stampOf(progress.startedAt)
+					: "";
 				refusedNote = E("p", { className: "opf-note" },
-					t("probing.roundRefused") + "：" + refusedWords.join("、") + " —— " + t("probing.notModelFault"));
+					t("probing.roundRefused")
+					+ (refusedWhen !== "" ? "（" + refusedWhen + "）" : "")
+					+ "：" + refusedWords.join("、")
+					+ " —— " + t("probing.notModelFault") + "，" + t("probing.retryHint"));
 			}
 
 			/* Why a vanished model vanished. Rendered only when the last round
