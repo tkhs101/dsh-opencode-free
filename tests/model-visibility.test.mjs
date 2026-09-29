@@ -54,6 +54,7 @@ const API_FIXTURE = {
         name: 'Big Pickle',
         cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
         limit: { context: 200000, output: 32000 },
+        modalities: { input: ['text'], output: ['text'] },
       },
       // Free + active, UNKNOWN to pi-ai: exercises D6 tiers 2-3 (effort ⇒
       // responses) and the limit/modalities mapping.
@@ -289,9 +290,15 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
     // The payload names the offered models and nothing else. There is no list
     // of unavailable models, so a model that is not offered is simply absent —
     // and the panel has no second source that could disagree with the picker.
+    // `models` carries one capability card per visible id, same order.
     assert.deepEqual(Object.keys(refreshed.body).sort(), [
-      'probeInconclusive', 'probedAt', 'refreshing', 'source', 'updatedAt', 'visible',
+      'models', 'probeInconclusive', 'probedAt', 'refreshing', 'source', 'updatedAt', 'visible',
     ])
+    assert.deepEqual(refreshed.body.models.map((m) => m.id), refreshed.body.visible)
+    const bunny = refreshed.body.models.find((m) => m.id === 'space-bunny-free')
+    assert.deepEqual(bunny, { id: 'space-bunny-free', image: true, thinking: 'max' })
+    const pickle = refreshed.body.models.find((m) => m.id === 'big-pickle')
+    assert.deepEqual(pickle, { id: 'big-pickle', image: false, thinking: null })
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]

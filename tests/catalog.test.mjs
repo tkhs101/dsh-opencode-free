@@ -14,8 +14,10 @@ import {
   fetchSection,
   isActive,
   isFree,
+  modelCapability,
   readCache,
   thinkingLevelMapFor,
+  topThinkingLevel,
   writeCacheAtomic,
 } from '../src/catalog.ts'
 
@@ -344,8 +346,7 @@ test('GUARD: the muse-spark xhigh default is no longer silently clamped away', a
   assert.equal(getSupportedThinkingLevels(bunny).includes('minimal'), false)
 })
 
-test('a derived record carries all four capabilities from models.dev', () => {
-  const { candidates } = derive(modelsDict(), { template: template(), knownApis: new Map() })
+test('a derived record carries all four capabilities from models.dev', () => {  const { candidates } = derive(modelsDict(), { template: template(), knownApis: new Map() })
   const bunny = candidates.find((m) => m.id === 'space-bunny-free')
   // modalities.input: pi-ai knows text/image only, so video is dropped rather
   // than passed through as a capability the transport cannot honour.
@@ -366,6 +367,54 @@ test('a derived record carries all four capabilities from models.dev', () => {
   assert.deepEqual(bare.input, template().input)
   // The template's level map is never inherited: it belongs to another model.
   assert.equal(bare.thinkingLevelMap, undefined)
+})
+
+// ── capability cards (what the detail-page panel renders per row) ──────────
+
+test('topThinkingLevel reads the strongest published level, nothing else', () => {
+  // The map's string entries ARE the published levels (identity values); null
+  // entries and a missing map mean "no badge", not a default.
+  assert.equal(topThinkingLevel({ id: 'x', thinkingLevelMap: { minimal: null, low: 'low', max: 'max' } }), 'max')
+  assert.equal(topThinkingLevel({ id: 'x', thinkingLevelMap: { off: null, minimal: 'minimal' } }), 'minimal')
+  assert.equal(topThinkingLevel({ id: 'x', thinkingLevelMap: { minimal: null, low: null } }), null)
+  assert.equal(topThinkingLevel({ id: 'x', thinkingLevelMap: undefined }), null)
+  assert.equal(topThinkingLevel({ id: 'x' }), null)
+  assert.equal(topThinkingLevel({ id: 'x', thinkingLevelMap: { off: 'off' } }), null, 'off is never a badge')
+})
+
+test('modelCapability projects image and top level per record', () => {
+  const { candidates } = derive(modelsDict(), { template: template(), knownApis: new Map() })
+  const card = (id) => modelCapability(candidates.find((m) => m.id === id))
+  assert.deepEqual(card('space-bunny-free'), { id: 'space-bunny-free', image: true, thinking: 'max' })
+  assert.deepEqual(card('muse-spark-1.3-contributor-free'), { id: 'muse-spark-1.3-contributor-free', image: true, thinking: 'xhigh' })
+  // Toggle-only and level-less records get no thinking badge. `ling` publishes
+  // neither image input nor levels, so it inherits the template's text+image
+  // input — the fallback pinned by the modalities test above. A badge rendered
+  // from that record is faithful to the record; the record itself is a guess
+  // for undeclared fields, which is what the template is for.
+  assert.deepEqual(card('ling-3.0-flash-fin-free'), { id: 'ling-3.0-flash-fin-free', image: true, thinking: null })
+  assert.deepEqual(card('big-pickle'), { id: 'big-pickle', image: false, thinking: null })
+})
+
+test('capabilities ride alongside visible, same ids in the same order', async () => {
+  await withTempDir(async (dir) => {
+    const probe = recordingProber({ 'deepseek-v4-flash-free': DEAD(404) })
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.forceProbes()
+    const state = catalog.current()
+    assert.deepEqual(
+      state.capabilities.map((c) => c.id),
+      state.visible,
+      'every visible id has exactly one card, in order',
+    )
+    const bunny = state.capabilities.find((c) => c.id === 'space-bunny-free')
+    assert.equal(bunny.image, true)
+    assert.equal(bunny.thinking, 'max')
+    // Cards carry names and booleans only — never the full records.
+    for (const card of state.capabilities) {
+      assert.deepEqual(Object.keys(card).sort(), ['id', 'image', 'thinking'])
+    }
+  })
 })
 
 test('channelFor prefers the pi-ai builtin table over any signal', () => {
@@ -736,7 +785,7 @@ test('the Zen gate narrows visible, and nothing else is reported', async () => {
     // artifact, not for a dead verdict. A model that is not offered is simply
     // not in `visible`.
     assert.deepEqual(Object.keys(state).sort(), [
-      'models', 'probeInconclusive', 'probedAt', 'refreshing', 'source', 'updatedAt', 'visible',
+      'capabilities', 'models', 'probeInconclusive', 'probedAt', 'refreshing', 'source', 'updatedAt', 'visible',
     ])
     assert.deepEqual(ids(catalog.effectiveModels()), ['big-pickle', 'space-bunny-free'])
   })

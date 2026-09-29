@@ -112,7 +112,10 @@ than a copy of another model's.
 **This table is a snapshot, not a contract.** It is here so you can recognise
 what you are picking; the live list is whatever the plugin last read. The
 plugin's detail page is where you see and change it: every model there has a
-switch that hides it from the picker.
+switch that hides it from the picker, and each row carries capability badges —
+a vision badge when the model declares image input, and a thinking badge naming
+its strongest published reasoning level. Models that publish no level list get
+no thinking badge rather than a guessed one.
 
 Two rules decide what you are offered:
 

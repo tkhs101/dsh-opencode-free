@@ -179,19 +179,20 @@ function sendJson(res: RouteResponse, code: number, payload: unknown): void {
 }
 
 /**
- * The catalogue payload the panel reads. Names and provenance only — never a
- * config value, and never the full model records (which carry request-shaping
- * internals the browser has no use for).
+ * The catalogue payload the panel reads. Names, booleans and one level id per
+ * model — never a config value, and never the full model records (which carry
+ * request-shaping internals the browser has no use for).
  *
  * One shape for all three routes: the probe route repaints from what it returns,
  * so a panel that got a differently-shaped body would have to re-read anyway.
  * There is no list of unavailable models — a dead model is simply absent from
- * `visible`, so there is nothing for the panel to reconcile.
+ * both `visible` and `models`, so there is nothing for the panel to reconcile.
  */
 function catalogPayload(catalog: Catalog): Record<string, unknown> {
   const snapshot = catalog.current();
   return {
     visible: [...snapshot.visible],
+    models: snapshot.capabilities.map((card) => ({ ...card })),
     source: snapshot.source,
     updatedAt: snapshot.updatedAt,
     refreshing: snapshot.refreshing,

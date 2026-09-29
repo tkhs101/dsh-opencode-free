@@ -76,6 +76,10 @@ window.__ModuleLoader__.load({
 			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
 			"probeUntrusted": "本轮探测结论不可信（上游限流、匿名额度被闸或网络异常），模型显示保持不变。",
 			"probedAt": "上次探测",
+			"badge.vision": "视觉",
+			"badge.thinking": "思考",
+			"legend.vision": "多模态视觉",
+			"legend.thinking": "思考推理",
 			"empty": "当前没有可显示的模型。"
 		};
 
@@ -96,6 +100,10 @@ window.__ModuleLoader__.load({
 			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
 			"probeUntrusted": "This round's probe results were untrustworthy (upstream throttling, the anonymous tier refusing, or a network error), so visibility is unchanged.",
 			"probedAt": "Last probe",
+			"badge.vision": "Vision",
+			"badge.thinking": "Thinking",
+			"legend.vision": "Multimodal vision",
+			"legend.thinking": "Reasoning",
 			"empty": "No models are available right now."
 		};
 
@@ -137,25 +145,53 @@ window.__ModuleLoader__.load({
 		}
 
 		// ── styles (opf- prefixed) ────────────────────────────────────────────
+		//
+		// Apple-card look from the approved mock: literal palette, self-contained
+		// white card so it reads the same on any host theme. Class names stay
+		// opf- namespaced so they cannot collide with the host page.
 
 		var STYLE_ID = "dsh-opencode-free-style";
 
 		var CSS = [
-			".opf-card{display:flex;flex-direction:column;gap:10px;max-width:640px}",
-			".opf-title{font-size:15px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary)}",
-			".opf-desc{margin:0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}",
-			".opf-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;overflow:hidden}",
-			".opf-row{display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:13px;cursor:pointer;color:var(--dsw-alias-label-secondary)}",
-			".opf-row+.opf-row{border-top:1px solid var(--dsw-alias-border-l2)}",
-			".opf-id{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--dsw-alias-label-primary)}",
-			".opf-state{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary)}",
-			".opf-row input{flex:none;margin:0;accent-color:var(--dsw-alias-brand-primary)}",
-			".opf-hint{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}",
-			".opf-error{margin:0;font-size:12px;color:var(--dsw-alias-status-danger,#e5484d)}",
-			".opf-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}",
-			".opf-btn{font:inherit;font-size:12px;padding:4px 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}",
+			".opf-card{display:flex;flex-direction:column;max-width:720px;background:#FFFFFF;border:1px solid rgba(229,229,234,.8);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.06),0 1px 3px rgba(0,0,0,.04);overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased}",
+			".opf-head{padding:28px 28px 20px}",
+			".opf-title{font-size:22px;font-weight:600;letter-spacing:-.01em;line-height:1.3;color:#1D1D1F}",
+			".opf-desc{margin:4px 0 20px;font-size:13px;line-height:1.5;color:#86868B}",
+			".opf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}",
+			".opf-actions{display:flex;align-items:center;gap:10px}",
+			".opf-btn{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:13px;font-weight:500;padding:6px 14px;border-radius:8px;border:1px solid #E5E5EA;background:#F5F5F7;color:#1D1D1F;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:background-color .15s ease-out}",
+			".opf-btn:hover{background:#EBEBEF}",
+			".opf-btn:active{background:#E2E2E6}",
 			".opf-btn[disabled]{opacity:.55;cursor:default}",
-			".opf-note{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}"
+			".opf-btn svg{width:14px;height:14px;color:#515154;flex:none}",
+			".opf-stamp{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;line-height:1.5;color:#86868B}",
+			".opf-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#34C759;flex:none}",
+			".opf-body{padding:8px 28px}",
+			".opf-list{display:flex;flex-direction:column;border:1px solid #E5E5EA;border-radius:12px;overflow:hidden;background:#FFFFFF;box-shadow:0 1px 2px rgba(0,0,0,.02)}",
+			".opf-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;font-size:13px;cursor:pointer;color:#1D1D1F}",
+			".opf-row+.opf-row{border-top:1px solid rgba(229,229,234,.7)}",
+			".opf-row:hover{background:#F9F9FB}",
+			".opf-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;padding-right:12px}",
+			".opf-id{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',Monaco,Menlo,Consolas,'Liberation Mono','Courier New',monospace;font-size:13px;font-weight:500;letter-spacing:-.01em;color:#1D1D1F}",
+			".opf-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:500;line-height:1.6;white-space:nowrap;user-select:none}",
+			".opf-badge svg{width:12px;height:12px;flex:none}",
+			".opf-badge-vision{background:rgba(48,176,199,.10);color:#008397;border:1px solid rgba(48,176,199,.25)}",
+			".opf-badge-think{background:rgba(255,69,58,.08);color:#E0382E;border:1px solid rgba(255,69,58,.20)}",
+			".opf-badge-think svg{width:10px;height:10px}",
+			".opf-side{display:flex;align-items:center;gap:12px;flex:none}",
+			".opf-state{font-size:13px;color:#86868B;user-select:none}",
+			".opf-state.on{color:#1D1D1F;font-weight:500}",
+			".opf-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;user-select:none}",
+			".opf-switch input{position:absolute;opacity:0;width:0;height:0}",
+			".opf-track{width:44px;height:26px;background:#E9E9EA;border-radius:9999px;transition:background-color .28s cubic-bezier(.4,0,.2,1);position:relative}",
+			".opf-thumb{position:absolute;top:2px;left:2px;width:22px;height:22px;background:#FFFFFF;border-radius:50%;box-shadow:0 1.5px 3px rgba(0,0,0,.15),0 1px 1px rgba(0,0,0,.06);transition:transform .28s cubic-bezier(.4,0,.2,1)}",
+			".opf-switch input:checked+.opf-track{background:#34C759}",
+			".opf-switch input:checked+.opf-track .opf-thumb{transform:translateX(18px)}",
+			".opf-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 28px 24px}",
+			".opf-hint{margin:0;font-size:12px;line-height:1.6;color:#86868B}",
+			".opf-legend{display:flex;align-items:center;gap:10px;flex:none}",
+			".opf-note{margin:0;font-size:12px;line-height:1.6;color:#86868B}",
+			".opf-error{margin:0;font-size:12px;color:#E0382E}"
 		].join("\n");
 
 		function ensureStyles() {
@@ -183,6 +219,66 @@ window.__ModuleLoader__.load({
 				return typeof component === "function" ? component : null;
 			} catch (error) {
 				return null;
+			}
+		}
+
+		// ── inline artwork (the mock's own icons, hand-copied) ────────────────
+		//
+		// The host's icon set has no refresh/magnifier/eye/star that match the
+		// approved mock, and the client bundle may only require react plus the
+		// ui primitives — so the four glyphs ship here as static SVG. They use
+		// currentColor throughout and inherit their size from CSS.
+
+		function svgIcon(paths, strokeWidth) {
+			var attrs = strokeWidth === 0
+				? { fill: "currentColor", viewBox: "0 0 24 24", "aria-hidden": "true" }
+				: {
+					fill: "none",
+					stroke: "currentColor",
+					strokeWidth: strokeWidth,
+					viewBox: "0 0 24 24",
+					"aria-hidden": "true",
+				};
+			return E.apply(null, ["svg", attrs].concat(paths.map(function (d) {
+				return E("path", {
+					key: d.slice(0, 24),
+					d: d,
+					strokeLinecap: "round",
+					strokeLinejoin: "round",
+				});
+			})));
+		}
+
+		var ICON_REFRESH = "M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99";
+		var ICON_SEARCH = "M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z";
+		var ICON_EYE_OUTLINE = "M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z";
+		var ICON_EYE_PUPIL = "M15 12a3 3 0 11-6 0 3 3 0 016 0z";
+		var ICON_STAR = "M12 2l2.4 6.9 7.1.3-5.5 4.5 1.9 6.9-5.9-4-5.9 4 1.9-6.9-5.5-4.5 7.1-.3L12 2z";
+
+		function refreshIcon() { return svgIcon([ICON_REFRESH], 2.2); }
+		function searchIcon() { return svgIcon([ICON_SEARCH], 2.2); }
+		function eyeIcon() { return svgIcon([ICON_EYE_OUTLINE, ICON_EYE_PUPIL], 2); }
+		function starIcon() { return svgIcon([ICON_STAR], 0); }
+
+		/** Display names for thinking levels: "xhigh" reads "XHigh", not "Xhigh". */
+		var LEVEL_LABELS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
+
+		function levelLabel(level) {
+			if (typeof level !== "string" || level === "") return "";
+			if (Object.prototype.hasOwnProperty.call(LEVEL_LABELS, level)) return LEVEL_LABELS[level];
+			return level.charAt(0).toUpperCase() + level.slice(1);
+		}
+
+		/** The mock's timestamp: `2026/9/29 23:30:17`, not a locale string. */
+		function stampOf(ms) {
+			try {
+				var d = new Date(ms);
+				if (isNaN(d.getTime())) return "";
+				var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+				return d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate() +
+					" " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+			} catch (error) {
+				return "";
 			}
 		}
 
@@ -239,8 +335,24 @@ window.__ModuleLoader__.load({
 				}
 				return out;
 			};
+			// Capability cards, one per visible id: `{id, image, thinking}`.
+			// A malformed card is dropped, never fatal — the row still renders,
+			// just without its badges.
+			var cards = {};
+			if (Array.isArray(payload.models)) {
+				for (var k = 0; k < payload.models.length; k++) {
+					var card = payload.models[k];
+					if (card === null || typeof card !== "object") continue;
+					if (typeof card.id !== "string" || card.id === "") continue;
+					cards[card.id] = {
+						image: card.image === true,
+						thinking: typeof card.thinking === "string" && card.thinking !== "" ? card.thinking : null,
+					};
+				}
+			}
 			return {
 				visible: names(payload.visible),
+				cards: cards,
 				source: typeof payload.source === "string" ? payload.source : "unknown",
 				/* Probe facts are OPTIONAL: a host older than the probe feature
 				   simply omits them, and the card degrades to "never probed"
@@ -461,18 +573,39 @@ window.__ModuleLoader__.load({
 			void Chevron;
 
 			var visible = catalog !== undefined && catalog !== null ? catalog.visible : [];
+			var cards = catalog !== undefined && catalog !== null && catalog.cards !== undefined ? catalog.cards : {};
 
+			/* One row per visible id: mono id, capability badges, status word,
+			   iOS-style switch. Badge data comes from the host's `models`
+			   array; a row whose card is missing renders bare rather than
+			   failing — the toggle is the contract, badges are decoration. */
 			var rows = visible.map(function (id) {
 				var shown = !hasOwnKey(hidden, id);
+				var card = hasOwnKey(cards, id) ? cards[id] : null;
+				var left = [E("span", { key: "id", className: "opf-id" }, id)];
+				if (card !== null && card.image === true) {
+					left.push(E("span", { key: "vision", className: "opf-badge opf-badge-vision" },
+						eyeIcon(),
+						E("span", null, t("badge.vision"))));
+				}
+				if (card !== null && card.thinking !== null) {
+					left.push(E("span", { key: "think", className: "opf-badge opf-badge-think" },
+						starIcon(),
+						E("span", null, t("badge.thinking") + " · " + levelLabel(card.thinking))));
+				}
 				return E("label",
 					{ key: id, className: "opf-row" },
-					E("span", { className: "opf-id" }, id),
-					E("input", {
-						type: "checkbox",
-						checked: shown,
-						onChange: function () { toggle(id); }
-					}),
-					E("span", { className: "opf-state" }, shown ? t("row.visible") : t("row.hidden")));
+					E("span", { className: "opf-main" }, left),
+					E("span", { className: "opf-side" },
+						E("span", { className: "opf-state" + (shown ? " on" : "") }, shown ? t("row.visible") : t("row.hidden")),
+						E("span", { className: "opf-switch" },
+							E("input", {
+								type: "checkbox",
+								checked: shown,
+								onChange: function () { toggle(id); }
+							}),
+							E("span", { className: "opf-track" },
+								E("span", { className: "opf-thumb" })))));
 			});
 
 			/* The list area has three honest states; none of them pretends the
@@ -493,44 +626,58 @@ window.__ModuleLoader__.load({
 				: null;
 
 			/* Probe facts, each rendered only when the host actually reported
-			   one. An older host omits them, and then none of this shows. */
+			   one. An older host omits them, and then none of this shows. The
+			   timestamp sits top-right of the toolbar with a green dot, per
+			   the approved mock — not in the body flow. */
 			var untrustedNote = catalog !== undefined && catalog !== null && catalog.probeInconclusive === true
 				? E("p", { className: "opf-note" }, t("probeUntrusted"))
 				: null;
 
-			var probedAtNote = null;
+			var stamp = null;
 			if (catalog !== undefined && catalog !== null && typeof catalog.probedAt === "number") {
-				var when = new Date(catalog.probedAt);
-				if (!isNaN(when.getTime())) {
-					var stamp = typeof when.toLocaleString === "function" ? when.toLocaleString() : String(catalog.probedAt);
-					probedAtNote = E("p", { className: "opf-note" }, t("probedAt") + " " + stamp);
+				var stampText = stampOf(catalog.probedAt);
+				if (stampText !== "") {
+					stamp = E("p", { className: "opf-stamp" },
+						E("span", { className: "opf-dot" }),
+						E("span", null, t("probedAt") + " " + stampText));
 				}
 			}
 
+			/* Footer legend: what the two badge colours mean. Static, so it
+			   renders whenever the card does. */
+			var legend = E("span", { className: "opf-legend" },
+				E("span", { className: "opf-badge opf-badge-vision" }, eyeIcon(), E("span", null, t("legend.vision"))),
+				E("span", { className: "opf-badge opf-badge-think" }, starIcon(), E("span", null, t("legend.thinking"))));
+
 			return E("div",
 				{ className: "opf-card" },
-				E("div", { className: "opf-title" }, t("title")),
-				E("p", { className: "opf-desc" }, t("cardDesc")),
-				E("div", { className: "opf-toolbar" },
-					E("button", {
-						type: "button",
-						className: "opf-btn",
-						disabled: busy,
-						onClick: refresh
-					}, busy ? t("refreshing") : t("refresh")),
-					E("button", {
-						type: "button",
-						className: "opf-btn",
-						disabled: probing,
-						onClick: probe
-					}, probing ? t("probing") : t("probe"))),
-				fallbackNote,
-				probedAtNote,
-				untrustedNote,
-				listArea,
-				error ? E("p", { className: "opf-error" }, error) : null,
-				probeError ? E("p", { className: "opf-error" }, probeError) : null,
-				E("p", { className: "opf-hint" }, t("hint")));
+				E("div", { className: "opf-head" },
+					E("div", { className: "opf-title" }, t("title")),
+					E("p", { className: "opf-desc" }, t("cardDesc")),
+					E("div", { className: "opf-toolbar" },
+						E("div", { className: "opf-actions" },
+							E("button", {
+								type: "button",
+								className: "opf-btn",
+								disabled: busy,
+								onClick: refresh
+							}, refreshIcon(), E("span", null, busy ? t("refreshing") : t("refresh"))),
+							E("button", {
+								type: "button",
+								className: "opf-btn",
+								disabled: probing,
+								onClick: probe
+							}, searchIcon(), E("span", null, probing ? t("probing") : t("probe")))),
+						stamp)),
+				E("div", { className: "opf-body" },
+					fallbackNote,
+					untrustedNote,
+					listArea,
+					error ? E("p", { className: "opf-error" }, error) : null,
+					probeError ? E("p", { className: "opf-error" }, probeError) : null),
+				E("div", { className: "opf-foot" },
+					E("p", { className: "opf-hint" }, t("hint")),
+					legend));
 		}
 
 		// ── plugin ────────────────────────────────────────────────────────────

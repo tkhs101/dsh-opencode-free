@@ -449,6 +449,12 @@ export interface CatalogSnapshot {
    * judged `dead` is simply absent — there is no companion list naming it.
    */
   readonly visible: readonly string[];
+  /**
+   * One capability card per `visible` id, same order: what the detail-page
+   * panel renders next to each row. Names and booleans only, never the full
+   * records (which carry request-shaping internals the browser has no use for).
+   */
+  readonly capabilities: readonly ModelCapability[];
   readonly source: CatalogSource;
   readonly updatedAt: number;
   readonly refreshing: boolean;
@@ -456,6 +462,47 @@ export interface CatalogSnapshot {
   readonly probedAt?: number;
   /** The last round reached no conclusion (gated, quota, bad key, network). */
   readonly probeInconclusive?: boolean;
+}
+
+/**
+ * The three facts the detail-page panel renders per row. `thinking` is the
+ * strongest published thinking level (`"Max"`, `"XHigh"`, …) or `null` when
+ * the model publishes no level list — the panel shows no thinking badge then,
+ * rather than guessing. The raw level id travels here; display capitalization
+ * is the panel's business.
+ */
+export interface ModelCapability {
+  readonly id: string;
+  readonly image: boolean;
+  readonly thinking: string | null;
+}
+
+/** Strongest-first thinking levels; `off` is never a badge. */
+const THINKING_LEVEL_RANK = ["max", "xhigh", "high", "medium", "low", "minimal"] as const;
+
+/**
+ * The badge level for one derived record: the strongest level whose map value
+ * is a real (string) entry. A string-valued map entry IS a published level —
+ * `thinkingLevelMapFor` only writes identity entries for published names and
+ * `null` for unpublished ones — so this reads the same fact back without
+ * re-parsing models.dev. No map, or no string entry, means no badge.
+ */
+export function topThinkingLevel(model: Model<Api>): string | null {
+  const map = model.thinkingLevelMap;
+  if (!map || typeof map !== "object") return null;
+  for (const level of THINKING_LEVEL_RANK) {
+    if (typeof (map as Record<string, unknown>)[level] === "string") return level;
+  }
+  return null;
+}
+
+/** Project one effective record to the panel's capability card. */
+export function modelCapability(model: Model<Api>): ModelCapability {
+  return {
+    id: model.id,
+    image: Array.isArray(model.input) && model.input.includes("image"),
+    thinking: topThinkingLevel(model),
+  };
 }
 
 export interface CreateCatalogOptions {
@@ -719,9 +766,13 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
 
   return {
     current(): CatalogSnapshot {
+      // One pass over the single effective list feeds both `visible` and
+      // `capabilities`, so the ids and the cards can never disagree.
+      const effective = effectiveList();
       return {
         models: models.slice(),
-        visible: effectiveVisible(),
+        visible: effective.map((model) => model.id),
+        capabilities: effective.map(modelCapability),
         source,
         updatedAt,
         refreshing: inflight !== null,
