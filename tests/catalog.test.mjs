@@ -1152,6 +1152,67 @@ test('a failed catalogue fetch narrows nothing and costs no verdict', async () =
   })
 })
 
+test('a dead verdict from before the channel sweep is re-checked, and can come back', async () => {
+  await withTempDir(async (dir) => {
+    // This is the recorded failure: 24 models were written off `dead` from one
+    // request each, on the strength of a 401 "not supported" — which is also
+    // what a wrong channel answers with. Those verdicts are permanent by design,
+    // so without a re-check they suppress working models forever.
+    const path = join(dir, 'catalog.json')
+    const first = await probedCatalog(dir, recordingProber({
+      'big-pickle': { kind: 'dead', reason: '上游回報此模型不可用（HTTP 401）', code: 'dead', http: 401 },
+    }))
+    await first.forceProbes()
+    assert.ok(!first.current().visible.includes('big-pickle'), 'it starts out judged dead')
+    // Rewrite the file the way an older build would have left it: no `swept`.
+    const onDisk = JSON.parse(await readFile(path, 'utf8'))
+    assert.equal(onDisk.probes['big-pickle'].swept, true, 'a verdict earned today is marked swept')
+    delete onDisk.probes['big-pickle'].swept
+    await writeFile(path, JSON.stringify(onDisk))
+
+    const probe = recordingProber()
+    const reopened = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([]),
+      probe,
+      baselineModels: baseline(),
+    })
+    await reopened.forceProbes()
+    assert.ok(probe.calls.includes('big-pickle'), 'an unswept dead verdict is re-checked')
+    assert.ok(reopened.current().visible.includes('big-pickle'), 'and a working model comes back')
+    const settled = JSON.parse(await readFile(path, 'utf8')).probes['big-pickle']
+    assert.equal(settled.verdict, 'ok', 'the recovered verdict is ok, not dead')
+    assert.equal(settled.swept, undefined, 'ok is not a dead verdict and carries no swept marker')
+  })
+})
+
+test('a dead verdict that survives the sweep stays out for good', async () => {
+  await withTempDir(async (dir) => {
+    // The re-check must not turn `dead` into a lease that expires: a model that
+    // refuses on every channel is still gone after being asked again, and the
+    // re-check is paid once, not every round.
+    const path = join(dir, 'catalog.json')
+    const first = await probedCatalog(dir, recordingProber({
+      'big-pickle': { kind: 'dead', reason: 'gone', code: 'dead', http: 404 },
+    }))
+    await first.forceProbes()
+    assert.ok(!first.current().visible.includes('big-pickle'), 'removed after the round that swept it')
+    const onDisk = JSON.parse(await readFile(path, 'utf8'))
+    delete onDisk.probes['big-pickle'].swept
+    await writeFile(path, JSON.stringify(onDisk))
+
+    const probe = recordingProber({ 'big-pickle': { kind: 'dead', reason: 'gone', code: 'dead', http: 404 } })
+    const reopened = catalogWith({ dir, fetchImpl: scriptedFetch([]), probe, baselineModels: baseline() })
+    await reopened.forceProbes()
+    assert.ok(probe.calls.includes('big-pickle'), 'the legacy verdict was re-checked once')
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).probes['big-pickle'].swept, true, 'and is now earned')
+
+    probe.calls.length = 0
+    await reopened.forceProbes()
+    assert.ok(!probe.calls.includes('big-pickle'), 'after that it is never asked again')
+  })
+})
+
 test('probeProgress is a copy: the panel cannot mutate round state', async () => {
   await withTempDir(async (dir) => {
     const catalog = await probedCatalog(dir, recordingProber())

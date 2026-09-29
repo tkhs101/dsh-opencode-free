@@ -345,6 +345,18 @@ export interface ProbeRecord {
   readonly verdict: ProbeVerdict;
   readonly at: number;
   readonly reason?: string;
+  /**
+   * Whether this `dead` was established by asking every channel the provider
+   * implements, rather than by a single request.
+   *
+   * It is the whole difference between "this model is gone" and "this request
+   * was refused", because a wrong channel is answered with the same "not
+   * supported" sentence a dead model produces. A verdict recorded before the
+   * sweep existed has no marker and is therefore re-checked once: those older
+   * verdicts are exactly the ones that may have been a routing mistake, and
+   * leaving them permanent is how a working model stays missing forever.
+   */
+  readonly swept?: boolean;
 }
 
 export type ProbeMap = Record<string, ProbeRecord>;
@@ -376,6 +388,7 @@ function readProbes(value: unknown): ProbeMap {
       verdict: entry.verdict,
       at: entry.at,
       ...(typeof entry.reason === "string" && entry.reason !== "" ? { reason: entry.reason } : {}),
+      ...(entry.swept === true ? { swept: true } : {}),
     };
   }
   return probes;
@@ -791,7 +804,17 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     const live = servedSet === null
       ? models
       : models.filter((model) => servedSet.has(model.id));
-    const targets = live.filter((model) => probes[model.id]?.verdict !== "dead");
+    // A `dead` verdict is final ONLY once it has been earned by asking every
+    // channel. A verdict without that marker predates the sweep, so it gets one
+    // re-check: those are precisely the verdicts that may have been a wrong
+    // channel refused rather than a model that is gone — and a permanent verdict
+    // on a wrong channel is how a working model goes missing for good.
+    const settled = (id: string): boolean => {
+      const record = probes[id];
+      if (record === undefined || record.verdict !== "dead") return false;
+      return record.swept === true;
+    };
+    const targets = live.filter((model) => !settled(model.id));
     // Models Zen dropped: out of `visible` without ever being asked. They still
     // count toward the round, because the panel's tally has to add up and a
     // silent hole in the list is exactly what a reader cannot explain.
@@ -862,6 +885,9 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
           verdict: outcome.kind,
           at: stamp,
           ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
+          // Reaching here means the prober exhausted every channel before
+          // concluding, so this `dead` is earned and can be final.
+          ...(outcome.kind === "dead" ? { swept: true } : {}),
         };
       }
     } finally {
