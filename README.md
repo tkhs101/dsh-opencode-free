@@ -117,11 +117,17 @@ a vision badge when the model declares image input, and a thinking badge naming
 its strongest published reasoning level. Models that publish no level list get
 no thinking badge rather than a guessed one.
 
-While a probe round is running, the card switches to live reporting: a progress
-pill counts finished models against the total, and every row shows its own
-state — green with the answering latency, red on failure, a spinner on the model
-being asked right now, grey for the ones still queued. When the round ends the
-card repaints from the answer and the capability badges return.
+A probe round is reported live and then kept. While it runs, a progress pill
+counts finished models against the total and every row shows its own state —
+green with the answering latency, a spinner on the model being asked right now,
+grey for the ones still queued. A red row never says only "failed": it names the
+reason (gone, timed out, connection failed, the anonymous tier refusing, quota
+used up, a bad key) and carries the HTTP status plus what to do about it in its
+tooltip. Once the round ends the pill turns into its tally and stays on screen
+instead of blinking away, and the capability badges return beside the outcome
+badges. A model the round took out of the list is named in a "removed this
+round" line, because a row that silently disappears has no way to explain
+itself.
 
 Two rules decide what you are offered:
 

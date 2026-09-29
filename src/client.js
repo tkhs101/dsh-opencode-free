@@ -79,6 +79,24 @@ window.__ModuleLoader__.load({
 			"probing.now": "正在探测",
 			"probing.waiting": "等待中",
 			"probing.failed": "探测失败",
+			"probing.done": "探测完成",
+			"probing.ok": "成功",
+			"probing.fail": "失败",
+			"probing.removed": "本轮下架",
+			"probing.unprobed": "本轮未探测",
+			"probing.andMore": "等",
+			"reason.dead": "已下架",
+			"reason.timeout": "探测超时",
+			"reason.transport": "连接失败",
+			"reason.anongated": "匿名层被拒",
+			"reason.quota": "额度用尽",
+			"reason.badkey": "key 无效",
+			"reason.unknown": "无响应",
+			"reason.error": "探测异常",
+			"advice.anongated": "匿名额度被闸，配置 key 可提高额度",
+			"advice.quota": "额度或速率用尽，稍后重试",
+			"advice.badkey": "检查 key 是否正确",
+			"advice.keyhint": "key 只能提高额度，不能改变模型清单",
 			"badge.vision": "视觉",
 			"badge.thinking": "思考",
 			"legend.vision": "多模态视觉",
@@ -106,6 +124,24 @@ window.__ModuleLoader__.load({
 			"probing.now": "Probing",
 			"probing.waiting": "Waiting",
 			"probing.failed": "Failed",
+			"probing.done": "Probe complete",
+			"probing.ok": "OK",
+			"probing.fail": "Failed",
+			"probing.removed": "Removed this round",
+			"probing.unprobed": "Not probed",
+			"probing.andMore": "and",
+			"reason.dead": "Gone",
+			"reason.timeout": "Timed out",
+			"reason.transport": "Connection failed",
+			"reason.anongated": "Anon tier refused",
+			"reason.quota": "Quota used up",
+			"reason.badkey": "Bad key",
+			"reason.unknown": "No response",
+			"reason.error": "Probe error",
+			"advice.anongated": "the anonymous tier is gated; a key raises the quota",
+			"advice.quota": "quota or rate limit hit — retry later",
+			"advice.badkey": "check that the key is correct",
+			"advice.keyhint": "a key raises the quota; it does not change the model list",
 			"badge.vision": "Vision",
 			"badge.thinking": "Thinking",
 			"legend.vision": "Multimodal vision",
@@ -219,6 +255,16 @@ window.__ModuleLoader__.load({
 			".opf-probe-busy{background:rgba(0,113,227,.10);color:#0071E3}",
 			".opf-probe-wait{background:rgba(229,229,234,.50);color:#86868B}",
 			".opf-waitdot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#C7C7CC;flex:none}",
+			".opf-capsule-done{background:rgba(52,199,89,.10);border-color:rgba(52,199,89,.28)}",
+			".opf-capsule-done .opf-capsulelabel{color:#1D1D1F}",
+			".opf-capsule-done .opf-pingdot,.opf-capsule-done .opf-pingring{background:#34C759;animation:none;opacity:1}",
+			".opf-capsule-mixed{background:rgba(255,149,0,.10);border-color:rgba(255,149,0,.30)}",
+			".opf-capsule-mixed .opf-pingdot,.opf-capsule-mixed .opf-pingring{background:#FF9500;animation:none;opacity:1}",
+			".opf-capsule-ok{color:#1D1D1F;font-weight:500}",
+			".opf-capsule-oknum{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#28A745}",
+			".opf-capsule-badnum{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#FF3B30}",
+			".opf-summaryline{display:flex;align-items:baseline;gap:6px;margin:0;font-size:12px;line-height:1.6;color:#86868B}",
+			".opf-capsule-gone{color:#FF9500;font-weight:500;padding-left:2px;border-left:1px solid rgba(0,0,0,.08)}",
 			".opf-row-probing{background:rgba(0,113,227,.02)}",
 			".opf-row-probing:hover{background:rgba(0,113,227,.04)}",
 			".opf-row-waiting{opacity:.8}"
@@ -506,6 +552,44 @@ window.__ModuleLoader__.load({
 			}
 		}
 
+		/**
+		 * Human wording for a probe failure. `code` is the machine half the
+		 * host sends; the card owns the sentence, so a Chinese diagnostic
+		 * never has to ship to an English reader. An unrecognized code falls
+		 * back to the plain "failed" rather than a blank badge.
+		 */
+		var FAILURE_WORDS = {
+			"dead": "reason.dead",
+			"timeout": "reason.timeout",
+			"transport": "reason.transport",
+			"anon-gated": "reason.anongated",
+			"quota-exhausted": "reason.quota",
+			"bad-key": "reason.badkey",
+			"unknown": "reason.unknown",
+			"error": "reason.error"
+		};
+
+		function failureText(t, result) {
+			var key = typeof result.code === "string" && hasOwnKey(FAILURE_WORDS, result.code)
+				? FAILURE_WORDS[result.code]
+				: "probing.failed";
+			return t(key);
+		}
+
+		/**
+		 * The one-line reason under a red badge, in full: word, the HTTP status
+		 * when one arrived, and — for the codes that are really a condition of
+		 * the account rather than the model — the advice the reader needs.
+		 */
+		function failureDetail(t, result) {
+			var parts = [failureText(t, result)];
+			if (typeof result.http === "number" && result.http > 0) parts.push("HTTP " + result.http);
+			if (result.code === "anon-gated") parts.push(t("advice.anongated"));
+			else if (result.code === "quota-exhausted") parts.push(t("advice.quota"));
+			else if (result.code === "bad-key") parts.push(t("advice.badkey"));
+			return parts.join(" · ");
+		}
+
 		// ── models card (module-level component) ──────────────────────────────
 
 		/**
@@ -567,7 +651,14 @@ window.__ModuleLoader__.load({
 			useEffect(function () {
 				var cancelled = false;
 				loadCatalog().then(function (snapshot) { if (!cancelled) setCatalog(snapshot); });
-				return function () { cancelled = true; };
+				// Adopt the last round on mount: a finished one is the report
+				// the reader has not seen yet, and a live one means a round is
+				// running that this card should follow rather than ignore.
+				loadProgress().then(function (reading) {
+					if (cancelled || reading === null) return;
+					adopt(reading);
+				});
+				return function () { cancelled = true; stopPolling(); };
 			}, []);
 
 			function refresh() {
@@ -582,37 +673,60 @@ window.__ModuleLoader__.load({
 			/* A null answer means the host did not answer, NOT an empty
 			   catalogue: keep the rows on screen and offer the retry.
 			   While the POST is in flight the progress endpoint is polled, so
-			   the pill and the per-row badges track the round live; when the
-			   POST answers, polling stops and the card repaints from the final
-			   snapshot (capability badges return). */
+			   the pill and the per-row badges track the round live. When the
+			   POST answers, polling stops but the LAST reading is kept: the
+			   finished round's tally and per-row reasons stay on screen (with
+			   the capability badges back beside them) until the next round
+			   replaces them. Wiping the reading here is what made a finished
+			   probe look like nothing ever happened. */
 			var PROGRESS_POLL_MS = 800;
+			var pollTimer = null;
+
+			function stopPolling() {
+				if (pollTimer !== null && typeof clearTimeout === "function") {
+					try { clearTimeout(pollTimer); } catch (error_) { /* best effort */ }
+				}
+				pollTimer = null;
+			}
+
+			function startPolling(reading) {
+				if (reading !== null) setProgress(reading);
+				if (typeof setTimeout !== "function") return;
+				stopPolling();
+				pollTimer = setTimeout(function () {
+					pollTimer = null;
+					if (!probing) return;
+					loadProgress().then(function (next) { startPolling(next); });
+				}, PROGRESS_POLL_MS);
+			}
+
+			/* Adopt a reading: a live one starts/keeps the poll, a finished one
+			   is retained as the resting report. `running: false` with results
+			   is a completed round, not an absence of one. */
+			function adopt(reading) {
+				if (reading === null) return;
+				setProgress(reading);
+				if (reading.running === true) startPolling(reading);
+				else stopPolling();
+			}
 
 			function probe() {
 				if (probing) return;
 				setProbeError("");
 				setProbing(true);
+				// Clear the previous round's report: this one replaces it.
 				setProgress(null);
-				var timer = null;
-				var stopped = false;
-				var poll = function () {
-					if (stopped) return;
-					loadProgress().then(function (reading) {
-						if (stopped) return;
-						if (reading !== null) setProgress(reading);
-						if (typeof setTimeout === "function" && !stopped) {
-							timer = setTimeout(poll, PROGRESS_POLL_MS);
-						}
-					});
-				};
-				poll();
+				loadProgress().then(startPolling);
 				probeCatalog().then(function (snapshot) {
-					stopped = true;
-					if (timer !== null && typeof clearTimeout === "function") {
-						try { clearTimeout(timer); } catch (error_) { /* best effort */ }
-					}
+					stopPolling();
 					if (snapshot !== null) setCatalog(snapshot);
 					else setProbeError(t("probeFailed"));
-					setProgress(null);
+					// Read the finished round back so the report matches what
+					// actually landed, not the last poll before the POST.
+					loadProgress().then(function (reading) {
+						if (reading === null) return;
+						setProgress(reading);
+					});
 					setProbing(false);
 				});
 			}
@@ -696,8 +810,15 @@ window.__ModuleLoader__.load({
 			   mock. Badge data comes from the host's `models` array; a row
 			   whose card is missing renders bare rather than failing — the
 			   toggle is the contract, badges are decoration. */
+			/* A reading is LIVE while a round runs and RETAINED once it has.
+			   Either way its per-row outcome is what the row reports; the
+			   capability badges return only after the round ends, so during a
+			   round there is exactly one badge per row and nothing competes
+			   with the answer. `live` additionally means: animate, highlight
+			   the in-flight row, dim the queue. */
+			var hasReading = progress !== null && progress.total > 0;
 			var live = progress !== null && progress.running === true;
-			var liveResults = live ? progress.results : {};
+			var liveResults = hasReading ? progress.results : {};
 			var liveCurrent = live ? progress.current : null;
 
 			var rows = visible.map(function (id) {
@@ -705,7 +826,11 @@ window.__ModuleLoader__.load({
 				var card = hasOwnKey(cards, id) ? cards[id] : null;
 				var left = [E("span", { key: "id", className: "opf-id" }, id)];
 				var rowClass = "opf-row";
-				if (!live) {
+				/* Capability badges describe the model; the probe badge
+				   describes THIS round. When both are on screen (a retained
+				   report) the outcome comes first, because it is the thing the
+				   reader just asked for. */
+				if (!hasReading || !live) {
 					if (card !== null && card.image === true) {
 						left.push(E("span", { key: "vision", className: "opf-badge opf-badge-vision" },
 							eyeIcon(),
@@ -716,30 +841,45 @@ window.__ModuleLoader__.load({
 							starIcon(),
 							E("span", null, t("badge.thinking") + " · " + levelLabel(card.thinking))));
 					}
-				} else {
+				}
+				if (hasReading) {
 					var verdict = hasOwnKey(liveResults, id) ? liveResults[id] : null;
 					var status = verdict !== null && verdict.status === "ok" ? "ok"
 						: verdict !== null ? "failed"
-						: id === liveCurrent ? "probing" : "waiting";
+						: live ? (id === liveCurrent ? "probing" : "waiting")
+						: "unprobed";
 					if (status === "ok") {
 						var ms = typeof verdict.ms === "number" && isFinite(verdict.ms) ? Math.max(0, Math.round(verdict.ms)) : null;
 						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-ok" },
 							checkIcon(),
 							E("span", { className: "opf-probe-ms" }, ms === null ? "" : ms + "ms")));
 					} else if (status === "failed") {
-						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-fail" },
-							crossIcon(),
-							E("span", null, t("probing.failed"))));
+						/* Red, but never mute: the badge names the reason and
+						   the full story (status + what to do about it) rides
+						   along as the tooltip, because a red dot that says
+						   only "failed" is not a report. */
+						left.push(E("span", {
+							key: "probe",
+							className: "opf-probe opf-probe-fail",
+							title: failureDetail(t, verdict)
+						}, crossIcon(), E("span", null, failureText(t, verdict))));
 					} else if (status === "probing") {
 						rowClass += " opf-row-probing";
 						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-busy" },
 							spinnerIcon(true),
 							E("span", null, t("probing"))));
-					} else {
+					} else if (status === "waiting") {
 						rowClass += " opf-row-waiting";
 						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-wait" },
 							E("span", { className: "opf-waitdot" }),
 							E("span", null, t("probing.waiting"))));
+					} else {
+						/* The round finished without asking this one (it was
+						   already dead, or it arrived mid-round). Saying so
+						   beats a row that quietly shows nothing. */
+						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-wait" },
+							E("span", { className: "opf-waitdot" }),
+							E("span", null, t("probing.unprobed"))));
 					}
 				}
 				return E("label",
@@ -798,22 +938,82 @@ window.__ModuleLoader__.load({
 				E("span", { className: "opf-badge opf-badge-vision" }, eyeIcon(), E("span", null, t("legend.vision"))),
 				E("span", { className: "opf-badge opf-badge-think" }, starIcon(), E("span", null, t("legend.thinking"))));
 
-			/* Progress capsule: pulsing dot, "正在探测", live "done/total" and a
-			   mini bar. Renders only while a polled reading says a round is
-			   running; sits next to the timestamp, per the mock. */
+			/* Progress capsule. LIVE: pulsing dot, "正在探测", "done/total", mini
+			   bar — per the mock. FINISHED: the same shape, tinted by the
+			   outcome, carrying the tally so the round's result is still a
+			   fact on screen instead of a flash that vanishes on completion.
+			   Both sit next to the last-probe timestamp. */
 			var capsule = null;
-			if (progress !== null && progress.running === true && progress.total > 0) {
-				var pct = Math.max(0, Math.min(100, Math.round((progress.done / progress.total) * 100)));
-				capsule = E("span", { className: "opf-capsule" },
-					E("span", { className: "opf-pingwrap" },
-						E("span", { className: "opf-pingring" }),
-						E("span", { className: "opf-pingdot" })),
-					E("span", { className: "opf-capsulelabel" },
-						t("probing.now"),
-						" ",
-						E("span", { className: "opf-count" }, progress.done + "/" + progress.total)),
-					E("span", { className: "opf-bar" },
-						E("span", { className: "opf-fill", style: { width: pct + "%" } })));
+			if (progress !== null && progress.total > 0) {
+				if (progress.running === true) {
+					var pct = Math.max(0, Math.min(100, Math.round((progress.done / progress.total) * 100)));
+					capsule = E("span", { className: "opf-capsule" },
+						E("span", { className: "opf-pingwrap" },
+							E("span", { className: "opf-pingring" }),
+							E("span", { className: "opf-pingdot" })),
+						E("span", { className: "opf-capsulelabel" },
+							t("probing.now"),
+							" ",
+							E("span", { className: "opf-count" }, progress.done + "/" + progress.total)),
+						E("span", { className: "opf-bar" },
+							E("span", { className: "opf-fill", style: { width: pct + "%" } })));
+				} else {
+					var okCount = 0;
+					var badCount = 0;
+					var goneCount = 0;
+					for (var rid in liveResults) {
+						if (!hasOwnKey(liveResults, rid)) continue;
+						var entry = liveResults[rid];
+						if (entry !== null && entry.status === "ok") {
+							okCount += 1;
+							continue;
+						}
+						badCount += 1;
+						// `dead` is the one failure that also REMOVES the row, so
+						// its badge can never be read afterwards. Counting it
+						// separately is what lets the report say "3 failed, 2 of
+						// them gone" instead of quietly losing two.
+						if (entry !== null && entry.code === "dead") goneCount += 1;
+					}
+					// A dead model is gone from `visible`, so its row cannot
+					// speak for itself. Naming the count here is what keeps a
+					// disappearance from looking like a bug.
+					capsule = E("span", { className: "opf-capsule" + (badCount > 0 ? " opf-capsule-mixed" : " opf-capsule-done") },
+						E("span", { className: "opf-pingwrap" },
+							E("span", { className: "opf-pingring" }),
+							E("span", { className: "opf-pingdot" })),
+						E("span", { className: "opf-capsule-ok" },
+							t("probing.done"),
+							" ",
+							E("span", { className: "opf-capsule-oknum" }, String(okCount)),
+							" ",
+							E("span", { className: "opf-capsule-badnum" }, String(badCount))),
+						goneCount > 0
+							? E("span", { className: "opf-capsule-gone" },
+								t("probing.removed") + " " + String(goneCount))
+							: null);
+				}
+			}
+
+			/* Why a vanished model vanished. Rendered only when the last round
+			   actually took a model out of the list, and never more than a
+			   couple of lines: this is a receipt for something that no longer
+			   has a row, not a second list. */
+			var removedNote = null;
+			if (progress !== null && !progress.running) {
+				var removed = [];
+				for (var goneId in liveResults) {
+					if (!hasOwnKey(liveResults, goneId)) continue;
+					var gone = liveResults[goneId];
+					if (gone === null || gone.status !== "failed" || gone.code !== "dead") continue;
+					removed.push(goneId);
+				}
+				if (removed.length > 0) {
+					var shown = removed.slice(0, 3).join("、");
+					var rest = removed.length - Math.min(removed.length, 3);
+					removedNote = E("p", { className: "opf-summaryline" },
+						t("probing.removed") + "：" + shown + (rest > 0 ? t("probing.andMore") + " " + String(rest) : ""));
+				}
 			}
 
 			var toolbarRight = stamp !== null || capsule !== null
@@ -843,6 +1043,7 @@ window.__ModuleLoader__.load({
 				E("div", { className: "opf-body" },
 					fallbackNote,
 					untrustedNote,
+					removedNote,
 					listArea,
 					error ? E("p", { className: "opf-error" }, error) : null,
 					probeError ? E("p", { className: "opf-error" }, probeError) : null),

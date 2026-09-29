@@ -306,18 +306,90 @@ test('a probe round paints the capsule, the counter and one badge per row', asyn
       && String(n.props?.className).split(' ').includes('opf-row'))
     const rowHasBadge = (row) => [...walk(row)].some((d) => String(d.props?.className ?? '')
       .split(' ').some((c) => c === 'opf-badge-vision' || c === 'opf-badge-think'))
-    assert.ok(!rowLabels(mounted.rerender()).some(rowHasBadge), 'capability badges step aside mid-round');    assert.ok(midHas('opf-row-probing'), 'the active row highlights');
+    assert.ok(!rowLabels(mounted.rerender()).some(rowHasBadge), 'capability badges step aside mid-round');
+    assert.ok(midHas('opf-row-probing'), 'the active row highlights');
     assert.ok(midHas('opf-row-waiting'), 'queued rows dim');
     // The probe button shows its loading state and refresh is fenced off.
     const busyBtn = mounted.findButton('探测中…')
     assert.ok(busyBtn, 'the probe button shows its loading state');
-    // Let the POST answer: polling stops and the card repaints at rest.
+    // Let the POST answer: polling stops, and the card keeps the round as a
+    // report instead of blinking back to a bare list. The stubbed GET is still
+    // `running: true`, so the pill stays live here — the finished-state
+    // assertions live in the test below, which is where the reading is frozen.
+    postResolve()
+    await mounted.fireTimers()
+    const end = collect(mounted.rerender())
+    assert.ok(end.texts.some((t) => t.includes('视觉')), 'capability badges return');
+  } finally {
+    mounted.dispose()
+  }
+});
+
+test('a finished round stays on screen: tally, per-row reasons, and the dead model named', async () => {
+  // The reported bug, end to end: the POST answers, the progress is wiped, and
+  // a card that says nothing looks like a probe that never ran. The host's own
+  // frozen reading is the source of truth here — the card re-reads it after the
+  // POST precisely so the report cannot be a half-polled guess.
+  let postResolve = null
+  const finished = {
+    running: false,
+    total: 3,
+    done: 3,
+    current: null,
+    results: {
+      'space-bunny-free': { status: 'ok', ms: 218 },
+      'big-pickle': { status: 'failed', ms: 5000, code: 'timeout', http: 0 },
+      'deepseek-v4-flash-free': { status: 'failed', ms: 41, code: 'dead', http: 404 },
+    },
+    startedAt: 1,
+  }
+  let live = true
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'POST') {
+        return new Promise((resolve) => {
+          postResolve = () => resolve({
+            ok: true,
+            // The POST hands back a catalogue WITHOUT the dead model: that is
+            // the whole reason the report has to survive on its own.
+            json: async () => ({ ...SNAPSHOT, visible: ['space-bunny-free', 'big-pickle', 'muse-spark-1.3-contributor-free'] }),
+          })
+        })
+      }
+      if (url.endsWith('/api/probe') && method === 'GET') {
+        return { ok: true, json: async () => (live
+          ? { ...finished, running: true, done: 0, current: 'space-bunny-free', results: {} }
+          : finished) }
+      }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    mounted.findButton('立即探测').props.onClick()
+    await mounted.fireTimers()
+    live = false
     postResolve()
     await mounted.fireTimers()
     const end = collect(mounted.rerender())
     const endHas = (cls) => end.classes.includes(cls)
-    assert.ok(!endHas('opf-capsule'), 'the capsule leaves with the round');
-    assert.ok(end.texts.some((t) => t.includes('视觉')), 'capability badges return');
+    // The round is still a fact on screen, with its tally.
+    assert.ok(endHas('opf-capsule'), 'the finished round keeps its capsule');
+    assert.ok(endHas('opf-capsule-mixed'), 'a round with failures is tinted as one');
+    assert.ok(end.texts.some((t) => t.includes('探测完成')), 'the capsule reads as finished');
+    assert.ok(end.texts.some((t) => t.includes('1')), 'the tally renders');
+    // Per-row: the success keeps its latency, the failure NAMES its reason.
+    assert.ok(end.texts.some((t) => t.includes('218ms')), 'the answered row keeps its latency');
+    assert.ok(end.texts.some((t) => t.includes('探测超时')), 'the timed-out row says so, not just "failed"');
+    // The dead model has no row left to speak for itself, so it is named.
+    assert.ok(end.texts.some((t) => t.includes('本轮下架')), 'the removed model is announced');
+    assert.ok(end.texts.some((t) => t.includes('deepseek-v4-flash-free')), 'and named by id');
+    assert.ok(!end.texts.includes('等待中'), 'a finished round leaves no row waiting');
+    // The tooltip carries the full story, not just the word on the badge.
+    const failBadges = [...walk(mounted.rerender())].filter((n) => String(n.props?.className ?? '')
+      .split(' ').includes('opf-probe-fail'))
+    assert.equal(failBadges.length, 1, 'one failed row in this catalogue')
+    assert.match(String(failBadges[0].props.title), /探测超时/, 'the badge explains itself on hover');
   } finally {
     mounted.dispose()
   }

@@ -346,10 +346,25 @@ test('routes are method-guarded and disposing releases them', async () => {
     assert.equal((await callRoute(host, CATALOG_ROUTE, 'POST')).status, 405, 'read route rejects writes')
     assert.equal((await callRoute(host, REFRESH_ROUTE, 'GET')).status, 405, 'refresh route rejects reads')
     assert.equal((await callRoute(host, PROBE_ROUTE, 'PUT')).status, 405, 'probe route rejects other methods')
+    assert.equal((await callRoute(host, PROBE_ROUTE, 'DELETE')).status, 405, 'probe route rejects deletes')
   } finally {
     host.dispose()
   }
   assert.equal(host.routes.size, 0, 'unload must release both routes')
+})
+
+test('the progress reading reaches the wire with each failure reason intact', async () => {
+  // The card cannot word a failure it was never told about, so the endpoint's
+  // JSON is the contract: `code` and `http` must survive serialization exactly.
+  const host = mount({})
+  try {
+    const read = await callRoute(host, PROBE_ROUTE, 'GET')
+    assert.equal(read.status, 200)
+    const wire = JSON.parse(JSON.stringify(read.body))
+    assert.deepEqual(Object.keys(wire).sort(), ['current', 'done', 'results', 'running', 'startedAt', 'total'])
+  } finally {
+    host.dispose()
+  }
 })
 
 test('GET on the probe route reports live progress without starting a round', async () => {

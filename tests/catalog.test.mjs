@@ -979,7 +979,9 @@ test('probeProgress tracks the round live: current, done/total and per-model res
       if (model.id === 'ling-3.0-flash-fin-free') await new Promise((resolve) => setTimeout(resolve, 50))
       clock.t += model.id === 'deepseek-v4-flash-free' ? 0 : 120
       seen.push({ ...catalog.probeProgress(), at: model.id })
-      if (model.id === 'deepseek-v4-flash-free') return DEAD(404)
+      if (model.id === 'deepseek-v4-flash-free') {
+        return { ...DEAD(404), code: 'dead', http: 404 }
+      }
       return { kind: 'ok' }
     }
     const catalog = await probedCatalog(dir, probe, clock)
@@ -1003,8 +1005,61 @@ test('probeProgress tracks the round live: current, done/total and per-model res
     assert.equal(end.results['big-pickle'].ms, 120)
     assert.equal(end.results['deepseek-v4-flash-free'].status, 'failed', 'dead counts as not-answered for the row')
     assert.equal(end.results['deepseek-v4-flash-free'].ms, 0)
+    // A red row that cannot say WHY is the bug this field exists to prevent:
+    // the code is what the card turns into a word, and the status is what
+    // makes "gone (404)" different from "gone (401)".
+    assert.equal(end.results['deepseek-v4-flash-free'].code, 'dead')
+    assert.equal(end.results['deepseek-v4-flash-free'].http, 404)
     // The verdicts (not the progress) are what persist.
     assert.ok(!catalog.current().visible.includes('deepseek-v4-flash-free'))
+  })
+})
+
+test('every failure reports a reason: a coded prober, a bare prober and a throw', async () => {
+  await withTempDir(async (dir) => {
+    // Three ways a round can fail to answer, and none of them may reach the
+    // card as a mute red badge.
+    const probe = async (model) => {
+      if (model.id === 'big-pickle') {
+        return { kind: 'inconclusive', reason: 'quota-exhausted（HTTP 429）', code: 'quota-exhausted', http: 429 }
+      }
+      if (model.id === 'muse-spark-1.3-contributor-free') {
+        // A prober that predates the coded outcome still has to produce one.
+        return { kind: 'inconclusive', reason: 'something went sideways' }
+      }
+      if (model.id === 'ling-3.0-flash-fin-free') throw new Error('socket exploded')
+      return { kind: 'ok' }
+    }
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.forceProbes()
+    const { results } = catalog.probeProgress()
+    assert.deepEqual(results['big-pickle'], {
+      status: 'failed', ms: 0, code: 'quota-exhausted', http: 429,
+    }, 'the prober code and status reach the row')
+    assert.equal(results['muse-spark-1.3-contributor-free'].code, 'unknown', 'a bare inconclusive falls back to "unknown"')
+    assert.equal(results['muse-spark-1.3-contributor-free'].http, 0, 'and to no status')
+    assert.equal(results['ling-3.0-flash-fin-free'].code, 'error', 'a throwing prober reports the throw')
+    assert.equal(results['ling-3.0-flash-fin-free'].http, 0)
+    for (const [id, entry] of Object.entries(results)) {
+      if (entry.status === 'failed') {
+        assert.equal(typeof entry.code, 'string', `${id} carries a code`)
+        assert.notEqual(entry.code, '', `${id} code is not empty`)
+        assert.equal(typeof entry.http, 'number', `${id} carries a status`)
+      }
+    }
+  })
+})
+
+test('a dead verdict still names the status it died on', async () => {
+  await withTempDir(async (dir) => {
+    // 404 and 401 are the same verdict with very different meanings, so the
+    // status is part of the report and not an implementation detail.
+    const catalog = await probedCatalog(dir, recordingProber({ 'big-pickle': DEAD(404) }))
+    await catalog.forceProbes()
+    const entry = catalog.probeProgress().results['big-pickle']
+    assert.equal(entry.status, 'failed')
+    assert.equal(entry.code, 'dead')
+    assert.equal(entry.http, 0, 'a bare DEAD() carries no status, and says so')
   })
 })
 

@@ -438,6 +438,56 @@ test('probe verdicts: a text reply is ok, only a positive signal is dead', async
   assert.equal(empty.kind, 'inconclusive')
 })
 
+test('GUARD: every inconclusive outcome carries a code and a status the card can word', async () => {
+  // The panel localizes the failure itself, so the outcome must hand it
+  // something structured. A red badge that can only read "failed" is exactly
+  // the report this test exists to prevent — the prober is the only place
+  // that still knows WHY.
+  const p = plugin.zenProvider(() => 's', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  const run = (fetchImpl) => probeModel(model, { provider: p, apiKey: 'public', fetchImpl })
+  const CODES = new Set(['anon-gated', 'quota-exhausted', 'bad-key', 'unknown', 'timeout', 'transport'])
+
+  // A gated anonymous request, a quota wall, a bad key, an empty completion and
+  // a thrown socket: five different situations, five different sentences.
+  const bodies = [
+    { status: 403, text: '{"error":{"type":"FreeTierError","message":"only be used in OpenCode"}}' },
+    { status: 429, text: '{"error":{"type":"FreeUsageLimitError"}}' },
+    { status: 401, text: '{"error":{"message":"Invalid API key provided"}}' },
+    { status: 200, text: 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', sse: true },
+  ]
+  for (const { status, text, sse } of bodies) {
+    const outcome = await run(async () => new Response(text, {
+      status,
+      headers: sse ? { 'Content-Type': 'text/event-stream' } : undefined,
+    }))
+    assert.equal(outcome.kind, 'inconclusive', `HTTP ${status}`)
+    assert.ok(CODES.has(outcome.code), `HTTP ${status} produced code ${outcome.code}`)
+    assert.equal(typeof outcome.http, 'number', `HTTP ${status} carries a status`)
+    if (status !== 0) assert.equal(outcome.http, status, `HTTP ${status} is reported as itself`)
+  }
+
+  const thrown = await run(async () => { throw new TypeError('fetch failed') })
+  assert.equal(thrown.kind, 'inconclusive')
+  assert.ok(CODES.has(thrown.code), `a thrown socket produced code ${thrown.code}`)
+  assert.equal(thrown.http, 0, 'no response means no status, not a fake one')
+
+  // A timeout is its own code: "the model sat there" and "the socket broke"
+  // need different things from the reader, and an AbortError is the only
+  // evidence that separates them.
+  const aborted = await run(async () => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }) })
+  assert.equal(aborted.code, 'timeout', 'a blown AbortSignal is reported as a timeout')
+
+  // And a genuinely dead model says dead, with the status that proved it.
+  const dead = await run(async () => new Response(
+    '{"error":{"message":"The model does not exist"}}',
+    { status: 404 },
+  ))
+  assert.equal(dead.kind, 'dead')
+  assert.equal(dead.code, 'dead')
+  assert.equal(dead.http, 404)
+})
+
 test('a socket failure reports its cause instead of a bare "Connection error."', async () => {  // The chain this exists for, recorded live 2026-09-29: undici rejects, the
   // OpenAI SDK flattens it to `APIConnectionError { message: 'Connection
   // error.' }` and keeps the reason in `cause`, and pi-ai reads only

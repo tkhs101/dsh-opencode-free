@@ -358,6 +358,10 @@ export type ProbeMap = Record<string, ProbeRecord>;
 export interface ProbeResult {
   readonly kind: ProbeVerdict | "inconclusive";
   readonly reason?: string;
+  /** Machine-readable failure code; the panel localizes it rather than guessing. */
+  readonly code?: string;
+  /** HTTP status the transport saw; 0 means no response ever arrived. */
+  readonly http?: number;
 }
 
 /** Read persisted verdicts defensively: a damaged entry is dropped, not fatal. */
@@ -547,19 +551,30 @@ export interface Catalog {
 }
 
 /**
- * What the panel polls while a round is running. `results` holds one entry per
- * FINISHED model; the in-flight one is `current`; everything else is waiting.
- * `ms` is the wall time that model's probe took, for the "✓ 142ms" badge.
+ * What the panel polls while a round is running — and reads again after it
+ * ends, so the last round's outcome is still on screen instead of vanishing.
+ * `results` holds one entry per FINISHED model; the in-flight one is `current`;
+ * everything else is waiting. `ms` is the wall time that model's probe took,
+ * for the "✓ 142ms" badge.
+ *
+ * A failure carries `code` (a {@link ProbeFailureCode} the card localizes) and
+ * `http` (0 when no status ever arrived). A red badge that only says "failed"
+ * is the thing this type exists to prevent.
  */
 export interface ProbeProgress {
   readonly running: boolean;
   readonly total: number;
   readonly done: number;
   readonly current: string | null;
-  readonly results: Readonly<Record<string, { readonly status: "ok" | "failed"; readonly ms: number }>>;
+  readonly results: Readonly<Record<string, ProbeProgressResult>>;
   /** When the current (or last) round started; 0 means no round has ever run. */
   readonly startedAt: number;
 }
+
+/** One model's outcome in a round: answered (with latency) or not (with why). */
+export type ProbeProgressResult =
+  | { readonly status: "ok"; readonly ms: number }
+  | { readonly status: "failed"; readonly ms: number; readonly code: string; readonly http: number };
 
 export function createCatalog(options: CreateCatalogOptions): Catalog {
   const { template, builtinBaseline, knownApis, cachePath: path, fetchImpl, ttlMs = DEFAULT_TTL_MS } = options;
@@ -584,7 +599,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     total: number;
     done: number;
     current: string | null;
-    results: Record<string, { status: "ok" | "failed"; ms: number }>;
+    results: Record<string, ProbeProgressResult>;
     startedAt: number;
   } = { running: false, total: 0, done: 0, current: null, results: {}, startedAt: 0 };
   let probeInflight: Promise<void> | null = null;
@@ -770,19 +785,29 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
           outcome = await probe!(model);
         } catch {
           untrusted = true;
-          probeRun.results[model.id] = { status: "failed", ms: Math.max(0, now() - started) };
+          probeRun.results[model.id] = { status: "failed", ms: Math.max(0, now() - started), code: "error", http: 0 };
           probeRun.done += 1;
           continue;
         }
         // The row badge reports whether the model ANSWERED, not what the
         // verdict was: `dead` removes the model from the list, but from this
         // round's point of view it is still "did not answer usably". Only
-        // `ok` earns the green badge; everything else is red.
-        const answered = outcome !== undefined && outcome !== null && outcome.kind === "ok";
-        probeRun.results[model.id] = {
-          status: answered ? "ok" : "failed",
-          ms: Math.max(0, now() - started),
-        };
+        // `ok` earns the green badge; everything else is red — and red carries
+        // WHY, because a red badge with no reason is not a report.
+        const elapsed = Math.max(0, now() - started);
+        if (outcome !== undefined && outcome !== null && outcome.kind === "ok") {
+          probeRun.results[model.id] = { status: "ok", ms: elapsed };
+        } else {
+          // A prober that predates the coded outcome still gets a reason: the
+          // verdict itself is the coarse fallback, never a silent failure.
+          probeRun.results[model.id] = {
+            status: "failed",
+            ms: elapsed,
+            code: typeof outcome?.code === "string" && outcome.code !== "" ? outcome.code
+              : outcome?.kind === "dead" ? "dead" : "unknown",
+            http: typeof outcome?.http === "number" && isFinite(outcome.http) ? outcome.http : 0,
+          };
+        }
         probeRun.done += 1;
         if (outcome === undefined || outcome === null || outcome.kind === "inconclusive") {
           untrusted = true;

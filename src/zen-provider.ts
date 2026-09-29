@@ -555,11 +555,24 @@ export function isModelUnavailableFailure(status: number, bodyText: string): boo
  *
  * `inconclusive` is not a failure of the probe — it is the absence of a
  * conclusion, and the caller must leave visibility untouched for it (D5).
+ *
+ * `code` and `http` are the machine-readable half of the same fact, kept
+ * beside the human `reason`: the panel localizes the wording itself, so it
+ * never has to ship a Chinese diagnostic to an English reader, and `http: 0`
+ * says "no status ever arrived" rather than repeating a zero.
  */
 export type ProbeOutcome =
   | { kind: "ok" }
-  | { kind: "dead"; reason: string }
-  | { kind: "inconclusive"; reason: string };
+  | { kind: "dead"; reason: string; code: "dead"; http: number }
+  | { kind: "inconclusive"; reason: string; code: ProbeFailureCode; http: number };
+
+/** Why a probe did not get an answer the round could trust. */
+export type ProbeFailureCode =
+  | "dead"
+  | "timeout"
+  | "transport"
+  | ZenFailureKind
+  | "error";
 
 /** The one provider method a probe needs; satisfied by zenProvider()'s return. */
 export interface ProbeStreamer {
@@ -643,7 +656,16 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
   const context = {
     messages: [{ role: "user", content: PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() }],
   };
+  const signal = AbortSignal.timeout(deps.timeoutMs ?? PROBE_TIMEOUT_MS);
+  // Whether the request ran out of time is a property of the SIGNAL, not of
+  // whichever error happens to surface: the provider flattens an abort into a
+  // generic `stopReason: "error"` and the recorder's cause into a socket
+  // failure, so the error object alone would report a timeout as a dead
+  // socket — the one misreading the reader cannot act on.
+  const expired = (error?: unknown): boolean => signal.aborted
+    || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
   let result: Record<string, unknown> | undefined;
+  let thrown: unknown;
   try {
     const stream = deps.provider.streamSimple(model, context, {
       apiKey: deps.apiKey ?? "public",
@@ -653,27 +675,61 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
       // The default reasoning effort for muse-spark is xhigh; a probe only
       // needs any reply, so it asks for the cheapest one.
       reasoning: "low",
-      signal: AbortSignal.timeout(deps.timeoutMs ?? PROBE_TIMEOUT_MS),
+      signal,
       fetch: recorder.fetch,
     });
     result = await stream.result();
   } catch (error) {
-    const detail = error instanceof Error ? `${error.name}: ${error.message || "(empty)"}` : String(error);
-    return { kind: "inconclusive", reason: `transport failure — ${detail.slice(0, 200)}` };
+    thrown = error;
+  }
+  if (thrown !== undefined) {
+    const detail = thrown instanceof Error ? `${thrown.name}: ${thrown.message || "(empty)"}` : String(thrown);
+    const timedOut = expired(thrown);
+    return {
+      kind: "inconclusive",
+      reason: timedOut ? `probe timed out after ${deps.timeoutMs ?? PROBE_TIMEOUT_MS}ms` : `transport failure — ${detail.slice(0, 200)}`,
+      code: timedOut ? "timeout" : "transport",
+      http: 0,
+    };
   }
   // A reply settles the question: the model answers, so it is not dead.
   if (hasTextReply(result)) return { kind: "ok" };
   const { status, body, cause } = recorder.read();
+  if (expired()) {
+    return {
+      kind: "inconclusive",
+      reason: `probe timed out after ${deps.timeoutMs ?? PROBE_TIMEOUT_MS}ms`,
+      code: "timeout",
+      http: status,
+    };
+  }
   if (isModelUnavailableFailure(status, body)) {
-    return { kind: "dead", reason: `上游回報此模型不可用（HTTP ${status}）` };
+    return { kind: "dead", reason: `上游回報此模型不可用（HTTP ${status}）`, code: "dead", http: status };
   }
   // No response was ever received, so there is no status to report. Naming the
   // socket cause is the whole value of this branch: it is what separates "my
   // network is down" from "the anonymous tier is refusing", and the two need
   // completely different things from the reader.
-  if (cause !== undefined) return { kind: "inconclusive", reason: `transport failure — ${cause}` };
-  if (status === 0) return { kind: "inconclusive", reason: classifyZenFailure(status, body) };
-  return { kind: "inconclusive", reason: `${classifyZenFailure(status, body)}（HTTP ${status}）` };
+  if (cause !== undefined) {
+    // The recorder keeps the socket cause intact while the SDK flattens it, so
+    // the abort shows up HERE rather than as a throw. Reading it is what keeps
+    // a timeout from being reported as "your network broke".
+    const abortedCause = /abort|timeout/i.test(cause);
+    return {
+      kind: "inconclusive",
+      reason: abortedCause
+        ? `probe timed out after ${deps.timeoutMs ?? PROBE_TIMEOUT_MS}ms`
+        : `transport failure — ${cause}`,
+      code: abortedCause ? "timeout" : "transport",
+      http: 0,
+    };
+  }
+  if (status === 0) {
+    const kind = classifyZenFailure(status, body);
+    return { kind: "inconclusive", reason: kind, code: kind, http: 0 };
+  }
+  const kind = classifyZenFailure(status, body);
+  return { kind: "inconclusive", reason: `${kind}（HTTP ${status}）`, code: kind, http: status };
 }
 
 /**
