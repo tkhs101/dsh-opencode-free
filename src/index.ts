@@ -322,12 +322,35 @@ export function apply(ctx: HostContext, config?: Config): void {
   // that reads `provider` at call time. There is still exactly one owner of the
   // verdicts (the catalogue) and one owner of transport (the provider): the
   // provider is asked for a conclusion, it never remembers one.
+  // hiddenModels arrives as a live Volatile ref under DSH (see Config docs
+  // above); unwrap tolerantly so plain arrays keep working in tests.
+  //
+  // Read LIVE, every time. A one-shot Set goes stale the moment a toggle
+  // changes, and then two answers to "is this model shown" disagree — the
+  // picker filters by the snapshot, the probe round by the disk — which is how
+  // a probe ends up measuring a model the user cannot see, or misses one they
+  // can. One reader, consulted by both.
+  const rawHidden: unknown = config?.hiddenModels;
+  const hiddenGet =
+    typeof rawHidden === "object" && rawHidden !== null && "get" in rawHidden
+      ? (rawHidden as { readonly get?: unknown }).get
+      : undefined;
+  const isHidden = (id: string): boolean => {
+    const live: unknown = typeof hiddenGet === "function" ? (hiddenGet as () => unknown)() : rawHidden;
+    const list: readonly string[] = Array.isArray(live) ? (live as readonly string[]) : [];
+    return list.some((entry) => String(entry).trim() === id);
+  };
+
   let provider: Provider = undefined as unknown as Provider;
   const catalog = createCatalog({
     template: template ?? builtinFreeModels()[0]!,
     builtinBaseline: builtinFreeModels(),
     knownApis: builtinKnownApis(),
     cachePath: cachePath(),
+    // A round spends the shared anonymous bucket, so it only asks about the
+    // models the user has switched ON: probing a model they hid is quota spent
+    // on an answer they will never read, and it crowds out the ones they will.
+    hidden: isHidden,
     fetchImpl: ((url, init) => fetch(url, init as RequestInit) as unknown as Promise<FetchLikeResponse>) as FetchLike,
     now: Date.now,
     // Never rejects: `probeModel` converts every failure mode, including a
@@ -345,16 +368,6 @@ export function apply(ctx: HostContext, config?: Config): void {
   registerCatalogRoutes(ctx, catalog);
 
   provider = zenProvider(() => undefined, getConfigKey, { catalog });
-  // hiddenModels arrives as a live Volatile ref under DSH (see Config docs
-  // above); unwrap tolerantly so plain arrays keep working in tests.
-  const rawHidden: unknown = config?.hiddenModels;
-  const getFn =
-    typeof rawHidden === "object" && rawHidden !== null && "get" in rawHidden
-      ? (rawHidden as { readonly get?: unknown }).get
-      : undefined;
-  const hiddenList: readonly string[] =
-    typeof getFn === "function" ? (((getFn as () => unknown)() ?? []) as readonly string[]) : ((rawHidden ?? []) as readonly string[]);
-  const hidden = new Set(hiddenList.map((id) => id.trim()).filter((id) => id.length > 0));
   const filtered = {
     ...provider,
     getModels: () => {
@@ -369,7 +382,7 @@ export function apply(ctx: HostContext, config?: Config): void {
       // already ran, so this stays a single cheap check per read.
       const snapshot = catalog.current();
       if (snapshot.source !== "builtin-fallback") void catalog.runProbes().catch(() => undefined);
-      return provider.getModels().filter((m) => !hidden.has(m.id));
+      return provider.getModels().filter((m) => !isHidden(m.id));
     },
     refreshModels: (c: unknown) => (provider as { refreshModels: (c: unknown) => unknown }).refreshModels(c),
   };

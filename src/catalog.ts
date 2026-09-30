@@ -238,6 +238,16 @@ function buildModel(record: CatalogRecord, template: Model<Api>, knownApis?: Rea
   };
 }
 
+/**
+ * Alphabetical by id, with a plain comparison rather than `localeCompare`: the
+ * ids are lowercase ASCII, and ICU collation orders `kimi-k2.5-free` and
+ * `kimi-k2-5-free` differently depending on the host's locale — a list whose
+ * order depends on the machine is not an order anyone can rely on.
+ */
+export function byId<T extends { readonly id: string }>(a: T, b: T): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /** Pure: models.dev models dictionary → pre-gate catalogue. */
 export function derive(section: CatalogRecord, options: DeriveOptions): DerivedCatalog {
   const candidates: Model<Api>[] = [];
@@ -251,7 +261,11 @@ export function derive(section: CatalogRecord, options: DeriveOptions): DerivedC
     if (!isCatalogueStatus(record)) continue;
     candidates.push(buildModel(record, options.template, options.knownApis));
   }
-  return { candidates };
+  // Sorted HERE, at the one place the list is born, so the snapshot, the
+  // visible set and the picker all inherit the same order instead of each
+  // deciding for itself. models.dev's own order is grouped by vendor and
+  // family, which reads as arbitrary to anyone scanning for one model.
+  return { candidates: candidates.slice().sort(byId) };
 }
 
 export interface FetchLikeResponse {
@@ -348,6 +362,8 @@ export interface CatalogCacheRecord {
     readonly total: number;
     readonly done: number;
     readonly results: Record<string, ProbeProgressResult>;
+    /** The round's scope, so a restored report still says what it covered. */
+    readonly targets?: readonly string[];
   };
 }
 
@@ -476,7 +492,10 @@ function readLastRound(value: unknown): CatalogCacheRecord["lastRound"] {
       }
     }
   }
-  return { total, done, results };
+  const targets = Array.isArray(value.targets)
+    ? value.targets.filter((id): id is string => typeof id === 'string')
+    : [];
+  return { total, done, results, targets };
 }
 
 /** Temp file + rename, so a crash mid-write can never leave a torn cache. */
@@ -606,6 +625,14 @@ export interface CreateCatalogOptions {
    * back to probing everything it would otherwise have probed.
    */
   readonly listZenIds?: (() => Promise<readonly string[] | null>) | undefined;
+  /**
+   * Is this model switched OFF in the picker? A round asks only about the
+   * models the user has on: a probe costs a request from a bucket shared by
+   * everything behind this egress, so spending one on a model that is hidden
+   * is an answer nobody will read, taken at the expense of the ones that will
+   * be. Read live, so a toggle mid-round is honoured on the next round.
+   */
+  readonly hidden?: ((id: string) => boolean) | undefined;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly userAgent?: string;
@@ -650,6 +677,15 @@ export interface ProbeProgress {
   readonly done: number;
   readonly current: string | null;
   readonly results: Readonly<Record<string, ProbeProgressResult>>;
+  /**
+   * The ids this round accounts for — its whole scope, asked or not-yet-asked.
+   *
+   * A round now only asks about the models the user has switched ON, so "no
+   * result yet" means two different things: queued, or not in this round at
+   * all. The panel cannot tell them apart from `results` alone, and calling a
+   * skipped model "waiting" is a claim about a round that will never reach it.
+   */
+  readonly targets: readonly string[];
   /** When the current (or last) round started; 0 means no round has ever run. */
   readonly startedAt: number;
 }
@@ -680,9 +716,10 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
   const userAgent = options.userAgent;
   const probe = options.probe;
   const listZenIds = options.listZenIds;
+  const hidden = options.hidden;
 
   let cache: CatalogCacheRecord | null = null;
-  let models: Model<Api>[] = builtinBaseline.slice();
+  let models: Model<Api>[] = builtinBaseline.slice().sort(byId);
   let source: CatalogSource = "builtin-fallback";
   let updatedAt = 0;
   let zenIds: ReadonlySet<string> | null = null;
@@ -700,7 +737,8 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     current: string | null;
     results: Record<string, ProbeProgressResult>;
     startedAt: number;
-  } = { running: false, total: 0, done: 0, current: null, results: {}, startedAt: 0 };
+    targets: string[];
+  } = { running: false, total: 0, done: 0, current: null, results: {}, targets: [], startedAt: 0 };
   let probeInflight: Promise<void> | null = null;
 
   // Warm start: a valid cache restores the catalogue without any network.
@@ -722,6 +760,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         done: restored.done,
         current: null,
         results: { ...restored.results },
+        targets: Array.isArray(restored.targets) ? restored.targets.slice() : [],
         startedAt: record.lastProbeAt,
       };
     }
@@ -805,6 +844,8 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    */
   const effectiveList = (): Model<Api>[] => {
     const gated = zenIds === null ? models : models.filter((model) => zenIds!.has(model.id));
+    // Order comes from where the catalogue is born (derive / the offline
+    // floor); this only filters, so it cannot drift from it.
     return gated.filter((model) => probes[model.id]?.verdict !== "dead");
   };
 
@@ -902,7 +943,8 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       if (record === undefined || record.verdict !== "dead") return false;
       return record.swept === true;
     };
-    const targets = live.filter((model) => !settled(model.id));
+    const isShown = (id: string): boolean => hidden?.(id) !== true;
+    const targets = live.filter((model) => isShown(model.id) && !settled(model.id));
     // Models Zen dropped: out of `visible` without ever being asked. They still
     // count toward the round, because the panel's tally has to add up and a
     // silent hole in the list is exactly what a reader cannot explain.
@@ -915,6 +957,8 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     // ends, so a late poll never shows a previous round's leftovers as live.
     probeRun = {
       running: true,
+      // The round's whole scope, so the panel can tell "queued" from "skipped".
+      targets: [...targets, ...notListed].map((model) => model.id),
       total: targets.length + notListed.length,
       done: 0,
       current: null,
@@ -1008,7 +1052,12 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         probes,
         lastProbeAt,
         // The report, so the panel's progress area survives a restart.
-        lastRound: { total: probeRun.total, done: probeRun.done, results: probeRun.results },
+        lastRound: {
+          total: probeRun.total,
+          done: probeRun.done,
+          results: probeRun.results,
+          targets: probeRun.targets,
+        },
       });
     }
   };
@@ -1066,6 +1115,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         done: probeRun.done,
         current: probeRun.current,
         results: { ...probeRun.results },
+        targets: probeRun.targets.slice(),
         startedAt: probeRun.startedAt,
       };
     },

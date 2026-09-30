@@ -559,6 +559,15 @@ window.__ModuleLoader__.load({
 							done: typeof payload.done === "number" ? payload.done : 0,
 							current: typeof payload.current === "string" ? payload.current : null,
 							results: payload.results !== null && typeof payload.results === "object" ? payload.results : {},
+							// The round's scope. This normaliser copies field by
+							// field, so anything the host starts sending that is
+							// not listed here is dropped silently — the same trap
+							// `removed` and `marker` walked into. A missing entry
+							// leaves `targets` null, which the renderer reads as
+							// "older host, assume everything is in scope".
+							targets: Array.isArray(payload.targets)
+								? payload.targets.filter((id) => typeof id === "string")
+								: null,
 							startedAt: typeof payload.startedAt === "number" ? payload.startedAt : 0,
 						};
 					})
@@ -907,6 +916,12 @@ window.__ModuleLoader__.load({
 			var live = progress !== null && progress.running === true;
 			var liveResults = hasReading ? progress.results : {};
 			var liveCurrent = live ? progress.current : null;
+			/* The round's own scope. A round asks only about the models the
+			   user has switched ON, so "no result yet" is two different things:
+			   queued, or never in this round. Only the server knows which — the
+			   panel used to call every untouched row "waiting", which promises
+			   the round will reach a model it never intended to ask about. */
+			var liveTargets = hasReading && Array.isArray(progress.targets) ? progress.targets : null;
 
 			var rows = visible.map(function (id) {
 				var shown = !hasOwnKey(hidden, id);
@@ -930,8 +945,10 @@ window.__ModuleLoader__.load({
 				}
 				if (hasReading) {
 					var verdict = hasOwnKey(liveResults, id) ? liveResults[id] : null;
+					var covered = liveTargets === null || liveTargets.indexOf(id) !== -1;
 					var status = verdict !== null && verdict.status === "ok" ? "ok"
 						: verdict !== null ? "failed"
+						: !covered ? "skipped"
 						: live ? (id === liveCurrent ? "probing" : "waiting")
 						: "unprobed";
 					if (status === "ok") {
@@ -972,9 +989,15 @@ window.__ModuleLoader__.load({
 						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-wait" },
 							E("span", { className: "opf-waitdot" }),
 							E("span", null, t("probing.waiting"))));
+					} else if (status === "skipped") {
+						/* Outside the round's scope — the user has this model
+						   switched off, so no request was spent on it and none
+						   will be. It wears no probe badge at all: a row that
+						   says nothing is the honest report, where "waiting"
+						   would promise a round that will never reach it. */
 					} else {
-						/* The round finished without asking this one (it was
-						   already dead, or it arrived mid-round). Saying so
+						/* In scope, but the round finished without asking — it was
+						   already dead, or it arrived mid-round. Saying so
 						   beats a row that quietly shows nothing. */
 						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-wait" },
 							E("span", { className: "opf-waitdot" }),

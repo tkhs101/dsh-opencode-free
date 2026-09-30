@@ -682,6 +682,54 @@ test('a live round is followed: the pill counts down and rows report progress', 
   }
 })
 
+test('a model outside the round wears no probe badge at all', async () => {
+  // A round only asks about the models the user has switched ON. The panel used
+  // to call every untouched row "waiting", which promises a round that will
+  // never reach it — a model the user deliberately switched off was announced
+  // as queued. Only the server knows the round's scope, so it sends it.
+  const live = {
+    running: true,
+    total: 1,
+    done: 0,
+    current: 'big-pickle',
+    // Only one of the two models is in this round.
+    targets: ['big-pickle'],
+    results: {},
+    startedAt: 1759146617000,
+  }
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'POST') return new Promise(() => {})
+      if (url.endsWith('/api/probe') && method === 'GET') return { ok: true, json: async () => live }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    mounted.findButton('立即探测').props.onClick()
+    await mounted.fireTimers()
+    const mid = collect(mounted.rerender())
+    // The covered model is in flight and says so.
+    assert.ok(mid.texts.some((t) => t.includes('探测中')), 'the covered row spins')
+    // The uncovered one says nothing at all — no badge, and not dimmed either.
+    const rows = [...walk(mounted.rerender())].filter((n) => n.tag === 'label'
+      && String(n.props?.className).split(' ').includes('opf-row'))
+    const byId = (needle) => rows.find((r) => [...walk(r)].some((d) => d.text === needle))
+    const coveredRow = byId('big-pickle')
+    const skippedRow = byId('space-bunny-free')
+    assert.ok(coveredRow, 'the covered row renders')
+    assert.ok(skippedRow, 'the skipped row still renders')
+    const hasProbeBadge = (row) => [...walk(row)].some((d) => String(d.props?.className ?? '')
+      .split(' ').some((c) => c.startsWith('opf-probe')))
+    assert.ok(hasProbeBadge(coveredRow), 'the covered row wears a probe badge')
+    assert.ok(!hasProbeBadge(skippedRow), 'the skipped row wears none')
+    assert.ok(!String(skippedRow.props?.className).includes('opf-row-waiting'),
+      'and is not dimmed as if queued')
+  } finally {
+    mounted.dispose()
+  }
+})
+
 test('zh and en dictionaries carry the same key set', async () => {
   const src = await readFile(CLIENT_URL, 'utf8')
   const grab = (tag) => {

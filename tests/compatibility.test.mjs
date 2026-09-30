@@ -105,7 +105,17 @@ test('registers opencode-zen-free through the PiAiAdapter seam', async () => {
   assert.deepEqual(registered[0][0], [PROVIDER_ID])
   assert.ok(registered[0][1] instanceof PiAiAdapter)
   const advertised = await registered[0][1].listModels(PROVIDER_ID)
-  assert.deepEqual(advertised.map((m) => m.id), models.map((m) => m.id))
+  // The same SET: the adapter offers exactly the models the provider does.
+  // Order is asserted separately below, because this test builds a bare
+  // provider with no catalogue behind it — in the real wiring both lists come
+  // from the catalogue, which owns the order.
+  assert.deepEqual(
+    advertised.map((m) => m.id).slice().sort(),
+    models.map((m) => m.id).slice().sort(),
+    'the adapter offers exactly the models the provider does',
+  )
+  const ids = advertised.map((m) => m.id)
+  assert.deepEqual(ids, ids.slice().sort(), 'and the advertised list is alphabetical by id')
 })
 
 test('session/request headers are structurally valid OpenCode ids', () => {

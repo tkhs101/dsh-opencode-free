@@ -361,7 +361,7 @@ test('the progress reading reaches the wire with each failure reason intact', as
     const read = await callRoute(host, PROBE_ROUTE, 'GET')
     assert.equal(read.status, 200)
     const wire = JSON.parse(JSON.stringify(read.body))
-    assert.deepEqual(Object.keys(wire).sort(), ['current', 'done', 'results', 'running', 'startedAt', 'total'])
+    assert.deepEqual(Object.keys(wire).sort(), ['current', 'done', 'results', 'running', 'startedAt', 'targets', 'total'])
   } finally {
     host.dispose()
   }
@@ -375,7 +375,7 @@ test('GET on the probe route reports live progress without starting a round', as
     const idle = await callRoute(host, PROBE_ROUTE, 'GET')
     assert.equal(idle.status, 200)
     assert.deepEqual(idle.body, {
-      running: false, total: 0, done: 0, current: null, results: {}, startedAt: 0,
+      running: false, total: 0, done: 0, current: null, results: {}, targets: [], startedAt: 0,
     })
     // A read-only GET carries no origin fence (like the catalogue read);
     // only the POST that spends quota does.

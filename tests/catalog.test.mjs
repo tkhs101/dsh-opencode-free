@@ -629,7 +629,7 @@ test('readCache rejects a file still carrying the old `opencode` field', async (
 
 // ── T3 state container ──────────────────────────────────────────────────────
 
-function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baselineModels = baseline(), probe, listZenIds } = {}) {
+function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baselineModels = baseline(), probe, listZenIds, hidden } = {}) {
   return createCatalog({
     template: template(),
     builtinBaseline: baselineModels,
@@ -640,6 +640,7 @@ function catalogWith({ dir, fetchImpl, clock = { t: 1_000_000 }, ttlMs, baseline
     ...(ttlMs === undefined ? {} : { ttlMs }),
     ...(probe === undefined ? {} : { probe }),
     ...(listZenIds === undefined ? {} : { listZenIds }),
+    ...(hidden === undefined ? {} : { hidden }),
   })
 }
 
@@ -987,7 +988,7 @@ test('probeProgress tracks the round live: current, done/total and per-model res
     }
     const catalog = await probedCatalog(dir, probe, clock)
     assert.deepEqual(catalog.probeProgress(), {
-      running: false, total: 0, done: 0, current: null, results: {}, startedAt: 0,
+      running: false, total: 0, done: 0, current: null, results: {}, targets: [], startedAt: 0,
     }, 'no round has ever run')
     const running = catalog.forceProbes()
     // Let the first model start, then read mid-round.
@@ -1152,6 +1153,47 @@ test('a failed catalogue fetch narrows nothing and costs no verdict', async () =
   })
 })
 
+test('the list is alphabetical by id, not the catalogue order', async () => {
+  await withTempDir(async (dir) => {
+    // The catalogue arrives grouped by vendor and family. That reads as
+    // arbitrary to anyone scanning for one model, and the panel and the picker
+    // both render this one list, so the order is set here and only here.
+    const catalog = await probedCatalog(dir, recordingProber())
+    const visible = catalog.current().visible
+    assert.ok(visible.length > 1, 'needs a list to order')
+    assert.deepEqual(visible, visible.slice().sort(), 'visible is alphabetical')
+    const all = catalog.current().models.map((m) => m.id)
+    assert.deepEqual(all, all.slice().sort(), 'and so is the full catalogue')
+    // Sorting must not disturb the sets: same members, new order.
+    assert.equal(new Set(visible).size, visible.length, 'no duplicates introduced')
+  })
+})
+
+test('a round only asks about the models the user has switched ON', async () => {
+  await withTempDir(async (dir) => {
+    // A probe costs a request from a bucket shared by everything behind this
+    // egress, so asking about a model the user has hidden spends a scarce
+    // resource on an answer they will never read, and crowds out the models
+    // they will. The scope follows the picker, not the catalogue.
+    const probe = recordingProber()
+    const catalog = await probedCatalog(dir, probe)
+    const shown = catalog.current().models.map((m) => m.id)
+    const off = shown[0]
+
+    const scoped = catalogWith({
+      dir, fetchImpl: scriptedFetch([]), probe, baselineModels: baseline(),
+      hidden: (id) => id === off,
+    })
+    await waitFor(() => scoped.current().source === 'models.dev')
+    await scoped.forceProbes()
+    const asked = probe.calls
+    assert.ok(asked.length > 0, 'the round still probes the models that are on')
+    assert.ok(!asked.includes(off), 'and never the ones that are switched off')
+    assert.equal(scoped.probeProgress().results[off], undefined,
+      'so the panel has no row report for a model the round never asked')
+  })
+})
+
 test('a dead verdict from before the channel sweep is re-checked, and can come back', async () => {
   await withTempDir(async (dir) => {
     // This is the recorded failure: 24 models were written off `dead` from one
@@ -1177,6 +1219,9 @@ test('a dead verdict from before the channel sweep is re-checked, and can come b
       probe,
       baselineModels: baseline(),
     })
+    // The warm start is fire-and-forget; probing before it lands reads an empty
+    // verdict history, which is not what this test is about.
+    await waitFor(() => reopened.current().source === 'models.dev')
     await reopened.forceProbes()
     assert.ok(probe.calls.includes('big-pickle'), 'an unswept dead verdict is re-checked')
     assert.ok(reopened.current().visible.includes('big-pickle'), 'and a working model comes back')
@@ -1203,6 +1248,10 @@ test('a dead verdict that survives the sweep stays out for good', async () => {
 
     const probe = recordingProber({ 'big-pickle': { kind: 'dead', reason: 'gone', code: 'dead', http: 404 } })
     const reopened = catalogWith({ dir, fetchImpl: scriptedFetch([]), probe, baselineModels: baseline() })
+    // The warm start is fire-and-forget: probing before it lands reads an
+    // empty verdict history, and probing while it lands mutates the map
+    // mid-round. Either way the assertion below is about a different thing.
+    await waitFor(() => reopened.probeProgress().total > 0 || reopened.current().source === 'models.dev')
     await reopened.forceProbes()
     assert.ok(probe.calls.includes('big-pickle'), 'the legacy verdict was re-checked once')
     assert.equal(JSON.parse(await readFile(path, 'utf8')).probes['big-pickle'].swept, true, 'and is now earned')
