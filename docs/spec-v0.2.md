@@ -90,7 +90,9 @@ key 錯誤→檢查 key。Key 的設定路徑（plugin config 與環境變數）
 ## Out of Scope
 
 - 設定頁／client UI、額度卡片、`/login` 持久登入、OAuth。
-- pi-ai 0.86 transcript 升級（被 DSH peer 鎖版擋住）。
+- ~~pi-ai 0.86 transcript 升級（被 DSH peer 鎖版擋住）~~ **（已取代，2026-09-30）**——
+  DSH `0.2.0-rc.2` 的 peer 已放行，插件已移植到 pi-ai `0.87.1` 的 transcript 模型。
+  見 `docs/reverse-engineering.md` §9。
 - 背景自動刷新目錄、多 key、按模型分流。
   （背景「定時」刷新目錄仍不做；但每日一輪的可用性探針已由
   `.scratch/model-probe/spec.md` 引入，見上。）

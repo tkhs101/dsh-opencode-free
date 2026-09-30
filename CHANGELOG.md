@@ -4,14 +4,18 @@ All notable user-visible changes to `dsh-opencode-free` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **Note on 0.2.1.** The npm registry lists a published `0.2.1` (2026-09-22).
-> That build is not reachable from this repository's history — no tag, and no
-> commit ever set `package.json` to `0.2.1` here. It was produced on an earlier,
-> separate development line, and is a smaller build: it ships no
-> `lib/catalog.js`, because none of the catalogue work described below existed
-> yet. This changelog records only what is visible in this repository's history;
-> the contents of `0.2.1` are not here, so they are not described. `0.2.1` is a
-> predecessor of this release, not something this release replaces or rolls back.
+> **Note on 0.2.1 — two different builds, one version number.** The npm
+> registry lists a `0.2.1` published 2026-09-22. That artifact is **not** the
+> `0.2.1` in this repository's history: the commit that sets
+> `package.json` to `0.2.1` here is `02ef277` (2026-09-29), merged from upstream
+> and only reachable from this repository after that merge. They are different
+> builds sharing a number — the published one is smaller and carries none of
+> the catalogue work described below (no `lib/catalog.js` at all), because that
+> work postdates it. The consequence for anyone reading the registry: **the
+> version number alone does not identify the build.** This changelog records
+> what is visible in this repository's history; the contents of the published
+> `0.2.1` are not here, so they are not described. It is a predecessor of this
+> release, not something this release replaces or rolls back.
 
 ## [0.3.0] - 2026-09-30
 

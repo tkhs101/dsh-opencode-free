@@ -39,8 +39,9 @@ const host = (await Promise.all(hostFiles.map((f) => readFile(new URL(f, libUrl)
 const plugin = await import('../lib/index.js')
 const { PiAiAdapter } = await import('@deepseek-ai/dsh-llm-pi-ai')
 const { resolveRetryPolicy } = await import('@deepseek-ai/dsh-llm')
+const { normalizeContext, getCurrentSystemPrompt } = await import('@earendil-works/pi-ai')
 
-test('targets the DSH 0.2.0-rc.1 contracts', async () => {
+test('targets the DSH 0.2.0-rc.2 contracts', async () => {
   // Hand-synced on purpose: a bump that does not also move the install guide
   // and the changelog ships a release whose own instructions install a
   // different version.
@@ -57,16 +58,34 @@ test('targets the DSH 0.2.0-rc.1 contracts', async () => {
   assert.ok(agentsDoc.includes(`dsh-opencode-free-${v}.tgz`), `AGENTS.md names the ${v} tarball`)
   const changelog = await readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
   assert.ok(changelog.includes(`## [${v}]`), `the changelog leads with ${v}`)
-  const pluginSrc = await readFile(new URL('../src/catalog.ts', import.meta.url), 'utf8')
+  // Both User-Agent strings must derive from ONE definition. The provider's
+  // was a hardcoded second copy and had already drifted to 0.2.0 on a branch
+  // whose package.json said 0.3.0.
+  const providerSrc = await readFile(new URL('../src/zen-provider.ts', import.meta.url), 'utf8')
   assert.ok(
-    pluginSrc.includes(`PLUGIN_VERSION = "${v}"`),
-    `the User-Agent version is in step with package.json (src/catalog.ts)`,
+    providerSrc.includes(`PLUGIN_VERSION = "${v}"`),
+    `PLUGIN_VERSION is in step with package.json (src/zen-provider.ts)`,
+  )
+  assert.ok(
+    providerSrc.includes('dsh-opencode-free/${PLUGIN_VERSION}'),
+    'the provider User-Agent derives its version rather than repeating it',
+  )
+  const catalogSrc = await readFile(new URL('../src/catalog.ts', import.meta.url), 'utf8')
+  assert.ok(
+    catalogSrc.includes('dsh-opencode-free/${PLUGIN_VERSION}'),
+    'and so does the models.dev User-Agent — one definition, both strings',
+  )
+  // The shell probe script carries a third copy of the same string.
+  const reverify = await readFile(new URL('../scripts/reverify.sh', import.meta.url), 'utf8')
+  assert.ok(
+    reverify.includes(`dsh-opencode-free/${v}`),
+    `scripts/reverify.sh names the ${v} User-Agent`,
   )
   for (const [name, version] of Object.entries(pkg.peerDependencies)) {
-    if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.2.0-rc.1', name)
+    if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.2.0-rc.2', name)
     assert.equal(pkg.peerDependenciesMeta[name]?.optional, true, name)
   }
-  assert.equal(pkg.peerDependencies['@earendil-works/pi-ai'], '^0.85.1')
+  assert.equal(pkg.peerDependencies['@earendil-works/pi-ai'], '^0.87.1')
   assert.equal(pkg.peerDependencies['react'], undefined)
   assert.deepEqual(pkg.dsh, {
     bundle: { patch: './cordis.patch.yml' },
@@ -167,6 +186,12 @@ test('compaction swap only rewrites short anonymous summarization prompts', asyn
   assert.ok(swapped.systemPrompt.includes('context summarization agent'))
   assert.equal(swapCompactionPrompt({ systemPrompt: piPrompt, messages: [] }, 'sk-live-key').systemPrompt, piPrompt)
   assert.equal(swapCompactionPrompt({ systemPrompt: 'ordinary chat', messages: [] }, 'public').systemPrompt, 'ordinary chat')
+  // pi-ai 0.87 providers receive a TranscriptContext: the prompt lives in system messages.
+  const user = { role: 'user', content: 'summarize', timestamp: 1 }
+  const t = swapCompactionPrompt(normalizeContext({ systemPrompt: piPrompt, messages: [user] }), 'public')
+  assert.match(getCurrentSystemPrompt(t.messages), /context summarization agent/)
+  const chat = normalizeContext({ systemPrompt: 'ordinary chat', messages: [user] })
+  assert.equal(swapCompactionPrompt(chat, 'public'), chat)
   assert.equal((await resolveZenApiKey({ env: async () => undefined, configKey: '  ' })).apiKey, 'public')
   assert.equal((await resolveZenApiKey({ env: async () => 'env-key', configKey: undefined })).apiKey, 'env-key')
   assert.equal((await resolveZenApiKey({ env: async () => undefined, configKey: 'cfg-key' })).apiKey, 'cfg-key')
@@ -337,7 +362,9 @@ test('anonymous requests satisfy the read+bash tool gate and map pwsh back', asy
   }
   const names = (body) => body.tools.map((t) => t.name).sort()
 
-  const anon = await run(ctx, 'public')
+  // DSH (Models.streamSimple) hands providers a normalized transcript; direct callers may pass a legacy Context.
+  for (const shape of [(c) => c, normalizeContext]) {
+  const anon = await run(shape(ctx), 'public')
   assert.deepEqual(names(anon.body), ['bash', 'read'])
   assert.ok(anon.body.input.some((i) => i.type === 'function_call' && i.name === 'bash'))
   assert.ok(!JSON.stringify(anon.body.input).includes('"pwsh"'))
@@ -346,11 +373,12 @@ test('anonymous requests satisfy the read+bash tool gate and map pwsh back', asy
   assert.equal(end.toolCall.name, 'pwsh')
   assert.equal(ctx.tools[1].name, 'pwsh', 'caller context must not be mutated')
 
-  const keyed = await run(ctx, 'sk-test-key')
+  const keyed = await run(shape(ctx), 'sk-test-key')
   assert.deepEqual(names(keyed.body), ['pwsh', 'read'])
 
-  const bare = await run({ messages: [{ role: 'user', content: 'title', timestamp: 1 }] }, 'public')
+  const bare = await run(shape({ messages: [{ role: 'user', content: 'title', timestamp: 1 }] }), 'public')
   assert.deepEqual(names(bare.body), ['bash', 'read'])
+  }
 })
 
 test('free catalogue is non-empty and host output carries the Zen identity', () => {

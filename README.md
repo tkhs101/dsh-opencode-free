@@ -34,7 +34,7 @@ install OpenCode, log in, get an API key, or run a separate server.
 
 | Requirement | Version |
 |---|---|
-| DeepSeek Harness | `0.2.0-rc.1` (exact) |
+| DeepSeek Harness | `0.2.0-rc.2` (exact) |
 | Node.js | `^22.19.0` or `>=24.0.0` |
 
 Each plugin release pins one exact DSH version. Check yours first:
@@ -45,8 +45,8 @@ dsh --version
 
 | Plugin | DSH |
 |---|---|
-| `0.3.0` | `0.2.0-rc.1` |
-| `0.2.x` | `0.2.0-rc.1` |
+| `0.3.0` | `0.2.0-rc.2` |
+| `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
 Do not ignore peer dependency warnings.

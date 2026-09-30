@@ -14,9 +14,18 @@ Use this guide when a user asks an Agent to install, update, verify, or remove
 
 ## Detect the installation
 
-This plugin release supports only DeepSeek Harness `0.2.0-rc.1`. Run
+This plugin release supports only DeepSeek Harness `0.2.0-rc.2`. Run
 `dsh --version` first and stop on any other version; do not upgrade DSH or
 ignore peer dependency warnings without explicit permission.
+
+`0.2.0-rc.1` is deliberately NOT in that range, and the peer pin is exact
+rather than a union on purpose. rc.1 and rc.2 differ in how a request context
+reaches the provider: pi-ai 0.86+ normalises a legacy `Context` into a
+`TranscriptContext`, and only that form reaches a provider at all, so a gate
+that writes `context.tools` works on one and is silently discarded on the
+other. A range spanning both would advertise the union of two behaviours only
+one of which has ever been observed here, and would make CI's typecheck
+resolve to whichever release matched that day.
 
 Check whether the plugin is already installed in the target DSH profile. When
 it is already listed, use update or uninstall instead of installing again.

@@ -3,6 +3,7 @@ import test from 'node:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import {
   CACHE_VERSION,
   DEFAULT_USER_AGENT,
@@ -423,18 +424,25 @@ test('channelFor prefers the pi-ai builtin table over any signal', () => {
   assert.equal(channelFor({ id: 'unknown', interleaved: { field: 'reasoning_content' } }, known), 'openai-completions')
 })
 
-test('channelFor reproduces the 7 known opencode models (7/7 agreement)', () => {
-  // Ground truth is the pi-ai 0.85.1 builtin table read from node_modules.
+test('channelFor reproduces the opencode models pi-ai actually lists', () => {
+  // Ground truth is the pi-ai builtin table read from node_modules — which
+  // means the ids have to be the ones that table still CONTAINS. Under pi-ai
+  // 0.87 `mimo-v2.5-free` is gone, replaced by `mimo-v2.6-flash-free`; an id
+  // the table no longer has falls through to the synthetic fallback record,
+  // which yields the same channel, so the assertion would keep passing while
+  // proving nothing. Every id below is asserted present in the table first.
+  const table = new Map(getBuiltinModels('opencode').map((m) => [m.id, m.api]));
   const truth = {
     'big-pickle': 'openai-completions',
     'ling-3.0-flash-fin-free': 'openai-completions',
-    'mimo-v2.5-free': 'openai-completions',
+    'mimo-v2.6-flash-free': 'openai-completions',
     'nemotron-3-ultra-free': 'openai-completions',
     'nemotron-3.5-lightning-free': 'openai-completions',
     'muse-spark-1.2-contributor-free': 'openai-responses',
     'muse-spark-1.3-contributor-free': 'openai-responses',
   }
   for (const [id, expected] of Object.entries(truth)) {
+    assert.equal(table.get(id), expected, `${id} is still in pi-ai's table with that channel`)
     const record = modelsDict()[id] ?? {
       id,
       interleaved: { field: 'reasoning_content' },

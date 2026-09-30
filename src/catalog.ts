@@ -25,6 +25,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { PLUGIN_VERSION } from "./zen-provider.js";
 
 /** Whole-file endpoint: models.dev serves no per-provider JSON (verified). */
 export const MODELS_DEV_URL = "https://models.dev/api.json";
@@ -36,13 +37,8 @@ export const DEFAULT_TTL_MS = 86_400_000;
 export const DEFAULT_TIMEOUT_MS = 10_000;
 /** R1: the real file is ~5.2MB; 20MB leaves headroom and rejects a runaway. */
 export const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
-/**
- * Kept in step with `package.json` by hand (the repo has no build-time import),
- * so `tests/compatibility.test.mjs` asserts the two agree: a bump that misses
- * this makes the plugin identify itself to models.dev as a version it no longer
- * is, and nothing else would notice.
- */
-export const PLUGIN_VERSION = "0.3.0";
+/** Re-exported so `catalog.ts` consumers do not need a second import. */
+export { PLUGIN_VERSION } from "./zen-provider.js";
 /**
  * models.dev is NOT Zen: it gets an honest agent string. Reusing the OpenCode
  * CLI identity here would be both pointless and misleading.
