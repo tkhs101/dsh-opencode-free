@@ -336,6 +336,19 @@ export interface CatalogCacheRecord {
   readonly probes: ProbeMap;
   /** When the last probe ROUND ran, whether or not it concluded anything. */
   readonly lastProbeAt: number;
+  /**
+   * The last round's report — the tally and the per-row outcomes the panel
+   * draws. It lives here because the live reading is memory-only, and memory
+   * does not survive a restart: without this the card adopts nothing on mount
+   * after a restart and the progress area is simply blank, which reads as
+   * "the probe display is gone" rather than "there is nothing to report yet".
+   * Optional and version-stable; a cache without it restores as before.
+   */
+  readonly lastRound?: {
+    readonly total: number;
+    readonly done: number;
+    readonly results: Record<string, ProbeProgressResult>;
+  };
 }
 
 /** A conclusive verdict. `inconclusive` is deliberately NOT one of them. */
@@ -425,10 +438,45 @@ export async function readCache(path: string): Promise<CatalogCacheRecord | null
       models: parsed.models,
       probes: readProbes(parsed.probes),
       lastProbeAt: typeof parsed.lastProbeAt === "number" && Number.isFinite(parsed.lastProbeAt) ? parsed.lastProbeAt : 0,
+      lastRound: readLastRound(parsed.lastRound),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * The last round's report, read defensively. A damaged or absent field means
+ * "no report to show", which is exactly what the panel showed before — the
+ * report is a convenience, never a verdict.
+ */
+function readLastRound(value: unknown): CatalogCacheRecord["lastRound"] {
+  if (!isPlainObject(value)) return undefined;
+  const total = value.total;
+  const done = value.done;
+  if (typeof total !== "number" || !isFinite(total) || total <= 0) return undefined;
+  if (typeof done !== "number" || !isFinite(done)) return undefined;
+  const results: Record<string, ProbeProgressResult> = {};
+  if (isPlainObject(value.results)) {
+    for (const [id, entry] of Object.entries(value.results)) {
+      if (!isPlainObject(entry)) continue;
+      if (entry.status === "ok" && typeof entry.ms === "number") {
+        results[id] = { status: "ok", ms: entry.ms };
+        continue;
+      }
+      if (entry.status === "failed" && typeof entry.ms === "number") {
+        results[id] = {
+          status: "failed",
+          ms: entry.ms,
+          code: typeof entry.code === "string" ? entry.code : "unknown",
+          http: typeof entry.http === "number" && isFinite(entry.http) ? entry.http : 0,
+          ...(entry.removed === false ? { removed: false } : {}),
+          ...(typeof entry.marker === "string" && entry.marker !== "" ? { marker: entry.marker } : {}),
+        };
+      }
+    }
+  }
+  return { total, done, results };
 }
 
 /** Temp file + rename, so a crash mid-write can never leave a torn cache. */
@@ -440,6 +488,7 @@ export async function writeCacheAtomic(
     models: CatalogRecord;
     probes?: ProbeMap;
     lastProbeAt?: number;
+    lastRound?: CatalogCacheRecord["lastRound"];
   },
 ): Promise<boolean> {
   const temporary = `${path}.${process.pid}.tmp`;
@@ -457,6 +506,8 @@ export async function writeCacheAtomic(
     // rather than silently dropping them).
     if (record.probes !== undefined && Object.keys(record.probes).length > 0) payload.probes = record.probes;
     if (record.lastProbeAt !== undefined && record.lastProbeAt > 0) payload.lastProbeAt = record.lastProbeAt;
+    const round = record.lastRound;
+    if (round !== undefined && round.total > 0) payload.lastRound = round;
     await writeFile(temporary, JSON.stringify(payload), "utf8");
     await rename(temporary, path);
     return true;
@@ -660,6 +711,20 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     updatedAt = record.fetchedAt;
     if (Object.keys(record.probes).length > 0) probes = { ...record.probes };
     if (record.lastProbeAt > lastProbeAt) lastProbeAt = record.lastProbeAt;
+    // The report of a round that already finished, so a restart shows the
+    // outcome instead of an empty progress area. `running` stays false: this is
+    // a completed round, not one to follow.
+    const restored = record.lastRound;
+    if (restored !== undefined && restored.total > 0) {
+      probeRun = {
+        running: false,
+        total: restored.total,
+        done: restored.done,
+        current: null,
+        results: { ...restored.results },
+        startedAt: record.lastProbeAt,
+      };
+    }
     // Verdicts for models the catalogue no longer carries are dropped: a
     // vanished model is not in any round's target list, so keeping its verdict
     // would only grow the cache file across upstream removals. This is also
@@ -942,6 +1007,8 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         models: cache.models,
         probes,
         lastProbeAt,
+        // The report, so the panel's progress area survives a restart.
+        lastRound: { total: probeRun.total, done: probeRun.done, results: probeRun.results },
       });
     }
   };

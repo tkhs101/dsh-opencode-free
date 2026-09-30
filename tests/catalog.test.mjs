@@ -1358,6 +1358,42 @@ test('a refusal round carries the gate marker through to the panel record', asyn
   })
 })
 
+test('a finished round report survives a restart', async () => {
+  await withTempDir(async (dir) => {
+    // The progress area is the panel's report of the last round, and it used to
+    // live only in memory. Memory does not survive a restart, so a restarted
+    // host had nothing to adopt on mount and the progress area was simply
+    // blank — which reads as "the probe display is gone", and restarting made
+    // it worse rather than better. The report is persisted beside the verdicts.
+    const probe = recordingProber({
+      'big-pickle': { kind: 'ok' },
+      'space-bunny-free': { kind: 'ok' },
+      'deepseek-v4-flash-free': { kind: 'dead', reason: 'gone', code: 'dead', http: 404 },
+    })
+    const first = await probedCatalog(dir, probe)
+    await first.forceProbes()
+    const before = first.probeProgress()
+    assert.ok(before.total > 0, 'the round reported something')
+
+    // A fresh process over the same directory: what the panel sees after a
+    // restart.
+    const reopened = catalogWith({ dir, fetchImpl: scriptedFetch([]), probe, baselineModels: baseline() })
+    // The warm start is fire-and-forget; poll rather than bet on a tick count.
+    await waitFor(() => reopened.probeProgress().total > 0)
+    const after = reopened.probeProgress()
+    assert.equal(after.total, before.total, 'the tally is restored, not blank')
+    assert.equal(after.running, false, 'a restored round is a finished one, not one to follow')
+    assert.equal(after.startedAt, before.startedAt, 'and it keeps the time it ran at')
+    assert.deepEqual(
+      Object.keys(after.results).sort(),
+      Object.keys(before.results).sort(),
+      'every row keeps its outcome',
+    )
+    assert.equal(after.results['big-pickle'].status, 'ok', 'including the per-row verdict')
+    assert.equal(after.results['deepseek-v4-flash-free'].code, 'dead', 'and the reason a row failed')
+  })
+})
+
 test('a prober that rejects is treated as no conclusion, not as dead', async () => {
   await withTempDir(async (dir) => {
     const probe = async (model) => {
