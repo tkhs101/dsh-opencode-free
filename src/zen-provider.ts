@@ -523,10 +523,13 @@ export function anonGateMarker(bodyText: string): AnonGateMarker {
  */
 const PROBE_PROMPT = "hi";
 /**
- * A fixed system prompt so the probe's request is shaped like the one the user
- * actually sends, without asking the model to do anything. A probe exists to
- * answer "can this model be used", and every live request carries a system
- * prompt; leaving it out measures a request nobody makes.
+ * Reasoning models spend 64+ tokens thinking before any text, so a smaller
+ * budget returns an empty completion and would read as "dead" — a false
+ * negative on exactly the models most likely to be good. 1024 rather than 512:
+ * the 512 floor was measured against a model that thought briefly, and
+ * muse-spark defaults to xhigh, so the budget has to cover the reasoning AND
+ * leave room for the answer. 9router settled on the same floor after its own
+ * #3010. See scripts/test-live.mjs for the live check.
  */
 const PROBE_MAX_TOKENS = 1024;
 /**

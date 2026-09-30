@@ -21,6 +21,10 @@ install OpenCode, log in, get an API key, or run a separate server.
 - Free Zen models in the DSH model picker, under the `opencode-zen-free` provider.
   The list follows models.dev and refreshes itself; a per-model switch on the
   plugin's detail page hides the ones you never pick.
+- An availability check on the detail page you can watch as it runs. It asks only
+  the models you have switched **on**, reports each answer as it lands, and
+  removes a model only when the route positively says it will not serve it — so
+  a bad window costs you a grey row, never a model.
 - Anonymous by default. A Zen API key is optional.
 - Native streaming through pi-ai: text, reasoning, tool calls, usage, and abort.
 - Tools run inside DSH. The Windows `pwsh` shell works too.
@@ -41,6 +45,7 @@ dsh --version
 
 | Plugin | DSH |
 |---|---|
+| `0.3.0` | `0.2.0-rc.1` |
 | `0.2.x` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
@@ -51,7 +56,7 @@ Do not ignore peer dependency warnings.
 The examples use the `web` profile. Replace it with your target profile.
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.2.0
+dsh plugin --profile web add dsh-opencode-free@0.3.0
 ```
 
 Check the install:
@@ -111,11 +116,12 @@ than a copy of another model's.
 
 **This table is a snapshot, not a contract.** It is here so you can recognise
 what you are picking; the live list is whatever the plugin last read. The
-plugin's detail page is where you see and change it: every model there has a
-switch that hides it from the picker, and each row carries capability badges —
-a vision badge when the model declares image input, and a thinking badge naming
-its strongest published reasoning level. Models that publish no level list get
-no thinking badge rather than a guessed one.
+plugin's detail page is where you see and change it: the list there is
+alphabetical by model id with the models you have left switched on at the top,
+every model has a switch that hides it from the picker, and each row carries
+capability badges — a vision badge when the model declares image input, and a
+thinking badge naming its strongest published reasoning level. Models that
+publish no level list get no thinking badge rather than a guessed one.
 
 A probe round answers two different questions in the order that costs least.
 First it reads Zen's own catalogue — one `GET /zen/v1/models`, which spends no
@@ -123,34 +129,47 @@ inference quota — and any model Zen has stopped listing leaves the picker
 without a single completion being sent. That check is free enough to repeat on
 every round, so a model Zen puts back simply reappears. Only what the catalogue
 cannot answer is then asked directly: Zen still lists the model, does it
-actually reply, and how fast.
-counts finished models against the total and every row shows its own state —
-green with the answering latency, a spinner on the model being asked right now,
-grey for the ones still queued. A red row never says only "failed": it names the
-reason (gone, timed out, connection failed, the anonymous tier refusing, quota
-used up, a bad key) and carries the HTTP status plus what to do about it in its
-tooltip. A round that ran into one of those learns nothing about any model, so
-those rows are deliberately grey "unmeasured" rather than red: a refusal is
-reported once, as a banner that also disowns it as a verdict, instead of
-stamping every row with a failure a later working call would prove wrong. Once the round ends the pill turns into its tally and stays on screen
-instead of blinking away, and the capability badges return beside the outcome
-badges. A model the round took out of the list is named in a "removed this
-round" line, because a row that silently disappears has no way to explain
-itself.
+actually reply, and how fast — and only for the models you have left switched
+on, because a request spent on a model you hid is an answer you will never
+read.
+
+The progress pill counts finished models against the total, and every row shows
+its own state — green with the answering latency, a spinner on the model being
+asked right now, grey for the ones still queued. A row this round is not going
+to ask — a model you switched off — carries no probe badge at all, rather than
+claiming to be waiting for a round that will never reach it. The capability
+badges stay on screen throughout, so a row never loses its identity exactly
+while you are waiting to find out what it was.
+
+A red row never says only "failed": it names the reason (gone, no longer listed
+by Zen, timed out, connection failed, the anonymous tier refusing, quota used
+up, a bad key) and carries the HTTP status plus what to do about it in its
+tooltip. A round that ran into a gate refusal, an exhausted quota or a rejected
+key learned nothing about any model, so those rows are deliberately grey
+"unmeasured" rather than red, and the refusal is reported once as a banner that
+names which upstream condition answered, dates the round, and disowns itself as
+a verdict — instead of stamping every row with a failure a later working call
+would prove wrong. When the round ends the pill turns into its tally and stays
+on screen, across a DSH restart included, until the next round replaces it. A
+model the round took out of the list is named in a "removed this round" line —
+kept apart from one the round only re-confirmed as already gone — because a row
+that silently disappears has no way to explain itself.
 
 Two rules decide what you are offered:
 
 - A model is offered until it stops answering **on the route you are using**.
-  The plugin sends each model one short request and keeps the ones that reply.
+  The plugin sends each shown model one short request, keeps the ones that
+  reply, and only spends a second request on the other channel when the first
+  one refuses it.
   models.dev's `deprecated` flag only decides whether a model is *in* the
   catalogue, never whether you see it: on this provider that flag can mean the
   free tier ended, or only that the record is stale, and no static field can
   tell those apart.
 - A model Zen no longer serves is not offered either, for the same reason.
 
-A model that is not offered is simply **not in the list**. There is no second
-list naming what was dropped, so there is nothing that can disagree with the
-picker or go stale.
+A model that is not offered is simply **not in the list**. There is no standing
+second list naming what was dropped, so there is nothing that can disagree with
+the picker or go stale.
 
 **A dead verdict is final.** Once the route has refused a model, the plugin
 never asks about it again — re-asking a settled question would spend quota for
@@ -174,41 +193,50 @@ them all again. This is the only way back, so it is worth knowing before you
 rely on the smaller list.
 
 A model counts as gone when the route answers that it will not serve it —
-`Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. Zen does not publish which endpoint serves a given model, so a wrong guess at the
+`Model is unavailable.`, `Model <id> is not supported`, `404`, `410`. Zen does
+not publish which endpoint serves a given model, so a wrong guess at the
 channel is answered with the same "not supported" sentence. A model is therefore
 asked on each of the two endpoints this provider implements before it is called
 gone, and a `dead` verdict is only final once that sweep has happened — a verdict
 from before the sweep existed is re-checked once, because those are exactly the
 ones that may have been a routing mistake rather than a model that is gone.
-This is what most of the catalogue currently hits: **most models models.dev
-lists at zero cost are not actually served on this provider at all** — with or
-without a key — so a first probe typically narrows the list considerably, and
-because the verdict is final that is a one-time cost rather than a daily one.
+Since the verdict is final, that sweep is the difference between a wrong channel
+and a working model that never comes back. A model the route confirms it will
+not serve is a real answer, and it is kept: the list is meant to narrow, and it
+narrows only where Zen's own catalogue or a swept round said so.
 
 ### What the availability check costs you
 
-Once a day, the plugin asks Zen one short question per model and waits for the
-answers. That is a real cost and it is worth being explicit about it:
+Once a day, the plugin asks Zen one short question per model it still needs an
+answer for, and waits for the replies. That is a real cost and it is worth being
+explicit about it:
 
 - **One round per local day, sent one at a time.** The requests are sequential
   on purpose — anonymous callers share one quota bucket, so firing them all at
-  once would spend it faster and hammer upstream. The round only covers models
-  that have never been judged, so it shrinks as models are retired. A Zen key
-  raises your quota, which makes this round cheaper in practice, but it does not
-  change which models are in it.
+  once would spend it faster and hammer upstream. The round covers the models
+  you have switched on, minus the ones it has already judged gone, so hiding a
+  model and a settled removal are both ways to shrink it. A model that answered
+  is asked again on the next round, so the latency on the card stays fresh. A
+  Zen key raises your quota, which makes this round cheaper in practice, but it
+  does not change which models are in it.
 - **The catalogue is read first, and that part is free.** Every round begins with
   a single `GET /zen/v1/models`. A model Zen no longer lists is dropped without
   any completion being sent, which is why the round is cheap rather than N
   requests long. A model Zen puts back reappears on the next round, with no
   manual recovery.
+- **You only pay when you read the picker.** There is no separate switch: the
+  round is started when the model list is read, and the card's **Probe now**
+  button asks for one extra round at any time, ignoring the daily limit. If you
+  never open the model list, you never pay.
 - **A refused or throttled round changes nothing.** If the anonymous tier
   gates you, the quota runs out, your key is rejected, the network drops, or a
-  whole endpoint is down, the plugin concludes nothing at all: the list stays
-  exactly as it was and the card says this round's results are untrustworthy.
-  The only things that remove a model are the catalogue dropping it and the
-  route positively saying that model will not be served.
+  whole endpoint is down, the plugin concludes nothing about those models: they
+  keep the visibility they had, and the card says this round's results are
+  untrustworthy. The only things that remove a model are the catalogue dropping
+  it and the route positively saying that model will not be served.
 - **Hiding a model is still yours to decide.** The switch on the card is
-  independent of all of the above.
+  independent of all of the above — it hides the model from the picker and
+  takes it out of the next round in one move.
 
 Offline, and on a first start: with neither network nor a cached copy, the
 plugin falls back to the model set that ships inside pi-ai, so the picker still
@@ -268,10 +296,22 @@ plugin sends `pwsh` as `bash` and renames the returned calls back to `pwsh`.
 Requests without tools (titles, compaction) get inert placeholder tools.
 Requests with an API key are never rewritten.
 
+The availability probe re-asserts the `read` and `bash` tool names on the final
+payload, at the last boundary before the bytes leave. Everything above that
+boundary can drop them, and a request that arrives without them is refused on
+every model — so the probe guarantees its own admission instead of assuming the
+layers above passed them through.
+
 The full investigation, with replay results and pitfalls, is in
 [`docs/reverse-engineering.md`](docs/reverse-engineering.md).
 
 ## Troubleshooting
+
+**The card's rows are grey "not measured" but the model chats fine**
+The probe was refused by the gate while your own requests went through. The
+refusal is reported as a banner that names which upstream condition answered,
+and it is not a verdict about the model: nothing was removed from the list, and
+press **Probe now** to ask again.
 
 **`403 FreeTierError ... only be used from within OpenCode`**
 Run `./scripts/reverify.sh`. Lamp ② sends a request that meets every known
@@ -289,7 +329,11 @@ node scripts/test-live.mjs nemotron-3.5-lightning-free
 
 **Debug logs**
 Set `DSH_OPENCODE_FREE_DEBUG=1` before you start DSH. The plugin logs the
-outbound identity and request shape to stderr. It never logs content or keys.
+outbound identity, the request shape, the status of every Zen request, and —
+when a probe is refused — the upstream error body truncated to 300 characters.
+It never logs conversation content. The identity line does print the first 14
+characters of the `Authorization` header, so treat the log as private once a
+key is configured.
 
 ## Development
 
@@ -309,7 +353,7 @@ quota. These scripts send real requests:
 | Script | What it checks |
 |---|---|
 | `scripts/reverify.sh` | ① catalogue reachable, ② anonymous gate, ③ API key (only when `OPENCODE_API_KEY` is set) |
-| `node scripts/test-live.mjs [model-id ...]` | Every free model (or the ones you list) replies anonymously. Run `pnpm run build` first. |
+| `node scripts/test-live.mjs [model-id ...]` | Sends one short anonymous request per model. It declares no tools, so a `replied:false` usually means the gate said no rather than that the model is gone — it is not an availability test. Run `pnpm run build` first. |
 
 For Agents that install or verify this plugin, see [`AGENTS.md`](AGENTS.md).
 

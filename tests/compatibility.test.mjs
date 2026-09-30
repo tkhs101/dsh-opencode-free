@@ -40,8 +40,28 @@ const plugin = await import('../lib/index.js')
 const { PiAiAdapter } = await import('@deepseek-ai/dsh-llm-pi-ai')
 const { resolveRetryPolicy } = await import('@deepseek-ai/dsh-llm')
 
-test('targets the DSH 0.2.0-rc.1 contracts', () => {
-  assert.equal(pkg.version, '0.2.0')
+test('targets the DSH 0.2.0-rc.1 contracts', async () => {
+  // Hand-synced on purpose: a bump that does not also move the install guide
+  // and the changelog ships a release whose own instructions install a
+  // different version.
+  assert.equal(pkg.version, '0.3.0')
+  // The version is repeated in the install guide, the changelog, and the UA the
+  // plugin sends upstream. A bump that misses any of them ships a release whose
+  // own instructions install something else, or identifies itself wrongly.
+  // Plain `includes`, not a regex: `\\b` inside a template literal is a
+  // backspace, not a word boundary.
+  const v = pkg.version
+  const agentsDoc = await readFile(new URL('../AGENTS.md', import.meta.url), 'utf8')
+  assert.ok(agentsDoc.includes(`v${v}`), `AGENTS.md pins v${v}`)
+  assert.ok(agentsDoc.includes(`dsh-opencode-free@${v}`), `AGENTS.md installs @${v}`)
+  assert.ok(agentsDoc.includes(`dsh-opencode-free-${v}.tgz`), `AGENTS.md names the ${v} tarball`)
+  const changelog = await readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
+  assert.ok(changelog.includes(`## [${v}]`), `the changelog leads with ${v}`)
+  const pluginSrc = await readFile(new URL('../src/catalog.ts', import.meta.url), 'utf8')
+  assert.ok(
+    pluginSrc.includes(`PLUGIN_VERSION = "${v}"`),
+    `the User-Agent version is in step with package.json (src/catalog.ts)`,
+  )
   for (const [name, version] of Object.entries(pkg.peerDependencies)) {
     if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.2.0-rc.1', name)
     assert.equal(pkg.peerDependenciesMeta[name]?.optional, true, name)

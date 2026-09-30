@@ -100,5 +100,8 @@ key 錯誤→檢查 key。Key 的設定路徑（plugin config 與環境變數）
 
 - 本 repo 尚無 issue tracker（非 git repo、無 `.scratch`），本 spec 暫存於
   `docs/spec-v0.2.md`；tracker 就緒後需發布並掛 `ready-for-agent` 標籤。
+  （2026-09-30 更正：tracker 已就緒——本 repo 是 git repo，也有 `.scratch/`，issue
+  與 spec 都放 `.scratch/<feature>/`，約定見 `docs/agents/issue-tracker.md`。本 spec
+  仍留在 `docs/spec-v0.2.md`：它記錄的是已發布的決策，不隨 issue 搬家。）
 - 整個功能是 bypass 性質：Zen 一改報文用詞，分類映射即漂移；
   重驗腳本是唯一的漂移偵測器。
