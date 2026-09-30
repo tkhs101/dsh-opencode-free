@@ -17,6 +17,55 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `0.2.1` are not here, so they are not described. It is a predecessor of this
 > release, not something this release replaces or rolls back.
 
+## [0.3.1] - 2026-09-30
+
+The availability check works on a current host. `0.3.0` fixed the symptom on the
+probe path only; this release fixes the layer underneath it, and states the
+compatibility that version got wrong.
+
+### Fixed
+
+- **The anonymous admission gate was a no-op on every request the plugin
+  initiates itself.** pi-ai 0.87 normalises a legacy `Context` into a
+  `TranscriptContext` before dispatch, and only that form can reach a provider,
+  so writing the required `read`/`bash` tool names onto `context.tools` put them
+  somewhere nothing reads. The gate now operates on the transcript, at every
+  entry point, so the tools are where the provider actually looks. The payload-
+  boundary backstop stays: it is version-agnostic, and it is what the measured
+  result below rests on.
+- **The plugin identified itself as a version it was no longer.** The
+  `User-Agent` the provider sends upstream was a second, hardcoded copy of the
+  version and had drifted to `0.2.0` while `package.json` said `0.3.0`. Both
+  strings now derive from one definition, and the release check asserts it.
+
+### Changed
+
+- **The declared host is now the host this actually runs on.** Peer dependencies
+  move to `0.2.0-rc.2` and `@earendil-works/pi-ai` to `^0.87.1`. `0.3.0`
+  declared `0.2.0-rc.1` and `^0.85.1` while running against `0.2.0-rc.2` and
+  `0.87.1`; it worked only because the payload backstop compensated. The pin is
+  exact and deliberately does **not** span both releases: the two differ in how
+  a request context reaches the provider, so a union would advertise a
+  compatibility only one side of which has ever been observed.
+- **The upstream release is merged rather than forked away.** `0.3.1` contains
+  upstream's `0.2.1` commit, so the two fixes travel together instead of one
+  being reimplemented downstream.
+
+### Measured after this release
+
+Three consecutive probe rounds on `0.2.0-rc.2`: every model in scope answered,
+and **zero** admission refusals. (Before the payload backstop, the same round
+answered 1 of 10 and was refused 9 times.)
+
+### Known limitation in this release
+
+- **A model that Zen stops listing cannot be re-checked.** A model judged gone in
+  an early round and then dropped from Zen's own catalogue is neither visible nor
+  eligible for the round, so the only way it returns is for Zen to list it again.
+  The fix would have to re-probe models the catalogue no longer offers, at
+  inference cost. Recorded here rather than fixed, because it is a pre-existing
+  boundary and not a regression. (Found while preparing this release.)
+
 ## [0.3.0] - 2026-09-30
 
 Compared with `0.2.0` (`6717d60`), the last version published from this
@@ -181,55 +230,6 @@ repository; the supporting commit and code reference for each one is in
   attachments to nothing unconditionally, so every image you sent was dropped
   before the request.
   (`e4b9124`; `src/index.ts:422`)
-
-## [0.3.1] - 2026-09-30
-
-The availability check works on a current host. `0.3.0` fixed the symptom on the
-probe path only; this release fixes the layer underneath it, and states the
-compatibility that version got wrong.
-
-### Fixed
-
-- **The anonymous admission gate was a no-op on every request the plugin
-  initiates itself.** pi-ai 0.87 normalises a legacy `Context` into a
-  `TranscriptContext` before dispatch, and only that form can reach a provider,
-  so writing the required `read`/`bash` tool names onto `context.tools` put them
-  somewhere nothing reads. The gate now operates on the transcript, at every
-  entry point, so the tools are where the provider actually looks. The payload-
-  boundary backstop stays: it is version-agnostic, and it is what the measured
-  result below rests on.
-- **The plugin identified itself as a version it was no longer.** The
-  `User-Agent` the provider sends upstream was a second, hardcoded copy of the
-  version and had drifted to `0.2.0` while `package.json` said `0.3.0`. Both
-  strings now derive from one definition, and the release check asserts it.
-
-### Changed
-
-- **The declared host is now the host this actually runs on.** Peer dependencies
-  move to `0.2.0-rc.2` and `@earendil-works/pi-ai` to `^0.87.1`. `0.3.0`
-  declared `0.2.0-rc.1` and `^0.85.1` while running against `0.2.0-rc.2` and
-  `0.87.1`; it worked only because the payload backstop compensated. The pin is
-  exact and deliberately does **not** span both releases: the two differ in how
-  a request context reaches the provider, so a union would advertise a
-  compatibility only one side of which has ever been observed.
-- **The upstream release is merged rather than forked away.** `0.3.1` contains
-  upstream's `0.2.1` commit, so the two fixes travel together instead of one
-  being reimplemented downstream.
-
-### Measured after this release
-
-Three consecutive probe rounds on `0.2.0-rc.2`: every model in scope answered,
-and **zero** admission refusals. (Before the payload backstop, the same round
-answered 1 of 10 and was refused 9 times.)
-
-### Known limitation in this release
-
-- **A model that Zen stops listing cannot be re-checked.** A model judged gone in
-  an early round and then dropped from Zen's own catalogue is neither visible nor
-  eligible for the round, so the only way it returns is for Zen to list it again.
-  The fix would have to re-probe models the catalogue no longer offers, at
-  inference cost. Recorded here rather than fixed, because it is a pre-existing
-  boundary and not a regression. (Found while preparing this release.)
 
 [0.3.1]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.1
 [0.3.0]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.0
