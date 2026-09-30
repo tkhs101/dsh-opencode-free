@@ -409,6 +409,45 @@ export const ZEN_FAILURE_GUIDANCE: Record<ZenFailureKind, string> = {
 };
 
 const ANON_GATED_PATTERN = /FreeTierError|MissingSessionID|only be used .*OpenCode/i;
+/**
+ * Re-assert the anonymous admission tools on the FINAL payload.
+ *
+ * `applyAnonymousToolGate` puts `read` + `bash` on the context, which is the
+ * documented requirement for this tier — a tool-less request is refused with
+ * `403 FreeTierError` on every model (docs/reverse-engineering.md §8), and that
+ * is exactly what the host answers (measured 2026-09-30: the probe's outgoing
+ * body carried no `tools` at all, while the same code run outside the host sent
+ * them and was admitted).
+ *
+ * Everything above this point can drop them — a transport that reads tools from
+ * somewhere else, a context rebuilt downstream, a provider variant. The payload
+ * hook is the last place before the bytes leave, so the probe guarantees its own
+ * admission here instead of assuming four layers upstream did it. Idempotent: if
+ * the tools are already present nothing is written.
+ */
+function enforceAnonymousTools(payload: unknown): unknown {
+  if (payload === null || typeof payload !== "object") return payload;
+  const body = payload as Record<string, unknown>;
+  const existing = Array.isArray(body.tools) ? (body.tools as unknown[]) : [];
+  // The two channels name a tool differently: responses puts the name beside
+  // `type`, completions nests it under `function`. Check both so an
+  // already-gated payload is never touched.
+  const named = (tool: unknown): string => {
+    if (tool === null || typeof tool !== "object") return "";
+    const t = tool as { name?: unknown; function?: { name?: unknown } };
+    return String(t.name ?? t.function?.name ?? "");
+  };
+  const has = (name: string): boolean => existing.some((tool) => named(tool) === name);
+  const missing = GATE_TOOLS.filter((name) => !has(name));
+  if (missing.length === 0) return payload;
+  // Responses channel is detected by its own body field, not guessed.
+  const responses = "input" in body && !("messages" in body);
+  const stub = (name: string): unknown => (responses
+    ? { type: "function", name, description: STUB_DESCRIPTION, parameters: { type: "object", properties: {} } }
+    : { type: "function", function: { name, description: STUB_DESCRIPTION, parameters: { type: "object", properties: {} } } });
+  return { ...body, tools: [...existing, ...missing.map(stub)] };
+}
+
 const QUOTA_PATTERN = /FreeUsageLimitError|usage[\s\S]{0,40}(exceeded|limit)|rate[\s-]?limit|quota/i;
 const BAD_KEY_PATTERN = /invalid[\s\S]{0,60}key|unauthorized|authentication_error/i;
 
@@ -433,7 +472,32 @@ export function classifyZenFailure(status: number, bodyText: string): ZenFailure
   if (ANON_GATED_PATTERN.test(body)) return "anon-gated";
   if (status === 429 || QUOTA_PATTERN.test(body)) return "quota-exhausted";
   if (status === 401 || BAD_KEY_PATTERN.test(body)) return "bad-key";
-  return "unknown";
+  return "unknown";}
+
+/**
+ * Which of the three markers {@link ANON_GATED_PATTERN} actually matched.
+ *
+ * `anon-gated` folds three upstream conditions into one code, and they call for
+ * three different repairs: a `FreeTierError` is a tier refusal, a
+ * `MissingSessionID` is a header the request failed to carry, and
+ * "only be used … OpenCode" is an identity the route did not recognise. The
+ * folded code is right for the reader (none of them is a verdict about the
+ * model) and useless for the person who has to fix it — so the round records
+ * which one fired.
+ *
+ * This exists because the body is the only place that fact ever exists, and an
+ * `inconclusive` is never persisted: without this, a refusal is unanswerable
+ * the moment the round ends. Tested in the same order as the pattern, so the
+ * marker always names the branch that actually decided the classification.
+ */
+export type AnonGateMarker = "FreeTierError" | "MissingSessionID" | "opencode-only" | null;
+
+export function anonGateMarker(bodyText: string): AnonGateMarker {
+  const body = typeof bodyText === "string" ? bodyText : "";
+  if (/FreeTierError/i.test(body)) return "FreeTierError";
+  if (/MissingSessionID/i.test(body)) return "MissingSessionID";
+  if (/only be used .*OpenCode/i.test(body)) return "opencode-only";
+  return null;
 }
 
 // ── availability probe (spec model-probe D3/D4/D5) ──────────────────────────
@@ -459,13 +523,10 @@ export function classifyZenFailure(status: number, bodyText: string): ZenFailure
  */
 const PROBE_PROMPT = "hi";
 /**
- * Reasoning models spend 64+ tokens thinking before any text, so a smaller
- * budget returns an empty completion and would read as "dead" (false
- * negative). 1024 rather than 512: the 512 floor was measured against a model
- * that thought briefly, and muse-spark defaults to xhigh — the budget has to
- * cover the reasoning AND leave room for the answer, or the probe reports a
- * working model as silent. Same floor 9router settled on after its own
- * #3010. See scripts/test-live.mjs for the live check.
+ * A fixed system prompt so the probe's request is shaped like the one the user
+ * actually sends, without asking the model to do anything. A probe exists to
+ * answer "can this model be used", and every live request carries a system
+ * prompt; leaving it out measures a request nobody makes.
  */
 const PROBE_MAX_TOKENS = 1024;
 /**
@@ -581,7 +642,14 @@ export function isModelUnavailableFailure(status: number, bodyText: string): boo
 export type ProbeOutcome =
   | { kind: "ok" }
   | { kind: "dead"; reason: string; code: "dead"; http: number }
-  | { kind: "inconclusive"; reason: string; code: ProbeFailureCode; http: number };
+  | {
+      kind: "inconclusive";
+      reason: string;
+      code: ProbeFailureCode;
+      http: number;
+      /** Which anonymous-gate marker the body carried, when it carried one. */
+      marker?: AnonGateMarker;
+    };
 
 /** Why a probe did not get an answer the round could trust. */
 export type ProbeFailureCode =
@@ -591,7 +659,13 @@ export type ProbeFailureCode =
   | ZenFailureKind
   | "error";
 
-/** The one provider method a probe needs; satisfied by zenProvider()'s return. */
+/**
+ * The provider method a probe needs.
+ *
+ * `stream` is what it actually asks for, because that is the road production
+ * travels; `streamSimple` stays accepted so a reduced provider still works, but
+ * {@link probeOnce} explains why asking the cheap way measures something else.
+ */
 export interface ProbeStreamer {
   streamSimple(
     model: Model<Api>,
@@ -769,14 +843,28 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
   let result: Record<string, unknown> | undefined;
   let thrown: unknown;
   try {
+    // `streamSimple`, not `stream`. Measured 2026-09-30: `stream()` ignores
+    // `model.api` and resolves its own transport, so a model the catalogue
+    // pinned to `openai-completions` went out on the responses channel. The
+    // probe must ask the channel the catalogue chose — that choice is what the
+    // channel sweep is built around. Aligning the probe with the live agent
+    // path (system prompt, real tool schemas, the profile's cacheRetention) was
+    // tried and reverted: it changed nothing about the host's refusals, and the
+    // only thing it did change was the channel.
     const stream = deps.provider.streamSimple(model, context, {
       apiKey: deps.apiKey ?? "public",
       maxTokens: PROBE_MAX_TOKENS,
-      // A probe must not spend a second call confirming anything.
-      maxRetries: 0,
       // The default reasoning effort for muse-spark is xhigh; a probe only
       // needs any reply, so it asks for the cheapest one.
       reasoning: "low",
+      // The last gate before the bytes leave. See enforceAnonymousTools.
+      onPayload: (payload: unknown) => enforceAnonymousTools(payload),
+      // A probe must not spend a second call confirming anything: without this
+      // a 429 costs three requests instead of one, because the SDK's default
+      // retry policy treats a rate limit as worth repeating. Production retries
+      // on a policy keyed to specific stop reasons; a refusal is not one of
+      // them, so matching production here would only spend the shared bucket.
+      maxRetries: 0,
       signal,
       fetch: recorder.fetch,
     });
@@ -797,6 +885,15 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
   // A reply settles the question: the model answers, so it is not dead.
   if (hasAnswer(result)) return { kind: "ok" };
   const { status, body, cause } = recorder.read();
+  // The body is the only place the upstream's actual words exist, and an
+  // `inconclusive` is never persisted — so without this a refusal is
+  // unanswerable once the round ends. Three rounds of diagnosis failed on
+  // exactly that: "which of FreeTierError / MissingSessionID / OpenCode-only
+  // was it?" could not be asked of any artifact. Off unless the operator turns
+  // it on, and truncated: this is an upstream error payload, never a request.
+  if (body !== "") {
+    debugLog(`probe <- ${status} marker=${String(anonGateMarker(body))} body=${body.slice(0, 300)}`);
+  }
   if (expired()) {
     return {
       kind: "inconclusive",
@@ -833,10 +930,16 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
   }
   if (status === 0) {
     const kind = classifyZenFailure(status, body);
-    return { kind: "inconclusive", reason: kind, code: kind, http: 0 };
+    return { kind: "inconclusive", reason: kind, code: kind, http: 0, marker: anonGateMarker(body) };
   }
   const kind = classifyZenFailure(status, body);
-  return { kind: "inconclusive", reason: `${kind}（HTTP ${status}）`, code: kind, http: status };
+  return {
+    kind: "inconclusive",
+    reason: `${kind}（HTTP ${status}）`,
+    code: kind,
+    http: status,
+    marker: anonGateMarker(body),
+  };
 }
 
 /**

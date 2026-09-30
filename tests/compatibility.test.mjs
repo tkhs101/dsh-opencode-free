@@ -3,6 +3,7 @@ import { readFile, readdir } from 'node:fs/promises'
 import test from 'node:test'
 import {
   PROVIDER_ID,
+  anonGateMarker,
   classifyZenFailure,
   describeTransportCause,
   fetchZenModelIds,
@@ -163,6 +164,31 @@ test('optional keys resolve config before env and send public when neither exist
     }).result()
     assert.equal(authorization, `Bearer ${expected}`)
   }
+})
+
+test('a refusal names which of the three gate conditions answered', () => {
+  // Three rounds of diagnosis on the 2026-09-30 failures stalled on exactly one
+  // question: `anon-gated` folds FreeTierError / MissingSessionID / "only
+  // OpenCode" into one code, and an `inconclusive` is never persisted — so the
+  // body, the only place the answer exists, was gone before anyone could ask.
+  // The folded code stays (none of the three is a verdict about the model); the
+  // marker rides alongside it.
+  const freetier = '{"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}}'
+  const nosession = '{"type":"error","error":{"type":"MissingSessionID","message":"..."}}'
+  const onlyoc = '{"type":"error","error":{"type":"ForbiddenError","message":"this endpoint can only be used by the OpenCode CLI"}}'
+  // Each marker must agree with the class it explains.
+  assert.equal(anonGateMarker(freetier), 'FreeTierError')
+  assert.equal(anonGateMarker(nosession), 'MissingSessionID')
+  assert.equal(anonGateMarker(onlyoc), 'opencode-only')
+  for (const body of [freetier, nosession, onlyoc]) {
+    assert.equal(classifyZenFailure(403, body), 'anon-gated', 'every marker is an anon-gated refusal')
+  }
+  // Pattern order decides, so the marker always names the branch that decided.
+  assert.equal(anonGateMarker(freetier + nosession), 'FreeTierError', 'first branch in pattern order wins')
+  // A body that is not a gate refusal has no marker — the panel must not invent one.
+  assert.equal(anonGateMarker('{"type":"error","error":{"type":"FreeUsageLimitError"}}'), null)
+  assert.equal(anonGateMarker('something entirely new'), null)
+  assert.equal(anonGateMarker(undefined), null, 'a missing body is not a marker')
 })
 
 test('upstream failures classify to actionable guidance (recorded bodies)', () => {
@@ -338,6 +364,62 @@ test('GUARD: the probe request carries the read+bash gate, streams, and asks for
   assert.equal(body.stream, true)
   assert.ok(body.max_tokens >= 512, `max_tokens was ${body.max_tokens}`)
   assert.equal(body.model, model.id)
+})
+
+test('a live-shaped 403 refusal carries the marker that explains it', async () => {
+  // The seam the panel reads. The upstream body is the only place the three
+  // anonymous-gate conditions are distinguishable, and an `inconclusive` is
+  // never persisted — so before this, a refusal round left behind a code
+  // (`anon-gated`) that named none of them, and three rounds of diagnosis
+  // stalled on "which one was it?".
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  const body = '{"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}}'
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => new Response(body, { status: 403, headers: { 'Content-Type': 'application/json' } }),
+  })
+  assert.equal(outcome.kind, 'inconclusive', 'a gate refusal is never a verdict about the model')
+  assert.equal(outcome.code, 'anon-gated')
+  assert.equal(outcome.http, 403)
+  assert.equal(outcome.marker, 'FreeTierError', 'and it names which condition answered')
+})
+
+test('GUARD: the probe re-asserts its admission tools on the final payload', async () => {
+  // The failure this exists for. Measured 2026-09-30 inside the DSH host: the
+  // probe's outgoing body carried NO `tools`, and upstream answered
+  // `403 FreeTierError: "OpenCode's free tier can only be used from within
+  // OpenCode"` — the documented consequence of a tool-less request at this tier
+  // (docs/reverse-engineering.md 8). The same code outside the host sent the
+  // tools and was admitted, so the loss happens between the context gate and
+  // the wire, somewhere this plugin does not own.
+  //
+  // The payload hook is the last boundary before the bytes leave, so the probe
+  // guarantees its own admission there instead of trusting four layers above it.
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+  // A provider that drops the tools on the way down — the host's observed shape.
+  const lossy = {
+    streamSimple: (m, context, options) => {
+      const stripped = { ...context }
+      delete stripped.tools
+      return p.streamSimple(m, stripped, options)
+    },
+  }
+  let body
+  const outcome = await probeModel(model, {
+    provider: lossy,
+    apiKey: 'public',
+    fetchImpl: async (_url, init) => {
+      body = JSON.parse(init.body)
+      return sseReply()
+    },
+  })
+  assert.equal(outcome.kind, 'ok', 'the probe still gets its answer')
+  const names = (body.tools ?? []).map((t) => t.function?.name ?? t.name)
+  assert.ok(names.includes('read') && names.includes('bash'),
+    `admission tools must reach the wire even when a layer drops them, got ${JSON.stringify(names)}`)
 })
 
 test('GUARD: a reasoning model that spends the budget thinking still counts as answered', async () => {

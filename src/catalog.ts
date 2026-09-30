@@ -374,6 +374,14 @@ export interface ProbeResult {
   readonly code?: string;
   /** HTTP status the transport saw; 0 means no response ever arrived. */
   readonly http?: number;
+  /**
+   * Which anonymous-gate marker the upstream body carried, when it carried
+   * one. `code: "anon-gated"` deliberately folds three conditions together
+   * because none of them is a verdict about the model — but they need three
+   * different fixes, and the body is the only place that fact ever exists.
+   * Carried into the round record so the panel can say which.
+   */
+  readonly marker?: string | null | undefined;
 }
 
 /** Read persisted verdicts defensively: a damaged entry is dropped, not fatal. */
@@ -598,7 +606,22 @@ export interface ProbeProgress {
 /** One model's outcome in a round: answered (with latency) or not (with why). */
 export type ProbeProgressResult =
   | { readonly status: "ok"; readonly ms: number }
-  | { readonly status: "failed"; readonly ms: number; readonly code: string; readonly http: number };
+  | {
+      readonly status: "failed";
+      readonly ms: number;
+      readonly code: string;
+      readonly http: number;
+      /**
+       * Present only on a `dead` verdict: did THIS round take the model out of
+       * the list, or did it only re-confirm a death that had already removed
+       * it? A re-confirmation is a real answer and worth showing, but calling it
+       * a removal reports a change the round did not make. Omitted by older
+       * backends, which the card reads as "removed" — its own behaviour.
+       */
+      readonly removed?: boolean | undefined;
+      /** Which anonymous-gate marker the refusal carried, when it named one. */
+      readonly marker?: string | undefined;
+    };
 
 export function createCatalog(options: CreateCatalogOptions): Catalog {
   const { template, builtinBaseline, knownApis, cachePath: path, fetchImpl, ttlMs = DEFAULT_TTL_MS } = options;
@@ -837,7 +860,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     for (const model of notListed) {
       // At zero cost, with the reason that is actually known: Zen does not list
       // it. This is what lets the panel say so rather than leave a gap.
-      probeRun.results[model.id] = { status: "failed", ms: 0, code: "not-listed", http: 0 };
+      probeRun.results[model.id] = { status: "failed", ms: 0, code: "not-listed", http: 0, removed: true };
       probeRun.done += 1;
     }
     try {
@@ -864,12 +887,24 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         } else {
           // A prober that predates the coded outcome still gets a reason: the
           // verdict itself is the coarse fallback, never a silent failure.
+          const code = typeof outcome?.code === "string" && outcome.code !== ""
+            ? outcome.code
+            : outcome?.kind === "dead" ? "dead" : "unknown";
           probeRun.results[model.id] = {
             status: "failed",
             ms: elapsed,
-            code: typeof outcome?.code === "string" && outcome.code !== "" ? outcome.code
-              : outcome?.kind === "dead" ? "dead" : "unknown",
+            code,
             http: typeof outcome?.http === "number" && isFinite(outcome.http) ? outcome.http : 0,
+            // Read BEFORE the verdict is written below, while it is still the
+            // pre-round one: a model already judged `dead` left the list in an
+            // earlier round, so re-asking it and re-confirming the answer
+            // removes nothing. Reporting that as a removal invents a change the
+            // round did not make — which is the difference between "this round
+            // took a model away" and "this round agreed with an old verdict".
+            ...(code === "dead" ? { removed: probes[model.id]?.verdict !== "dead" } : {}),
+            // Which gate marker the body carried, so the refusal names itself
+            // instead of arriving as one anonymous "未测到".
+            ...(typeof outcome?.marker === "string" && outcome.marker !== "" ? { marker: outcome.marker } : {}),
           };
         }
         probeRun.done += 1;

@@ -1244,6 +1244,120 @@ test('D5 GUARD: an all-gated round leaves visibility unchanged and persists no v
   })
 })
 
+test('a MIXED round keeps the refusals and still records the death it earned', async () => {
+  await withTempDir(async (dir) => {
+    // The 2026-09-30 03:31:17 round, in shape: one model answered, one came
+    // back `dead` after a full channel sweep, and nine were refused by the
+    // upstream gate in ~350ms. The D5 guard above only covers the all-gated
+    // round, which left the mixed case — the one that actually happens —
+    // unspecified, and it is the case that decides two things at once:
+    //
+    // 1. The refusals must change nothing (D5 holds per model, not per round).
+    // 2. The `dead` MUST still be recorded, because "the tier refused nine
+    //    models" is not evidence against the tenth, and discarding a verdict
+    //    the sweep earned would silently keep a withdrawn model selectable.
+    //
+    // So the round-level "untrustworthy" flag is a statement about the
+    // INCONCLUSIVE models only. The panel used to word it as a claim about
+    // every model ("模型显示保持不变"), which is not what the code enforces —
+    // this test is what makes the wording load-bearing.
+    const gate = { kind: 'inconclusive', reason: 'anon-gated (HTTP 403)', code: 'anon-gated', http: 403 }
+    const verdicts = Object.fromEntries(DERIVED.map((id) => [id, gate]))
+    verdicts['space-bunny-free'] = { kind: 'ok' }
+    verdicts['deepseek-v4-flash-free'] = { kind: 'dead', reason: '上游回報此模型不可用（HTTP 400）', code: 'dead', http: 400 }
+    const probe = recordingProber(verdicts)
+    const catalog = await probedCatalog(dir, probe)
+    const before = catalog.current().visible.slice()
+    await catalog.forceProbes()
+    const after = catalog.current()
+
+    // (1) Every refused model keeps exactly the visibility it had.
+    for (const id of ['big-pickle', 'ling-3.0-flash-fin-free', 'muse-spark-1.2-contributor-free', 'muse-spark-1.3-contributor-free']) {
+      assert.equal(before.includes(id), after.visible.includes(id), `${id} keeps its visibility`)
+    }
+    // (2) The earned death is kept, and persisted with the swept marker.
+    assert.ok(!after.visible.includes('deepseek-v4-flash-free'), 'the dead model leaves the list')
+    const onDisk = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+    assert.equal(onDisk.probes['deepseek-v4-flash-free'].verdict, 'dead', 'the earned death is persisted')
+    assert.equal(onDisk.probes['deepseek-v4-flash-free'].swept, true, 'and marked as earned by a full sweep')
+    assert.equal(onDisk.probes['big-pickle'], undefined, 'no refusal is ever persisted')
+    assert.equal(after.probeInconclusive, true, 'the panel is still told some models went unmeasured')
+    // The round record has to say the death REMOVED something, so the card can
+    // tell this apart from re-confirming a verdict an earlier round already used.
+    const results = catalog.probeProgress().results
+    assert.equal(results['deepseek-v4-flash-free'].removed, true, 'a fresh death is marked as a removal')
+    assert.equal(results['big-pickle'].removed, undefined, 'a refusal carries no removal claim')
+  })
+})
+
+test('re-confirming an old death removes nothing and is marked as such', async () => {
+  await withTempDir(async (dir) => {
+    // The other half of the same screenshot: `deepseek-v4-flash-free` was
+    // already dead from the 23:30:17 round, so the 03:31:17 re-confirmation
+    // changed nothing — the model had left the list hours earlier. The card
+    // filed it under "本轮下架" anyway, dating a four-hour-old change to the
+    // round the reader had just run.
+    //
+    // The re-check only happens for a verdict that predates the channel sweep
+    // (no `swept` marker), which is exactly what the 23:30:17 round wrote: 23
+    // deaths, none of them swept. Once a verdict IS swept it is never asked
+    // again, so this state is the only way a re-confirmation can occur — and
+    // therefore the only way the panel can misreport one. `deepseek-v4-flash-free`
+    // is the model that took that path in the screenshot; `big-pickle` stands in
+    // for it here because it is the one id the offline baseline fixture carries,
+    // and the mechanism is the id's business, not the test's.
+    const path = join(dir, 'catalog.json')
+    const dead = { kind: 'dead', reason: '上游回報此模型不可用（HTTP 400）', code: 'dead', http: 400 }
+    const first = await probedCatalog(dir, recordingProber({ 'big-pickle': dead }))
+    await first.forceProbes()
+    assert.ok(!first.current().visible.includes('big-pickle'), 'removed by the first round')
+    const onDisk = JSON.parse(await readFile(path, 'utf8'))
+    delete onDisk.probes['big-pickle'].swept
+    await writeFile(path, JSON.stringify(onDisk))
+
+    const probe = recordingProber({ 'big-pickle': dead })
+    const reopened = catalogWith({ dir, fetchImpl: scriptedFetch([]), probe, baselineModels: baseline() })
+    await reopened.forceProbes()
+    assert.ok(probe.calls.includes('big-pickle'), 'the legacy verdict was re-checked')
+    // Upstream said the same thing. The model was ALREADY out of the list, so
+    // this round removed nothing and must not claim to have.
+    assert.equal(
+      reopened.probeProgress().results['big-pickle'].removed,
+      false,
+      'the re-confirmation is not a removal',
+    );
+    assert.ok(!reopened.current().visible.includes('big-pickle'), 'and it is still out')
+  })
+})
+
+test('a refusal round carries the gate marker through to the panel record', async () => {
+  await withTempDir(async (dir) => {
+    // The seam between the transport and the card. `anon-gated` folds three
+    // upstream conditions together — correctly, since none of them is a verdict
+    // about the model — but they need three different repairs, and the body is
+    // the only place that fact exists. An `inconclusive` is never persisted, so
+    // without this the answer dies with the round: three rounds of diagnosis on
+    // the 2026-09-30 failures stalled on exactly that.
+    const gated = {
+      kind: 'inconclusive',
+      reason: 'anon-gated（HTTP 403）',
+      code: 'anon-gated',
+      http: 403,
+      marker: 'FreeTierError',
+    }
+    const probe = recordingProber(Object.fromEntries(DERIVED.map((id) => [id, gated])))
+    const catalog = await probedCatalog(dir, probe)
+    await catalog.forceProbes()
+    const results = catalog.probeProgress().results
+    assert.equal(results['big-pickle'].code, 'anon-gated', 'the folded code still classifies the round')
+    assert.equal(results['big-pickle'].http, 403)
+    assert.equal(results['big-pickle'].marker, 'FreeTierError', 'and the marker rides alongside it')
+    // A refusal still changes nothing about visibility (D5), marker or not.
+    const onDisk = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+    assert.equal(onDisk.probes, undefined, 'a refusal is still never persisted as a verdict')
+  })
+})
+
 test('a prober that rejects is treated as no conclusion, not as dead', async () => {
   await withTempDir(async (dir) => {
     const probe = async (model) => {

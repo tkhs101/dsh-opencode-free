@@ -74,7 +74,7 @@ window.__ModuleLoader__.load({
 			"probe": "立即探测",
 			"probing": "探测中…",
 			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
-			"probeUntrusted": "本轮探测结论不可信（上游限流、匿名额度被闸或网络异常），模型显示保持不变。",
+			"probeUntrusted": "本轮有模型没能测到（上游限流、匿名层被拒或网络异常），这些模型的显示保持不变。",
 			"probedAt": "上次探测",
 			"probing.now": "正在探测",
 			"probing.waiting": "等待中",
@@ -86,8 +86,9 @@ window.__ModuleLoader__.load({
 			"probing.unprobed": "本轮未探测",
 			"probing.andMore": "等",
 			"probing.unmeasured": "未测到",
+			"probing.reconfirmed": "复核仍不可用",
 			"probing.roundRefused": "本轮没能测到这些模型",
-			"probing.notModelFault": "这是当时的网络状况，不是该模型的结论",
+			"probing.notModelFault": "这是上游当时的回应，不是该模型的结论",
 			"probing.retryHint": "点「立即探测」可重测",
 			"reason.dead": "已下架",
 			"reason.notlisted": "Zen 未提供",
@@ -98,10 +99,13 @@ window.__ModuleLoader__.load({
 			"reason.badkey": "key 无效",
 			"reason.unknown": "无响应",
 			"reason.error": "探测异常",
-			"advice.anongated": "匿名额度被闸，配置 key 可提高额度",
+			"advice.anongated": "上游当时拒绝了匿名层请求；挂 key 只能提高额度，不保证解除拒绝",
 			"advice.quota": "额度或速率用尽，稍后重试",
 			"advice.badkey": "检查 key 是否正确",
 			"advice.keyhint": "key 只能提高额度，不能改变模型清单",
+			"marker.freetier": "上游回了 FreeTierError（免费层准入被拒）",
+			"marker.nosession": "上游回了 MissingSessionID（请求没带上会话标识）",
+			"marker.opencodeonly": "上游说这个请求只能由 OpenCode 客户端发出",
 			"badge.vision": "视觉",
 			"badge.thinking": "思考",
 			"legend.vision": "多模态视觉",
@@ -124,7 +128,7 @@ window.__ModuleLoader__.load({
 			"probe": "Probe now",
 			"probing": "Probing…",
 			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
-			"probeUntrusted": "This round's probe results were untrustworthy (upstream throttling, the anonymous tier refusing, or a network error), so visibility is unchanged.",
+			"probeUntrusted": "Some models could not be measured this round (upstream throttling, the anonymous tier refusing, or a network error); those models keep their current visibility.",
 			"probedAt": "Last probe",
 			"probing.now": "Probing",
 			"probing.waiting": "Waiting",
@@ -136,8 +140,9 @@ window.__ModuleLoader__.load({
 			"probing.unprobed": "Not probed",
 			"probing.andMore": "and",
 			"probing.unmeasured": "Not measured",
+			"probing.reconfirmed": "Re-confirmed gone",
 			"probing.roundRefused": "These models could not be measured this round",
-			"probing.notModelFault": "that was the network at the time, not a verdict on the model",
+			"probing.notModelFault": "that was the upstream's answer at the time, not a verdict on the model",
 			"probing.retryHint": "press “Probe now” to retry",
 			"reason.dead": "Gone",
 			"reason.notlisted": "Not offered",
@@ -148,10 +153,13 @@ window.__ModuleLoader__.load({
 			"reason.badkey": "Bad key",
 			"reason.unknown": "No response",
 			"reason.error": "Probe error",
-			"advice.anongated": "the anonymous tier is gated; a key raises the quota",
+			"advice.anongated": "the upstream refused the anonymous request at the time; a key raises the quota but is not guaranteed to lift the refusal",
 			"advice.quota": "quota or rate limit hit — retry later",
 			"advice.badkey": "check that the key is correct",
 			"advice.keyhint": "a key raises the quota; it does not change the model list",
+			"marker.freetier": "upstream answered FreeTierError (free-tier admission refused)",
+			"marker.nosession": "upstream answered MissingSessionID (the request carried no session id)",
+			"marker.opencodeonly": "upstream says only the OpenCode client may send this",
 			"badge.vision": "Vision",
 			"badge.thinking": "Thinking",
 			"legend.vision": "Multimodal vision",
@@ -604,13 +612,47 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * Whether a gone-code verdict is what took the model out of the list in
+		 * THIS round.
+		 *
+		 * A model already judged dead was removed by an earlier round; re-asking
+		 * it and re-confirming the answer changes nothing, and counting that as a
+		 * removal reports a change the round never made — the reader is told a
+		 * model disappeared just now, when it disappeared hours ago. The
+		 * backend says which it was; a result with no `removed` field comes from
+		 * a backend that does not, and is read as a removal, which is exactly
+		 * what that backend's own panel did.
+		 */
+		function isFreshRemoval(entry) {
+			return GONE_CODES[entry.code] === true && entry.removed !== false;
+		}
+
+		/**
+		 * Which of the three anonymous-gate markers the upstream body carried.
+		 * `anon-gated` folds them together on purpose — none of them is a verdict
+		 * about the model — but they are three different upstream conditions, and
+		 * a reader who only sees "匿名层被拒" cannot tell an exhausted tier from a
+		 * header the request failed to carry. The body is the only place that
+		 * fact exists, so the round carries it here.
+		 */
+		var GATE_MARKERS = {
+			"FreeTierError": "marker.freetier",
+			"MissingSessionID": "marker.nosession",
+			"opencode-only": "marker.opencodeonly"
+		};
+
+		/**
 		 * The one-line reason under a red badge, in full: word, the HTTP status
-		 * when one arrived, and — for the codes that are really a condition of
-		 * the account rather than the model — the advice the reader needs.
+		 * when one arrived, which gate marker answered when one did, and — for
+		 * the codes that are really a condition of the account rather than the
+		 * model — the advice the reader needs.
 		 */
 		function failureDetail(t, result) {
 			var parts = [failureText(t, result)];
 			if (typeof result.http === "number" && result.http > 0) parts.push("HTTP " + result.http);
+			if (typeof result.marker === "string" && hasOwnKey(GATE_MARKERS, result.marker)) {
+				parts.push(t(GATE_MARKERS[result.marker]));
+			}
 			if (result.code === "anon-gated") parts.push(t("advice.anongated"));
 			else if (result.code === "quota-exhausted") parts.push(t("advice.quota"));
 			else if (result.code === "bad-key") parts.push(t("advice.badkey"));
@@ -1003,6 +1045,7 @@ window.__ModuleLoader__.load({
 					var okCount = 0;
 					var badCount = 0;
 					var goneCount = 0;
+					var reconfirmedCount = 0;
 					unmeasuredCount = 0;
 					unmeasuredWords = {};
 					for (var rid in liveResults) {
@@ -1018,15 +1061,28 @@ window.__ModuleLoader__.load({
 						// painting the whole list red.
 						if (entry !== null && CALLER_CODES[entry.code] === true) {
 							unmeasuredCount += 1;
-							unmeasuredWords[failureText(t, entry)] = true;
+							// The banner carries the gate marker too, not just the
+							// folded code: the reader's next move depends on which
+							// of the three upstream conditions answered, and this is
+							// the one line that survives a page reload.
+							var refusedLabel = failureText(t, entry);
+							if (typeof entry.marker === "string" && hasOwnKey(GATE_MARKERS, entry.marker)) {
+								refusedLabel += "（" + t(GATE_MARKERS[entry.marker]) + "）";
+							}
+							unmeasuredWords[refusedLabel] = true;
 							continue;
 						}
 						badCount += 1;
 						// `dead` and `not-listed` both REMOVE the row, so their
 						// badges can never be read afterwards. Counting them
 						// separately is what lets the report say "3 failed, 2 of
-						// them gone" instead of quietly losing two.
-						if (entry !== null && GONE_CODES[entry.code] === true) goneCount += 1;
+						// them gone" instead of quietly losing two — and keeping
+						// the re-confirmed ones apart is what stops an old verdict
+						// from being announced as a removal that just happened.
+						if (entry !== null && GONE_CODES[entry.code] === true) {
+							if (isFreshRemoval(entry)) goneCount += 1;
+							else reconfirmedCount += 1;
+						}
 					}
 					// A dead model is gone from `visible`, so its row cannot
 					// speak for itself. Naming the count here is what keeps a
@@ -1048,6 +1104,10 @@ window.__ModuleLoader__.load({
 						goneCount > 0
 							? E("span", { className: "opf-capsule-gone" },
 								t("probing.removed") + " " + String(goneCount))
+							: null,
+						reconfirmedCount > 0
+							? E("span", { className: "opf-capsule-gone" },
+								t("probing.reconfirmed") + " " + String(reconfirmedCount))
 							: null);
 				}
 			}
@@ -1079,21 +1139,32 @@ window.__ModuleLoader__.load({
 			/* Why a vanished model vanished. Rendered only when the last round
 			   actually took a model out of the list, and never more than a
 			   couple of lines: this is a receipt for something that no longer
-			   has a row, not a second list. */
+			   has a row, not a second list. A verdict the round only
+			   RE-CONFIRMED gets its own line instead, because it removed
+			   nothing — filing it under "removed this round" dates an earlier
+			   round's change to this one, which is the receipt the reader
+			   actually acts on. */
 			var removedNote = null;
 			if (progress !== null && !progress.running) {
 				var removed = [];
+				var reconfirmed = [];
 				for (var goneId in liveResults) {
 					if (!hasOwnKey(liveResults, goneId)) continue;
 					var gone = liveResults[goneId];
 					if (gone === null || gone.status !== "failed" || GONE_CODES[gone.code] !== true) continue;
-					removed.push(goneId);
+					if (isFreshRemoval(gone)) removed.push(goneId);
+					else reconfirmed.push(goneId);
 				}
-				if (removed.length > 0) {
-					var shown = removed.slice(0, 3).join("、");
-					var rest = removed.length - Math.min(removed.length, 3);
-					removedNote = E("p", { className: "opf-summaryline" },
-						t("probing.removed") + "：" + shown + (rest > 0 ? t("probing.andMore") + " " + String(rest) : ""));
+				var nameSome = function (word, ids) {
+					var named = ids.slice(0, 3).join("、");
+					var rest = ids.length - Math.min(ids.length, 3);
+					return word + "：" + named + (rest > 0 ? t("probing.andMore") + " " + String(rest) : "");
+				};
+				var removalLines = [];
+				if (removed.length > 0) removalLines.push(nameSome(t("probing.removed"), removed));
+				if (reconfirmed.length > 0) removalLines.push(nameSome(t("probing.reconfirmed"), reconfirmed));
+				if (removalLines.length > 0) {
+					removedNote = E("p", { className: "opf-summaryline" }, removalLines.join("；"));
 				}
 			}
 

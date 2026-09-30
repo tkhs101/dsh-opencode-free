@@ -442,6 +442,179 @@ test('a refused round accuses no model: grey rows, one banner, separate count', 
   }
 });
 
+test('a re-confirmed death is not announced as a removal that just happened', async () => {
+  // The reported bug, verbatim from the 2026-09-30 03:31:17 round:
+  // `deepseek-v4-flash-free` had been judged dead four hours earlier (23:30:17)
+  // and had already left the list. The round re-asked it, upstream said the
+  // same thing, and the card filed that under "本轮下架" — telling the reader a
+  // model had just been taken away when nothing had changed since the night
+  // before. The backend now says which kind of dead it is; the card must keep
+  // the two apart.
+  const round = {
+    running: false,
+    total: 2,
+    done: 2,
+    current: null,
+    results: {
+      'space-bunny-free': { status: 'ok', ms: 1196 },
+      // Re-asked, re-confirmed: already dead before the round, so `removed:false`.
+      'deepseek-v4-flash-free': { status: 'failed', ms: 682, code: 'dead', http: 400, removed: false },
+      // Freshly removed: it was visible when the round started.
+      'big-pickle': { status: 'failed', ms: 41, code: 'not-listed', http: 0, removed: true },
+    },
+    startedAt: 1759146617000,
+  }
+  const mounted = await renderCard({
+    hidden: [],
+    snapshot: { ...SNAPSHOT, visible: ['space-bunny-free'] },
+    routes: ({ url }) => {
+      if (url.endsWith('/api/probe')) return { ok: true, json: async () => round }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    await mounted.fireTimers()
+    const end = collect(mounted.rerender())
+    const summary = end.texts.filter((t) => t.includes('下架') || t.includes('复核'))
+    // The fresh removal is still announced — that one is real.
+    assert.ok(end.texts.some((t) => t.includes('本轮下架：big-pickle')), 'a real removal is still announced, by id');
+    // The re-confirmation is reported as exactly that, and never as a removal.
+    // The two receipts share one line, so this checks the id is not filed
+    // under 本轮下架 rather than that the words are absent from the line.
+    assert.ok(
+      summary.some((t) => t.includes('复核仍不可用：deepseek-v4-flash-free')),
+      'the re-confirmation is labelled and named by id',
+    );
+    assert.ok(
+      !summary.some((t) => t.includes('下架：deepseek-v4-flash-free')),
+      'never filed under 本轮下架, which removed nothing',
+    );
+    // The capsule keeps the two counts apart too.
+    assert.ok(
+      end.texts.some((t) => /本轮下架\s*1/.test(t)),
+      'the capsule counts one removal, not two',
+    );
+  } finally {
+    mounted.dispose()
+  }
+})
+
+test('a refused round names the upstream, never the reader\'s network', async () => {
+  // The 03:31:17 round recorded eleven HTTP statuses and zero transport
+  // failures: nothing reached the network layer. The banner called it "当时的
+  // 网络状况", which sent the reader to debug a proxy/VPN/DNS path that was
+  // never broken — and the repo's own reverse-engineering notes forbid reading a
+  // FreeTierError body as a verdict about the IP. Same for the per-row advice:
+  // "匿名额度被闸" claims the cause the evidence does not support.
+  const refused = {
+    running: false,
+    total: 2,
+    done: 2,
+    current: null,
+    results: {
+      'space-bunny-free': { status: 'ok', ms: 1196 },
+      'big-pickle': { status: 'failed', ms: 347, code: 'anon-gated', http: 403 },
+    },
+    startedAt: 1759146617000,
+  }
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url }) => {
+      if (url.endsWith('/api/probe')) return { ok: true, json: async () => refused }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    await mounted.fireTimers()
+    const end = collect(mounted.rerender())
+    const banner = end.texts.filter((t) => t.includes('本轮没能测到'))
+    assert.equal(banner.length, 1, 'the refusal is announced once')
+    assert.match(banner[0], /上游/, 'the banner blames the upstream answer')
+    assert.doesNotMatch(banner[0], /网络状况/, 'not the reader\'s network, which never failed')
+    // The per-row tooltip must not claim the anonymous bucket was gated either:
+    // a FreeTierError body is one upstream response to several conditions, and
+    // a key is not guaranteed to lift it.
+    const failBadges = [...walk(mounted.rerender())].filter((n) => String(n.props?.className ?? '')
+      .split(' ').includes('opf-probe-fail'))
+    assert.equal(failBadges.length, 0, 'a refusal is never a red row')
+    assert.ok(
+      !end.texts.some((t) => t.includes('匿名额度被闸')),
+      'the row advice does not assert the bucket was gated',
+    );
+  } finally {
+    mounted.dispose()
+  }
+})
+
+test('the untrusted-round note promises only what the code enforces', async () => {
+  // The round-level note used to end "模型显示保持不变" — a global claim about
+  // every model. What the catalogue actually enforces (src/catalog.ts) is
+  // narrower and specific: an inconclusive outcome writes no verdict, so THOSE
+  // models keep their visibility; a `dead` earned by sweeping both channels is
+  // still recorded inside the very same round. The note now says the enforced
+  // half, so it cannot be caught out by a mixed round.
+  const untrusted = { ...SNAPSHOT, probeInconclusive: true }
+  const mounted = await renderCard({
+    hidden: [],
+    // `routes` answers every fetch, so the untrusted snapshot has to come from
+    // here — the `snapshot` option is only the fallback when no route is given.
+    routes: () => ({ ok: true, json: async () => untrusted }),
+  })
+  try {
+    await mounted.fireTimers()
+    const end = collect(mounted.rerender())
+    const note = end.texts.find((t) => t.includes('没能测到'))
+    assert.ok(note !== undefined, 'the untrusted round is announced')
+    assert.match(note, /这些模型的显示保持不变/, 'it names the models whose visibility is kept')
+    assert.doesNotMatch(note, /结论不可信/, 'and stops claiming the whole round concluded nothing')
+  } finally {
+    mounted.dispose()
+  }
+})
+
+test('a refusal names which upstream condition answered, not just "refused"', async () => {
+  // `anon-gated` deliberately folds three upstream conditions into one code,
+  // because none of them is a verdict about the model. But the reader's next
+  // move differs for each: an exhausted tier, a request that failed to carry a
+  // session id, and a route that only answers the OpenCode client. Three rounds
+  // of diagnosis stalled on this being unanswerable, so the round now carries
+  // the marker and the card shows it.
+  const round = {
+    running: false,
+    total: 2,
+    done: 2,
+    current: null,
+    results: {
+      'space-bunny-free': { status: 'ok', ms: 1209 },
+      'big-pickle': { status: 'failed', ms: 354, code: 'anon-gated', http: 403, marker: 'FreeTierError' },
+    },
+    startedAt: 1759146617000,
+  }
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url }) => {
+      if (url.endsWith('/api/probe')) return { ok: true, json: async () => round }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    await mounted.fireTimers()
+    const end = collect(mounted.rerender())
+    const banner = end.texts.find((t) => t.includes('本轮没能测到'))
+    assert.ok(banner !== undefined, 'the refusal is announced')
+    assert.match(banner, /FreeTierError/, 'the banner names the condition that answered')
+    // Still hedged: knowing the marker is not a verdict about the model.
+    assert.match(banner, /不是该模型的结论/, 'and still disowned as a verdict on the model')
+    // A result with no marker (an older backend) must not invent one.
+    assert.ok(
+      !end.texts.some((t) => t.includes('MissingSessionID')),
+      'a refusal without a marker does not borrow another one',
+    )
+  } finally {
+    mounted.dispose()
+  }
+})
+
 test('zh and en dictionaries carry the same key set', async () => {
   const src = await readFile(CLIENT_URL, 'utf8')
   const grab = (tag) => {
