@@ -45,7 +45,8 @@ dsh --version
 
 | Plugin | DSH |
 |---|---|
-| `0.3.0` | `0.2.0-rc.2` |
+| `0.3.1` | `0.2.0-rc.2` |
+| `0.3.0` | `0.2.0-rc.1` |
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
@@ -56,7 +57,7 @@ Do not ignore peer dependency warnings.
 The examples use the `web` profile. Replace it with your target profile.
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.3.0
+dsh plugin --profile web add dsh-opencode-free@0.3.1
 ```
 
 Check the install:

@@ -45,7 +45,7 @@ test('targets the DSH 0.2.0-rc.2 contracts', async () => {
   // Hand-synced on purpose: a bump that does not also move the install guide
   // and the changelog ships a release whose own instructions install a
   // different version.
-  assert.equal(pkg.version, '0.3.0')
+  assert.equal(pkg.version, '0.3.1')
   // The version is repeated in the install guide, the changelog, and the UA the
   // plugin sends upstream. A bump that misses any of them ships a release whose
   // own instructions install something else, or identifies itself wrongly.
