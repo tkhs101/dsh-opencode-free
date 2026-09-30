@@ -238,7 +238,15 @@ test('the card renders rows, switches, badges and toolbar from the snapshot', as
   }
   assert.ok(texts.includes('显示') && texts.includes('已隐藏'), 'both status words render');
   assert.ok(has('opf-switch') && has('opf-track') && has('opf-thumb'), 'iOS-style switches render');
-  assert.deepEqual(inputs.map((i) => i.props.checked), [true, false, true], 'switch states follow hiddenModels');
+  // Shown models lead, each group keeping the catalogue's alphabetical order.
+  const ids = ['space-bunny-free', 'big-pickle', 'muse-spark-1.3-contributor-free']
+  assert.deepEqual(
+    texts.filter((t) => ids.includes(t)),
+    ['space-bunny-free', 'muse-spark-1.3-contributor-free', 'big-pickle'],
+    'shown models come first, alphabetical within each group',
+  )
+  assert.deepEqual(inputs.map((i) => i.props.checked), [true, true, false],
+    'switch states follow hiddenModels, in the new row order')
   // Badges: image + top thinking level, display-capitalized, per model.
   assert.ok(has('opf-badge-vision') && has('opf-badge-think'), 'both badge kinds render');
   assert.ok(texts.some((t) => t.includes('Max')), 'space-bunny shows its top level');
@@ -677,6 +685,33 @@ test('a live round is followed: the pill counts down and rows report progress', 
     assert.ok(later.texts.some((t) => t.includes('402ms')), 'a later poll is still applied')
     assert.ok(later.texts.some((t) => t.includes('2/3')), 'and the count advanced')
     assert.ok(later.texts.some((t) => t.includes('探测中')), 'still following the round')
+  } finally {
+    mounted.dispose()
+  }
+})
+
+test('switched-on models are pinned to the top, each group still alphabetical', async () => {
+  // Someone reading this panel is looking for "what can I use", so what they
+  // can use leads. The order WITHIN each group is the catalogue's — the card
+  // partitions, it does not re-sort, so there is one owner for the order.
+  const shown = ['apple-free', 'mango-free', 'zebra-free']
+  const off = ['banana-free', 'cherry-free']
+  const ids = [...shown, ...off]
+  const mounted = await renderCard({
+    hidden: ['banana-free', 'cherry-free'],
+    snapshot: {
+      ...SNAPSHOT,
+      visible: ids,
+      models: ids.map((id) => ({ id, image: false, thinking: null })),
+    },
+  })
+  try {
+    const { texts } = collect(mounted.rerender())
+    assert.deepEqual(
+      texts.filter((t) => ids.includes(t)),
+      [...shown, ...off],
+      'the on-switch group leads, the off-switch group follows, both alphabetical',
+    )
   } finally {
     mounted.dispose()
   }

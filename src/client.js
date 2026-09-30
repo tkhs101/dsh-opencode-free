@@ -923,7 +923,15 @@ window.__ModuleLoader__.load({
 			   the round will reach a model it never intended to ask about. */
 			var liveTargets = hasReading && Array.isArray(progress.targets) ? progress.targets : null;
 
-			var rows = visible.map(function (id) {
+			/* Shown models first, then the hidden ones — each group keeping the
+			   order the catalogue already gave them, which is alphabetical
+			   (see catalog.ts `byId`). Partitioning rather than sorting again
+			   keeps one owner for the order: the list arrives sorted, and the
+			   card only decides what comes first. A user reading this panel is
+			   looking for "what can I use", so what they can use leads. */
+			var ordered = visible.filter(function (id) { return !hasOwnKey(hidden, id); })
+				.concat(visible.filter(function (id) { return hasOwnKey(hidden, id); }));
+			var rows = ordered.map(function (id) {
 				var shown = !hasOwnKey(hidden, id);
 				var card = hasOwnKey(cards, id) ? cards[id] : null;
 				var left = [E("span", { key: "id", className: "opf-id" }, id)];
