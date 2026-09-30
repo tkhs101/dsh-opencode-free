@@ -258,7 +258,7 @@ test('the card renders rows, switches, badges and toolbar from the snapshot', as
   }
 });
 
-test('a probe round paints the capsule, the counter and one badge per row', async () => {
+test('a probe round paints the capsule, the counter and a badge per row', async () => {
   // The (2) mock's live state, driven end to end: clicking the probe button
   // starts the POST, the captured timers fire the polls, and the rows repaint
   // from each reading until the POST answers.
@@ -296,17 +296,19 @@ test('a probe round paints the capsule, the counter and one badge per row', asyn
     assert.ok(mid.texts.some((t) => t.includes('1/3')), 'the capsule counts done/total');
     assert.ok(midHas('opf-bar') && midHas('opf-fill'), 'the mini progress bar renders');
     // The finished row reports its latency, the current row spins, the queued
-    // row waits — and the capability badges step aside for all three.
+    // row waits.
     assert.ok(mid.texts.some((t) => t.includes('142ms')), 'a finished row shows its latency');
     assert.ok(mid.texts.some((t) => t.includes('探测中')), 'the current row spins');
     assert.ok(mid.texts.some((t) => t.includes('等待中')), 'queued rows wait');
-    // Capability badges step aside mid-round: no ROW subtree may carry one
-    // (the footer legend keeps its own — it is not per-row).
+    // Capability badges stay on screen mid-round. They used to step aside and
+    // come back at the end, so every row lost its identity exactly while the
+    // reader waited to find out what it was — and came back looking different
+    // for reasons that had nothing to do with the model.
     const rowLabels = (tree) => [...walk(tree)].filter((n) => n.tag === 'label'
       && String(n.props?.className).split(' ').includes('opf-row'))
     const rowHasBadge = (row) => [...walk(row)].some((d) => String(d.props?.className ?? '')
       .split(' ').some((c) => c === 'opf-badge-vision' || c === 'opf-badge-think'))
-    assert.ok(!rowLabels(mounted.rerender()).some(rowHasBadge), 'capability badges step aside mid-round');
+    assert.ok(rowLabels(mounted.rerender()).some(rowHasBadge), 'capability badges stay on screen mid-round');
     assert.ok(midHas('opf-row-probing'), 'the active row highlights');
     assert.ok(midHas('opf-row-waiting'), 'queued rows dim');
     // The probe button shows its loading state and refresh is fenced off.
@@ -610,6 +612,71 @@ test('a refusal names which upstream condition answered, not just "refused"', as
       !end.texts.some((t) => t.includes('MissingSessionID')),
       'a refusal without a marker does not borrow another one',
     )
+  } finally {
+    mounted.dispose()
+  }
+})
+
+test('a live round is followed: the pill counts down and rows report progress', async () => {
+  // The live view never worked. The poll timer outlives the render that created
+  // it, and that render captured `probing` as it was BEFORE the click — still
+  // false — so the chain returned after one tick and the pill froze while the
+  // round ran on. What the reader saw was no process at all, only the final
+  // report the POST reads back. Driven here across several poll ticks.
+  //
+  // The catalogue POST is left pending, as it is in the host: the round blocks
+  // it, which is the whole time window the live view has to live in.
+  const first = {
+    running: true, total: 3, done: 1, current: 'big-pickle',
+    results: { 'space-bunny-free': { status: 'ok', ms: 218 } },
+    startedAt: 1759146617000,
+  }
+  const second = {
+    running: true, total: 3, done: 2, current: 'muse-spark-1.3-contributor-free',
+    results: {
+      'space-bunny-free': { status: 'ok', ms: 218 },
+      'big-pickle': { status: 'ok', ms: 402 },
+    },
+    startedAt: 1759146617000,
+  }
+  // Flipped by the test, not by a read count: how many reads happen before an
+  // assertion is a property of the harness, not of the behaviour under test.
+  let advance = false
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'POST') return new Promise(() => {})
+      if (url.endsWith('/api/probe') && method === 'GET') {
+        return { ok: true, json: async () => (advance ? second : first) }
+      }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    mounted.findButton('立即探测').props.onClick()
+    await mounted.fireTimers()
+    const opening = collect(mounted.rerender())
+    assert.ok(opening.texts.some((t) => t.includes('正在探测')), 'the pill says a round is running')
+    assert.ok(opening.classes.includes('opf-bar'), 'with a bar to fill')
+    assert.ok(opening.texts.some((t) => t.includes('1/3')), 'and a count for this round')
+    assert.ok(opening.texts.some((t) => t.includes('218ms')), 'the answered row keeps its latency')
+    assert.ok(opening.texts.some((t) => t.includes('探测中')), 'the model being asked says so')
+    assert.ok(opening.texts.some((t) => t.includes('等待中')), 'and the ones not asked yet are queued')
+    // Capability badges stay put. A round used to take them away and hand them
+    // back, so every row lost its identity exactly while the reader waited to
+    // find out what it was, then came back looking different for reasons that
+    // had nothing to do with the model.
+    assert.ok(opening.texts.some((t) => t.includes('视觉')), 'the vision badge survives the round')
+    assert.ok(opening.texts.some((t) => t.includes('Max')), 'and so does the thinking level')
+
+    // The chain must survive past the first tick — that is the whole defect:
+    // the round moves on, and the pill must move with it.
+    advance = true
+    await mounted.fireTimers()
+    const later = collect(mounted.rerender())
+    assert.ok(later.texts.some((t) => t.includes('402ms')), 'a later poll is still applied')
+    assert.ok(later.texts.some((t) => t.includes('2/3')), 'and the count advanced')
+    assert.ok(later.texts.some((t) => t.includes('探测中')), 'still following the round')
   } finally {
     mounted.dispose()
   }

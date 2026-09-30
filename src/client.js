@@ -727,7 +727,7 @@ window.__ModuleLoader__.load({
 					if (cancelled || reading === null) return;
 					adopt(reading);
 				});
-				return function () { cancelled = true; stopPolling(); };
+				return function () { cancelled = true; pollActive = false; stopPolling(); };
 			}, []);
 
 			function refresh() {
@@ -750,6 +750,14 @@ window.__ModuleLoader__.load({
 			   probe look like nothing ever happened. */
 			var PROGRESS_POLL_MS = 800;
 			var pollTimer = null;
+			/* Whether the card is following a round, as a mutable flag rather
+			   than the `probing` state. The poll timer outlives the render that
+			   created it, and that render's `probing` is still the value from
+			   BEFORE the click — so guarding on it killed the chain after one
+			   tick and the live progress never appeared, leaving only the final
+			   report the POST reads back. Same lesson as pollTimer: the timer
+			   must not close over render state. */
+			var pollActive = false;
 
 			function stopPolling() {
 				if (pollTimer !== null && typeof clearTimeout === "function") {
@@ -764,7 +772,7 @@ window.__ModuleLoader__.load({
 				stopPolling();
 				pollTimer = setTimeout(function () {
 					pollTimer = null;
-					if (!probing) return;
+					if (!pollActive) return;
 					loadProgress().then(function (next) { startPolling(next); });
 				}, PROGRESS_POLL_MS);
 			}
@@ -775,8 +783,13 @@ window.__ModuleLoader__.load({
 			function adopt(reading) {
 				if (reading === null) return;
 				setProgress(reading);
-				if (reading.running === true) startPolling(reading);
-				else stopPolling();
+				if (reading.running === true) {
+					pollActive = true;
+					startPolling(reading);
+				} else {
+					pollActive = false;
+					stopPolling();
+				}
 			}
 
 			function probe() {
@@ -785,8 +798,10 @@ window.__ModuleLoader__.load({
 				setProbing(true);
 				// Clear the previous round's report: this one replaces it.
 				setProgress(null);
+				pollActive = true;
 				loadProgress().then(startPolling);
 				probeCatalog().then(function (snapshot) {
+					pollActive = false;
 					stopPolling();
 					if (snapshot !== null) setCatalog(snapshot);
 					else setProbeError(t("probeFailed"));
@@ -880,11 +895,14 @@ window.__ModuleLoader__.load({
 			   whose card is missing renders bare rather than failing — the
 			   toggle is the contract, badges are decoration. */
 			/* A reading is LIVE while a round runs and RETAINED once it has.
-			   Either way its per-row outcome is what the row reports; the
-			   capability badges return only after the round ends, so during a
-			   round there is exactly one badge per row and nothing competes
-			   with the answer. `live` additionally means: animate, highlight
-			   the in-flight row, dim the queue. */
+			   Either way the per-row outcome rides on the row. The capability
+			   badges stay on screen throughout: a round used to take them away
+			   and hand them back at the end, so every row lost its identity
+			   exactly while the reader was waiting to find out what it was —
+			   and the row came back looking different for reasons that had
+			   nothing to do with the model. The probe badge is additive, so
+			   nothing competes for space. `live` additionally means: animate,
+			   highlight the in-flight row, dim the queue. */
 			var hasReading = progress !== null && progress.total > 0;
 			var live = progress !== null && progress.running === true;
 			var liveResults = hasReading ? progress.results : {};
@@ -895,11 +913,10 @@ window.__ModuleLoader__.load({
 				var card = hasOwnKey(cards, id) ? cards[id] : null;
 				var left = [E("span", { key: "id", className: "opf-id" }, id)];
 				var rowClass = "opf-row";
-				/* Capability badges describe the model; the probe badge
-				   describes THIS round. When both are on screen (a retained
-				   report) the outcome comes first, because it is the thing the
-				   reader just asked for. */
-				if (!hasReading || !live) {
+				/* Capability badges describe the model and are always on
+				   screen; the probe badge describes THIS round and sits after
+				   them, because it is the thing the reader just asked for. */
+				{
 					if (card !== null && card.image === true) {
 						left.push(E("span", { key: "vision", className: "opf-badge opf-badge-vision" },
 							eyeIcon(),
