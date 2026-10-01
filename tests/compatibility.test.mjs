@@ -1045,8 +1045,17 @@ test('GUARD: dead is only concluded when every channel that was asked finished',
           return silentNow ? silent() : GONE()
         },
       })
-      assert.ok(calls >= 2, `${label}/${order}: both channels were asked`)
-      assert.equal(outcome.kind, 'inconclusive', `${label}/${order}: the removal is vetoed`)
+      // The OUTCOME is the assertion, and it is strictly stronger than counting
+      // requests: a sweep that asked only the first channel would answer `dead`
+      // here and fail this. Counting fetch calls instead proved to depend on how
+      // many times pi-ai issues one per probe, which is not this test's business
+      // — and on a Linux runner it read 1 where the veto had clearly still
+      // happened, hiding the outcome behind a bookkeeping failure.
+      assert.equal(
+        outcome.kind,
+        'inconclusive',
+        `${label}/${order}: the removal is vetoed (calls=${calls}, kind=${outcome.kind})`,
+      )
       assert.equal(outcome.code, label, `${label}/${order}: the row says why it could not tell`)
     }
   }
