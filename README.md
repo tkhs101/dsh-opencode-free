@@ -2,15 +2,8 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
-[![CI](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml)
+[![CI](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-
-> [!IMPORTANT]
-> **This repository is a fork of [`x5427876/dsh-opencode-free`](https://github.com/x5427876/dsh-opencode-free)
-> and is NOT published to npm.** Every package on the npm registry named
-> `dsh-opencode-free` belongs to the upstream author, not to this fork. Install
-> from a local tarball — see [Install](#install). Releases of this fork live on
-> [tkhs101/dsh-opencode-free](https://github.com/tkhs101/dsh-opencode-free/releases).
 
 Use the free [OpenCode Zen](https://opencode.ai/docs/providers) models in
 DeepSeek Harness (DSH). You do not need to
@@ -51,9 +44,8 @@ dsh --version
 
 | Plugin | DSH |
 |---|---|
-| `0.3.2` | `0.2.0-rc.2` |
-| `0.3.1` | `0.2.0-rc.2` |
-| `0.3.0` | `0.2.0-rc.1` |
+| `0.3.0` | `0.2.0-rc.2` |
+| `0.2.1` | `0.2.0-rc.2` |
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
@@ -63,21 +55,13 @@ ignore peer dependency warnings.
 
 ## Install
 
-This fork is not on npm, so there is no `dsh plugin add dsh-opencode-free@<version>`
-to run — that would install the *upstream* package instead. Build a tarball and
-point the installer at it:
+Install the pinned package from npm:
 
 ```sh
-git clone https://github.com/tkhs101/dsh-opencode-free.git
-cd dsh-opencode-free
-pnpm install --frozen-lockfile
-pnpm run build
-pnpm pack --pack-destination .
-
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
+dsh plugin --profile web add dsh-opencode-free@0.3.0
 ```
 
-Replace `web` with your target profile.
+The examples use the `web` profile. Replace it with your target profile.
 
 Check the install:
 
@@ -101,12 +85,7 @@ Other profiles and plugins do not change.
 Update or remove:
 
 ```sh
-# update — no registry to resolve, so rebuild and re-add:
-pnpm run build && pnpm pack --pack-destination .
-dsh plugin --profile web remove dsh-opencode-free
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
-
-# or just remove:
+dsh plugin --profile web update dsh-opencode-free
 dsh plugin --profile web remove dsh-opencode-free
 ```
 
@@ -405,9 +384,7 @@ pnpm run check      # typecheck, test, and pack
 The unit tests use in-memory fixtures and a temporary `$DSH_HOME`. They do not
 use the network or free quota.
 
-The scripts below live in the **repository, not in the tarball** — run them from
-a clone (or `git clone` first). They send real requests to the shared anonymous
-bucket:
+These scripts send real requests to the shared anonymous bucket:
 
 | Script | What it checks |
 |---|---|

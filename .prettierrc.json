@@ -9,10 +9,6 @@
     {
       "files": ["tests/**/*.mjs", "scripts/**/*.mjs", "*.mjs"],
       "options": { "semi": false, "singleQuote": true }
-    },
-    {
-      "files": ["scripts/notes/**/*.ts"],
-      "options": { "semi": true, "singleQuote": true }
     }
   ]
 }

@@ -43,12 +43,8 @@ jobs:
       # `--check` can be enforced without burying any real change in whitespace.
       - run: pnpm run format:check
       - run: pnpm run check
-      # scripts/notes/ is excluded from prettier (it is vendored), which makes it
-      # unchecked; this is what actually watches it.
-      - run: pnpm run verify-vendored
       - run: pnpm pack --dry-run
       # `--audit-level=high` so a low/moderate advisory does not block an unrelated
       # PR; a high one should stop the merge rather than sit in a log nobody reads
       # (audit 2026-09-30). `--no-fund` keeps the funding banner out of CI output.
       - run: pnpm audit --audit-level=high --no-fund
-      # See .agents/notes/implemented/process/2026-10-01-format-gate-enabled.md

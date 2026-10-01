@@ -18,7 +18,7 @@
 
 - `models-dev-catalog/spec.md` 的 D9 写过"面板底部灰字列出被排除的 deprecated 免费模型名"。**没有做**，而且是**故意不做**的：一个模型不可选时就是不出现在列表里，不存在第二份名单——否则它会和选择器不一致，并且会过期。理由见 `README.md` 与 `src/catalog.ts` 中 `effectiveList` 的注释。
 - `models-dev-catalog/spec.md` 里的缓存字段是 `{etag, fetchedAt, opencode}`，TTL 只有 24h。**两者都已变**：schema 现在是 v1（含 `models` / `probes` / `lastRound`），`readCache` 会直接拒绝仍带 `opencode` 键的旧文件；TTL 在 304 验证过上游遵守条件头之后自适应到 6 小时。
-- `live-diagnosis/` 里的 User-Agent 记录停在 `dsh-opencode-free/0.2.0`，那正是 0.3.1 修掉的漂移。
+- `live-diagnosis/` 里的 User-Agent 记录停在 `dsh-opencode-free/0.2.0`，那正是 0.3.0 修掉的漂移。
 
 ## 教训值得留下
 

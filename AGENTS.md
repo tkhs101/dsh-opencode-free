@@ -3,16 +3,10 @@
 Use this guide when a user asks an Agent to install, update, verify, or remove
 `dsh-opencode-free`.
 
-> **This repository is a fork of `x5427876/dsh-opencode-free` and is not
-> published to npm.** The package named `dsh-opencode-free` on the npm registry
-> belongs to the upstream author. A `dsh plugin add dsh-opencode-free@<version>`
-> therefore installs **upstream's** build, not this fork's — never run it as an
-> install step. Build a tarball and install that with `file:` instead.
-
 ## Safety
 
 - Confirm the target DSH profile; use `web` only when it is the user's target.
-- Use the pinned `v0.3.2` release assets for a first install, never a moving branch.
+- Use the pinned `v0.3.0` release assets for a first install, never a moving branch.
 - Never print API keys, credential stores, or request bodies.
   `dsh --profile <name> --dump-config` prints the profile's `cordis.patch.yml`
   **verbatim with no redaction**, and the optional Zen key lives in its
@@ -46,27 +40,14 @@ it is already listed, use update or uninstall instead of installing again.
 
 ## Existing DSH CLI
 
-This fork has no npm release, so there is no registry name to resolve. Build a
-tarball from a clone and install that:
+When `dsh`, Node.js, and pnpm are already available, install the pinned npm
+package directly:
 
 ```sh
-git clone https://github.com/tkhs101/dsh-opencode-free.git
-cd dsh-opencode-free
-pnpm install --frozen-lockfile
-pnpm run build
-pnpm pack --pack-destination .
-
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
+dsh plugin --profile web add dsh-opencode-free@0.3.0
 ```
 
-Update — there is no registry to re-resolve, so rebuild and re-add:
-
-```sh
-pnpm run build && pnpm pack --pack-destination .
-dsh plugin --profile web remove dsh-opencode-free
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
-```
-
+Update with `dsh plugin --profile web update dsh-opencode-free`.
 Uninstall the current package with:
 
 ```sh
@@ -88,10 +69,9 @@ PROFILE_DIR="$DSH_ROOT/profiles/desktop"    # or .../profiles/web
 
 Then, for each target profile (`desktop`, `web`):
 
-1. `pnpm pack` the plugin into a tarball (or download the pinned release tarball
-   from `https://github.com/tkhs101/dsh-opencode-free/releases`).
+1. `pnpm pack` the plugin into a tarball (or download the pinned release tarball).
 2. Copy the tarball into `$PROFILE_DIR`.
-3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.3.2.tgz"` to
+3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.3.0.tgz"` to
    `$PROFILE_DIR/package.json` `dependencies` and add `dsh-opencode-free`
    to its `dsh.profile.bundles` array.
 4. Run `pnpm install` in `$PROFILE_DIR`.
