@@ -1690,6 +1690,13 @@ test('re-confirming an old death removes nothing and is marked as such', async (
     delete onDisk.probes['big-pickle'].swept
     await writeFile(path, JSON.stringify(onDisk))
 
+    // A manual round is floored at five minutes, and this catalogue carries a
+    // round from a moment ago, so `forceProbes()` would refuse to run and the
+    // re-check would fall to the warm start's fire-and-forget round — which this
+    // test then read whenever it happened to land. Move the clock past the
+    // floor, the way every other test that wants a SECOND round does, so this
+    // one drives the round it is actually about (audit 2026-10-01).
+    pastProbeFloor(clock)
     const probe = recordingProber({ 'big-pickle': dead })
     const reopened = catalogWith({
       dir,
@@ -1773,6 +1780,17 @@ test('a finished round report survives a restart', async () => {
     )
     assert.equal(after.results['big-pickle'].status, 'ok', 'including the per-row verdict')
     assert.equal(after.results['deepseek-v4-flash-free'].code, 'dead', 'and the reason a row failed')
+    // The whole ROW, not just the fields the read path happens to mention. The
+    // write path and the read path were not inverses of each other: `removed`
+    // survived only in its `false` form, so a row that DID remove a model came
+    // back as "no removal claim" — and `isFreshRemoval` reads a missing
+    // `removed` as a fresh removal, which is the opposite of what happened
+    // (audit 2026-10-01).
+    assert.deepEqual(
+      after.results['deepseek-v4-flash-free'],
+      before.results['deepseek-v4-flash-free'],
+      'a restored report is the report that was written, row for row',
+    )
   })
 })
 
@@ -2820,4 +2838,56 @@ test('a round that learns nothing leaves the picker alone', async () => {
   assert.equal(state.probeUntrusted, true, 'but the round is marked untrusted')
   assert.equal(state.probeRun.results['a-free'].code, 'anon-gated', 'and the row still says why')
   assert.equal(state.probeRun.results['a-free'].http, 403)
+})
+
+test('a round waits for the warm cache read before it judges anything', async () => {
+  // The round reads `state.probes` twice: to decide what is already settled,
+  // and to fill `priorVerdict`, which is the only thing that separates a fresh
+  // removal from a re-confirmed old one. Both arrive with the warm read — which
+  // is fire-and-forget, so a round could start before any of it was in memory.
+  // Then every prior verdict reads as "unknown": settled models are re-asked,
+  // and a model removed hours ago is reported as removed just now.
+  //
+  // This is the seam that made it observable. The factory-level case cannot
+  // pin it: whether the read lands first is local filesystem timing, and
+  // removing this wait does not make any other test fail (audit 2026-10-01).
+  const state = initialState([])
+  state.models = ['a-free'].map((id) => ({ id, name: id, api: 'openai-completions' }))
+
+  const asked = []
+  let settleWarm = () => undefined
+  const warm = new Promise((resolve) => {
+    settleWarm = resolve
+  })
+  const round = runProbeRound(state, {
+    path: join(tmpdir(), 'never-written'),
+    fetchImpl: async () => {
+      throw new Error('no network')
+    },
+    now: () => 1_700_000_000_000,
+    userAgent: undefined,
+    ttlMs: 86_400_000,
+    warmReadTimeoutMs: 2_000,
+    warm,
+    template: state.models[0],
+    knownApis: undefined,
+    probe: async (m) => {
+      asked.push(m.id)
+      return { kind: 'ok' }
+    },
+    listZenIds: async () => ['a-free'],
+    hidden: undefined,
+  })
+
+  // Generously past the point where a round that did not wait would have asked.
+  await tick()
+  await tick()
+  await tick()
+  assert.deepEqual(asked, [], 'no model is asked, and no verdict judged, before the cache is in memory')
+  assert.equal(state.probeRun.running, false, 'and no round is announced as in progress')
+
+  settleWarm()
+  await round
+  assert.deepEqual(asked, ['a-free'], 'the round runs once the cache has landed')
+  assert.equal(state.probeRun.done, 1)
 })

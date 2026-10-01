@@ -18,6 +18,61 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `0.2.1` are not here, so they are not described. It is a predecessor of this
 > release, not something this release replaces or rolls back.
 
+## [0.3.3] - 2026-10-01
+
+Three defects that `0.3.2` shipped with. The first two were found by running the
+suite on a Linux CI runner rather than on a developer machine, and neither
+reproduced locally — which is why they survived the `0.3.2` release gate. The
+third was found by that CI failure: the flake that exposed the second one had a
+real cause underneath it, and measuring it properly turned up a third.
+
+### Fixed
+
+- **A round could judge models against an empty probe map.** The last round's
+  report and the probe history both arrive with the warm cache read, which is
+  fire-and-forget — and a round started before that read landed read every
+  prior verdict as "unknown". It therefore re-asked models whose answer it
+  already had, and reported a model removed hours earlier as removed just now:
+  the same misdating below, arriving through a different door. `sync()` already
+  waited on that promise for the same reason; a round now does too, bounded by
+  the same timeout.
+  (`src/catalog.ts` `runProbeRound`)
+
+- **A restart could re-announce a removal that had already happened.** The last
+  round's report is persisted beside the verdicts and restored on start, but the
+  two paths were not inverses of each other: only the `false` form of `removed`
+  survived the write, so a row that really did take a model out of the list came
+  back with no flag at all. The card reads a missing `removed` as a fresh
+  removal — that is the documented behaviour for a backend that does not emit
+  the field — so after a restart the panel dated a removal to the round you had
+  just watched, while the model had actually left hours earlier. Both directions
+  are preserved now, and the round-report test asserts the whole restored row
+  rather than the two fields that happened to come through.
+  (`src/catalog.ts` `readLastRound`; `tests/catalog.test.mjs`)
+
+- **The audit gate failed every run.** `.github/workflows/ci.yml` passed
+  `pnpm audit --audit-level=high --no-fund`, and `--no-fund` is npm's flag — pnpm's
+  audit has never accepted it, so the step exited non-zero with `Unknown option:
+  'fund'` on all three Node versions. The comment beside the line claimed the
+  flag "keeps the funding banner out of CI output": a claim that had never been
+  executed, on a gate that had therefore never once been green.
+
+### Also fixed
+
+- **A test raced the round it was asserting about.** "Re-confirming an old death"
+  never drove its own round: the manual-round floor compares against a frozen
+  clock, so `forceProbes()` refused, and the re-check it then read was the warm
+  start's fire-and-forget round — whichever report happened to be mounted. It
+  passed 165/165 locally and on Node 22 and 26, and failed on Node 24 about a
+  third of the time. It now moves the clock past the floor, like every other
+  test that wants a second round, so it judges the round it is about.
+
+- **A guard for the first fix above, at the seam that made it visible.** Whether
+  the warm read lands before a round starts is local filesystem timing, so no
+  factory-level test can pin it: removing the wait fails nothing. The new case
+  drives `runProbeRound` with a warm read it controls, and fails on the spot if
+  the wait is removed.
+
 ## [0.3.2] - 2026-09-30
 
 Competitive review of the three sibling plugins (`opencode2dsh`,
@@ -388,6 +443,7 @@ repository; the supporting commit and code reference for each one is in
   before the request.
   (`e4b9124`; `src/index.ts:422`)
 
+[0.3.3]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.3
 [0.3.2]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.2
 [0.3.1]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.1
 [0.3.0]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.0

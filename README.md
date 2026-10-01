@@ -51,6 +51,7 @@ dsh --version
 
 | Plugin | DSH |
 |---|---|
+| `0.3.3` | `0.2.0-rc.2` |
 | `0.3.2` | `0.2.0-rc.2` |
 | `0.3.1` | `0.2.0-rc.2` |
 | `0.3.0` | `0.2.0-rc.1` |
@@ -74,7 +75,7 @@ pnpm install --frozen-lockfile
 pnpm run build
 pnpm pack --pack-destination .
 
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.3.tgz
 ```
 
 Replace `web` with your target profile.
@@ -104,7 +105,7 @@ Update or remove:
 # update — no registry to resolve, so rebuild and re-add:
 pnpm run build && pnpm pack --pack-destination .
 dsh plugin --profile web remove dsh-opencode-free
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.3.tgz
 
 # or just remove:
 dsh plugin --profile web remove dsh-opencode-free

@@ -571,7 +571,13 @@ function readLastRound(value: unknown): CatalogCacheRecord["lastRound"] {
           ms: entry.ms,
           code: typeof entry.code === "string" ? entry.code : "unknown",
           http: typeof entry.http === "number" && isFinite(entry.http) ? entry.http : 0,
-          ...(entry.removed === false ? { removed: false } : {}),
+          // Both directions, or the report that comes back is not the report
+          // that was written. Keeping only the `false` form meant a row that
+          // really DID remove a model came back with no flag — and
+          // `isFreshRemoval` reads a missing `removed` as a fresh removal, so
+          // a restart re-announced a removal for a round that finished hours
+          // ago (audit 2026-10-01).
+          ...(typeof entry.removed === "boolean" ? { removed: entry.removed } : {}),
           ...(typeof entry.marker === "string" && entry.marker !== "" ? { marker: entry.marker } : {}),
         };
       }
@@ -1299,6 +1305,19 @@ function runProbeSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
  */
 export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Promise<void> {
   const { path, hidden, probe } = deps;
+  // A round reads `state.probes` twice — to decide what is already settled, and
+  // to answer `priorVerdict`, which is the only thing that lets it tell a fresh
+  // removal from a re-confirmed old one — and `state.models` to decide what to
+  // ask. All of it arrives with the warm cache read, which is fire-and-forget.
+  //
+  // A round that started before that read landed therefore computed every prior
+  // verdict as "unknown": it re-asked models it already knew the answer for, and
+  // reported old deaths as removals that had just happened. `sync()` already
+  // waits on this same promise for this same reason; a round has to as well.
+  await Promise.race([
+    deps.warm,
+    new Promise<void>((resolve) => setTimeout(resolve, deps.warmReadTimeoutMs).unref?.()),
+  ]);
   const stamp = deps.now();
   // Cheap authoritative availability first. One `GET /zen/v1/state.models` answers
   // "does Zen serve this id at all" without spending inference quota, so a
