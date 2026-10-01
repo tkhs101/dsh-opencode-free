@@ -2891,3 +2891,148 @@ test('a round waits for the warm cache read before it judges anything', async ()
   assert.deepEqual(asked, ['a-free'], 'the round runs once the cache has landed')
   assert.equal(state.probeRun.done, 1)
 })
+
+test('a catalogue refresh does not overwrite a probe round that is in flight', async () => {
+  // A 200 refresh re-adopts the whole cache record, and `adopt` is also what
+  // restores the finished-round report at startup. With both unconditional, a
+  // refresh during a round swapped the live `probeRun` (running:true) for the
+  // previous round's snapshot (running:false, done:2) — and the round carried
+  // on counting `done` on the object that had been swapped in, so the panel
+  // reported 4/2 and persisted the wrong tally (review 2026-10-01).
+  //
+  // The 304 path never reaches `adopt`, which is why it never showed this.
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    let hold = false
+    let enterRound = () => undefined
+    let releaseRound = () => undefined
+    const paused = new Promise((resolve) => {
+      enterRound = resolve
+    })
+    const held = new Promise((resolve) => {
+      releaseRound = resolve
+    })
+
+    const probe = async (model) => {
+      if (hold && model.id === 'big-pickle') {
+        enterRound()
+        await held
+      }
+      return { kind: 'ok' }
+    }
+    const fetchImpl = () => fakeResponse({ etag: '"v1"', body: apiBody() })
+
+    const catalog = catalogWith({ dir, clock, fetchImpl, probe })
+    await catalog.forceRefresh()
+    await catalog.forceProbes()
+    const finished = catalog.probeProgress()
+    assert.equal(finished.running, false, 'the first round finished')
+    assert.ok(finished.done > 0)
+
+    pastProbeFloor(clock)
+    hold = true
+    const round = catalog.forceProbes()
+    await paused
+    const running = catalog.probeProgress()
+    assert.equal(running.running, true, 'the second round is in flight')
+
+    // A real body, so this is the 200 branch and not the 304 one.
+    await catalog.forceRefresh()
+    const afterRefresh = catalog.probeProgress()
+    assert.equal(afterRefresh.running, true, 'a refresh leaves a live round alone')
+    assert.equal(afterRefresh.done, running.done, 'and does not rewind its tally')
+
+    releaseRound()
+    await round
+    const final = catalog.probeProgress()
+    assert.equal(final.running, false)
+    assert.equal(final.done, running.total, 'the round finished exactly once')
+    const persisted = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+    assert.equal(persisted.lastRound.done, running.total, 'and that is what was persisted')
+    assert.ok(
+      persisted.lastRound.done <= persisted.lastRound.total,
+      'a tally can never exceed the round it describes',
+    )
+  })
+})
+
+test('a channel the probe measured is the one the model is routed on, across restarts', async () => {
+  // Everything about a model's channel is inference until something MEASURES
+  // it: a builtin table entry, a models.dev signal, or a provider default. That
+  // inference is what sends a request down a channel the model is not served on,
+  // and the answer it gets back — "model not supported" — is indistinguishable
+  // from a dead model without asking the other channel.
+  //
+  // The sweep exists to ask. But the sweep's answer was thrown away: the probe
+  // reported `ok` on the second channel and the model went on being routed by
+  // the first, so the very failure the probe had just ruled out came straight
+  // back on the next chat (review 2026-10-01).
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    const cache = join(dir, 'catalog.json')
+    // big-pickle is inferred onto openai-completions by the fixture. This prober
+    // says it answered on the other one.
+    const probe = async (model) =>
+      model.id === 'big-pickle' ? { kind: 'ok', api: 'openai-responses', ms: 120 } : { kind: 'ok' }
+
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v1"', body: apiBody() })]),
+      probe,
+    })
+    await catalog.forceRefresh()
+    // What inference alone put on every model, before anything measured one.
+    const inferred = Object.fromEntries(catalog.current().models.map((m) => [m.id, m.api]))
+    await catalog.forceProbes()
+
+    const measured = (c) => c.current().models.find((m) => m.id === 'big-pickle')?.api
+    assert.equal(measured(catalog), 'openai-responses', 'the measured channel wins over the inference')
+
+    const onDisk = JSON.parse(await readFile(cache, 'utf8'))
+    assert.equal(
+      onDisk.probes['big-pickle'].api,
+      'openai-responses',
+      'and it is on disk, because inference is re-run on every boot',
+    )
+
+    // A fresh process over the same directory: the half that was missing.
+    const restarted = catalogWith({
+      dir,
+      clock,
+      fetchImpl: scriptedFetch([]),
+      baselineModels: baseline(),
+    })
+    await waitFor(() => restarted.current().source === 'models.dev')
+    assert.equal(measured(restarted), 'openai-responses', 'a restart does not revert to the inference')
+
+    // And a model nobody measured is left exactly where inference put it — the
+    // override is per model, not a wholesale re-route.
+    for (const model of restarted.current().models) {
+      if (model.id === 'big-pickle') continue
+      assert.equal(model.api, inferred[model.id], `${model.id} still follows the catalogue`)
+    }
+  })
+})
+
+test('a refusal never records a channel', async () => {
+  // Only an ANSWER names a channel. A refusal is evidence that this one did not
+  // work, which is not evidence that another would — recording it would route
+  // chat down a channel the probe just watched fail.
+  await withTempDir(async (dir) => {
+    const probe = async (model) =>
+      model.id === 'big-pickle'
+        ? { kind: 'dead', reason: 'gone', code: 'dead', http: 404, api: 'openai-responses' }
+        : { kind: 'ok' }
+    const catalog = catalogWith({
+      dir,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v1"', body: apiBody() })]),
+      probe,
+    })
+    await catalog.forceRefresh()
+    await catalog.forceProbes()
+    const record = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8')).probes['big-pickle']
+    assert.equal(record.verdict, 'dead')
+    assert.equal(record.api, undefined, 'a dead verdict carries no channel')
+  })
+})

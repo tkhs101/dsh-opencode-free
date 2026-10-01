@@ -117,7 +117,7 @@ export function freeModels(): Model<Api>[] {
  * `zen-provider` does not import `catalog` at runtime (only its type), so
  * reading it the other way round introduces no cycle.
  */
-export const PLUGIN_VERSION = "0.3.3";
+export const PLUGIN_VERSION = "0.3.4";
 
 /** Derived, not written out: a second hardcoded copy is a second thing to forget. */
 export const OPENCODE_USER_AGENT = `opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14 dsh-opencode-free/${PLUGIN_VERSION}`;
@@ -858,7 +858,12 @@ export function isModelUnavailableFailure(status: number, bodyText: string): boo
  * says "no status ever arrived" rather than repeating a zero.
  */
 export type ProbeOutcome =
-  | { kind: "ok"; usage?: ProbeUsage }
+  | {
+      kind: "ok";
+      usage?: ProbeUsage;
+      /** The channel that ANSWERED, when one did (review 2026-10-01). */
+      api?: Api;
+    }
   | { kind: "dead"; reason: string; code: "dead"; http: number }
   | {
       kind: "inconclusive";
@@ -1044,19 +1049,6 @@ function isCallerScoped(outcome: ProbeOutcome): boolean {
 }
 
 /**
- * How much a conclusion is worth, so a later channel's weaker answer cannot
- * overwrite a stronger one. Asking both channels means seeing two different
- * failures, and the LAST one is not automatically the truest: a positive "this
- * model is gone" outranks a later "no conclusion", because `dead` is the only
- * verdict that removes a model and it must not be lost to noise.
- */
-function strength(outcome: ProbeOutcome): number {
-  if (outcome.kind === "ok") return 3;
-  if (outcome.kind === "dead") return 2;
-  return 1;
-}
-
-/**
  * The token counts the upstream reported, if it reported any.
  *
  * Deliberately forgiving about shape: this rides on whatever pi-ai parsed out
@@ -1214,12 +1206,24 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
  * positive "this model is gone" is held, not returned, until the other channels
  * have had their chance — because that sentence is also exactly what the wrong
  * channel answers with, and `dead` is permanent.
+ *
+ * `dead` additionally requires that every channel that was asked FINISHED. A
+ * channel that never answered — a dropped socket, a timeout, an unrecognised
+ * body — has not said anything about the model, and "this request did not
+ * complete" is not "this model is gone". Ranking a `dead` above such silence
+ * (which is what a strength comparison does) let one transport failure on the
+ * second channel turn a wrong-channel 404 into a permanent removal: the 404 was
+ * the wrong channel talking, and the channel that might have contradicted it was
+ * never reached. Silence vetoes; it does not merely lose an argument.
  */
 export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
   // Null, not a placeholder conclusion: a placeholder would tie with a real
   // inconclusive on strength and then win the "first seen wins" tie-break,
   // replacing a transport failure with "no channel answered".
   let last: ProbeOutcome | null = null;
+  // The first channel that failed to answer, kept for its reason and status —
+  // the row has to say WHY it could not tell, not just that it could not.
+  let silent: ProbeOutcome | null = null;
   for (const api of probeChannels(model)) {
     // A channel swap is a different transport, so it must not inherit the
     // previous channel's `compat` overrides — the same rule the catalogue's
@@ -1228,9 +1232,15 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
     const outcome = await probeOnce(variant, deps);
     // An answer ends the question. So does anything about the caller, which
     // every channel would report identically.
-    if (outcome.kind === "ok" || isCallerScoped(outcome)) return outcome;
-    if (last === null || strength(outcome) > strength(last)) last = outcome;
+    if (outcome.kind === "ok") return { ...outcome, api: variant.api };
+    if (isCallerScoped(outcome)) return outcome;
+    if (outcome.kind === "dead") {
+      last = outcome;
+      continue;
+    }
+    if (silent === null) silent = outcome;
   }
+  if (silent !== null) return silent;
   return (
     last ?? {
       kind: "inconclusive",
@@ -1685,7 +1695,7 @@ export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefine
   // across reloads, but nothing ever wrote them back onto the module objects,
   // so a disabled plugin left every node:http request in the process wrapped
   // (found by audit 2026-09-30).
-  const replaced: Array<[NodeHttpModule, string, unknown]> = [];
+  const replaced: Array<[NodeHttpModule, string, unknown, unknown]> = [];
   for (const [modName, mod] of targets) {
     for (const fnName of ["request", "get"]) {
       const key = `${modName}.${fnName}`;
@@ -1708,12 +1718,20 @@ export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefine
         }
       };
       mod[fnName] = wrapped as (...args: never[]) => unknown;
-      replaced.push([mod, fnName, original]);
+      replaced.push([mod, fnName, original, wrapped]);
     }
   }
+  // Restore, but only what is still OURS. This is the ownership check the
+  // fetch guard already makes one function above: a plugin that wrapped
+  // `http.request` after us is not ours to remove, and restoring over its head
+  // silently disabled it. It also makes repeated disposal a true no-op, and it
+  // fixes the reload order — an older patch's disposer used to strip the newer
+  // patch's wrapper and leave the process unwrapped.
   return () => {
-    for (const [mod, fnName, original] of replaced) {
-      if (typeof original === "function") mod[fnName] = original as (...args: never[]) => unknown;
+    for (const [mod, fnName, original, wrapped] of replaced) {
+      if (typeof original === "function" && mod[fnName] === wrapped) {
+        mod[fnName] = original as (...args: never[]) => unknown;
+      }
     }
   };
 }

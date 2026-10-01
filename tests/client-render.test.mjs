@@ -1281,3 +1281,106 @@ test('unmounting mid-round stops the poll chain', async () => {
   assert.equal(probeGets, atUnmount, 'no further polls after unmount — the timer was really cleared')
   mounted.dispose()
 })
+
+test('a watched automatic round re-reads the catalogue when it ends', async () => {
+  // The reload after a finished round used to run only for a round a click had
+  // awaited. An automatic round — the daily one, or the lazy read that starts
+  // one — left the card holding the metadata it loaded at mount: a stale "last
+  // probed" time and stale inconclusive wording, until the page was reopened
+  // (review 2026-10-01).
+  //
+  // The card is mounted while the round is ALREADY running, which is how a page
+  // opened during the daily round meets it. The catalogue answers differently
+  // before and after the round ends, so what the card SHOWS is the evidence —
+  // counting requests would only measure this harness's own mount loop.
+  const live = {
+    running: true,
+    total: 3,
+    done: 1,
+    current: 'big-pickle',
+    results: { 'big-pickle': { status: 'ok', ms: 90 } },
+    startedAt: 1759146617000,
+  }
+  const done = {
+    running: false,
+    total: 3,
+    done: 3,
+    current: null,
+    results: {
+      'big-pickle': { status: 'ok', ms: 90 },
+      'space-bunny-free': { status: 'failed', ms: 15003, code: 'timeout', http: 0 },
+      'muse-spark-1.3-contributor-free': { status: 'ok', ms: 210 },
+    },
+    startedAt: 1759146617000,
+  }
+  // Never probed, so there is no time to show, and nothing was measured. This is
+  // what the reader was looking at instead of the round they had just watched.
+  const STALE = { ...SNAPSHOT, probedAt: 0, probeInconclusive: false }
+  const FRESH = { ...SNAPSHOT, probeInconclusive: true }
+  let phase = 'live'
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'GET') {
+        return { ok: true, json: async () => (phase === 'done' ? done : live) }
+      }
+      return { ok: true, json: async () => (phase === 'done' ? FRESH : STALE) }
+    },
+  })
+  try {
+    await mounted.fireTimers()
+    const before = collect(mounted.rerender()).texts
+    assert.ok(
+      before.some((t) => t.includes('1/3')),
+      'the automatic round is followed',
+    )
+    assert.equal(
+      before.some((t) => t.includes('本轮有模型没能测到')),
+      false,
+      'and nothing has been measured yet',
+    )
+    assert.equal(
+      before.some((t) => t.includes('1970')),
+      false,
+      'a catalogue that has never been probed shows no 1970 stamp at all',
+    )
+
+    phase = 'done'
+    await mounted.fireTimers()
+    await mounted.fireTimers()
+    const after = collect(mounted.rerender()).texts
+    assert.ok(
+      after.some((t) => t.includes('探测完成')),
+      'the finished report is shown',
+    )
+    assert.ok(
+      after.some((t) => t.includes('本轮有模型没能测到')),
+      'and the card re-read the catalogue: the inconclusive notice is the round that just ran',
+    )
+  } finally {
+    mounted.dispose()
+  }
+})
+
+test('the probe timestamp needs a real time, not the epoch', async () => {
+  // `0` is what a catalogue that has never been probed reports, and rendering it
+  // as a date put a 1970 stamp on the card (review 2026-10-01). Pinned here
+  // because the stamp is the only place the value reaches the reader.
+  const mounted = await renderCard({ hidden: [], snapshot: { ...SNAPSHOT, probedAt: 0 } })
+  try {
+    await mounted.fireTimers()
+    const texts = collect(mounted.rerender()).texts
+    assert.equal(
+      texts.some((t) => t.includes('1970')),
+      false,
+      'never probed shows no stamp',
+    )
+    assert.equal(
+      texts.some((t) => t.includes('上次探测')),
+      false,
+      'and no "last probed" line at all',
+    )
+  } finally {
+    mounted.dispose()
+  }
+})

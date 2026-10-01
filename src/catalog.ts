@@ -468,9 +468,47 @@ export interface ProbeRecord {
    * leaving them permanent is how a working model stays missing forever.
    */
   readonly swept?: boolean;
+  /**
+   * The channel this model actually ANSWERED on, when a probe found one.
+   *
+   * Everything else about a model's channel is inference: a pi-ai builtin table
+   * entry, a models.dev signal, or a provider default. Inference is what sends a
+   * request down the wrong channel and gets "model not supported" back — which
+   * is indistinguishable from a dead model without asking the other channel. So
+   * when the sweep DID get an answer, that answer outranks every inference above:
+   * keeping it is the difference between a probe that says "ok" and a chat that
+   * then fails on the same model (review 2026-10-01).
+   *
+   * Persisted with the verdict, so the routing survives a restart. Only an `ok`
+   * carries one — a refusal says nothing about which channel would have worked.
+   */
+  readonly api?: string;
 }
 
 export type ProbeMap = Record<string, ProbeRecord>;
+
+/** The two channels this provider speaks, and so the only values worth keeping. */
+const MEASURED_CHANNELS: readonly string[] = ["openai-completions", "openai-responses"];
+
+export function isMeasuredChannel(value: unknown): value is Api {
+  return typeof value === "string" && MEASURED_CHANNELS.includes(value);
+}
+
+/**
+ * Point a model at the channel it was last MEASURED on.
+ *
+ * The single place that claim is applied. Two callers, one rule: the round when
+ * it records the answer, and the warm read when it adopts a cache that already
+ * holds one — which is the half that makes it survive a restart. Without both,
+ * the probe knows and nothing else does.
+ */
+export function applyMeasuredChannel(models: readonly Model<Api>[], probes: ProbeMap): void {
+  for (const model of models) {
+    const measured = probes[model.id]?.api;
+    if (measured === undefined || measured === model.api) continue;
+    (model as { api: Api }).api = measured;
+  }
+}
 
 /**
  * What the transport layer reports for one probe. Structurally compatible with
@@ -481,6 +519,12 @@ export type ProbeMap = Record<string, ProbeRecord>;
 export interface ProbeResult {
   readonly kind: ProbeVerdict | "inconclusive";
   readonly reason?: string;
+  /**
+   * The channel that answered, on an `ok` only. The catalogue stores it and
+   * routes the model by it, so a probe that succeeded on the second channel is
+   * not followed by a chat that fails on the first (review 2026-10-01).
+   */
+  readonly api?: Api;
   /** Machine-readable failure code; the panel localizes it rather than guessing. */
   readonly code?: string;
   /** HTTP status the transport saw; 0 means no response ever arrived. */
@@ -508,6 +552,7 @@ function readProbes(value: unknown): ProbeMap {
       at: entry.at,
       ...(typeof entry.reason === "string" && entry.reason !== "" ? { reason: entry.reason } : {}),
       ...(entry.swept === true ? { swept: true } : {}),
+      ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
     };
   }
   return probes;
@@ -1118,7 +1163,20 @@ export function planRound(
 }
 
 // Warm start: a valid state.cache restores the catalogue without any network.
-function adopt(state: CatalogState, deps: CatalogDeps, record: CatalogCacheRecord): void {
+function adopt(
+  state: CatalogState,
+  deps: CatalogDeps,
+  record: CatalogCacheRecord,
+  // Restoring the finished-round report belongs to STARTUP. It is what makes a
+  // restarted host show the last outcome instead of an empty progress area —
+  // but it is a snapshot of a round that already ended, and an ordinary sync
+  // re-adopting it mid-round replaced a live `probeRun` (running:true) with
+  // the previous one (running:false, done:2). The round then carried on
+  // incrementing `done` on that swapped-in object, so the panel reported 4/2 and
+  // the wrong tally was persisted (review 2026-10-01). A refresh updates the
+  // catalogue and the verdicts; it has nothing to say about a round in flight.
+  restoreRound = false,
+): void {
   const derived = derive(record.models, { knownApis: deps.knownApis, template: deps.template });
   // An empty state.models dictionary is NOT a catalogue — it is a fetch that failed
   // and got persisted anyway (a round writes one when the catalogue fetch
@@ -1133,12 +1191,17 @@ function adopt(state: CatalogState, deps: CatalogDeps, record: CatalogCacheRecor
     state.updatedAt = record.fetchedAt;
   }
   if (Object.keys(record.probes).length > 0) state.probes = { ...record.probes };
+  // A channel a previous process MEASURED, re-applied. Without this the
+  // measurement is on disk and ignored, so a restart silently reverted every
+  // model to its inferred channel and the very failure the probe ruled out
+  // came back (review 2026-10-01).
+  applyMeasuredChannel(state.models, state.probes);
   if (record.lastProbeAt > state.lastProbeAt) state.lastProbeAt = record.lastProbeAt;
   // The report of a round that already finished, so a restart shows the
   // outcome instead of an empty progress area. `running` stays false: this is
   // a completed round, not one to follow.
   const restored = record.lastRound;
-  if (restored !== undefined && restored.total > 0) {
+  if (restoreRound && restored !== undefined && restored.total > 0) {
     state.probeRun = {
       running: false,
       total: restored.total,
@@ -1404,6 +1467,9 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         verdict: outcome.kind,
         at: stamp,
         ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
+        // Only an answer names a channel. A refusal is evidence that the
+        // channel did not work, not evidence that another one would.
+        ...(outcome.kind === "ok" && isMeasuredChannel(outcome.api) ? { api: outcome.api } : {}),
         // Reaching here means the prober exhausted every channel before
         // concluding, so this `dead` is earned and can be final.
         ...(outcome.kind === "dead" ? { swept: true } : {}),
@@ -1413,6 +1479,10 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
     state.probeRun.running = false;
     state.probeRun.current = null;
   }
+  // A model this round got an answer on is now routed by MEASUREMENT rather
+  // than by inference, for the rest of this process and — through the probe
+  // record — for every restart after it.
+  applyMeasuredChannel(state.models, state.probes);
   // The round marker is written even when nothing concluded: it is the only
   // thing that stops a fully-gated day from re-probing on every single read.
   state.lastProbeAt = stamp;
@@ -1500,7 +1570,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         // Adopted whatever its age: a stale state.cache is still a far better answer
         // than the offline floor, and `ensureFresh` revalidates on the first read
         // in the background rather than making the user wait for 5.2MB.
-        adopt(state, deps, found);
+        adopt(state, deps, found, true);
       })
       .catch(() => undefined)
       .finally(settleWarm);

@@ -12,7 +12,7 @@ Use this guide when a user asks an Agent to install, update, verify, or remove
 ## Safety
 
 - Confirm the target DSH profile; use `web` only when it is the user's target.
-- Use the pinned `v0.3.3` release assets for a first install, never a moving branch.
+- Use the pinned `v0.3.4` release assets for a first install, never a moving branch.
 - Never print API keys, credential stores, or request bodies.
   `dsh --profile <name> --dump-config` prints the profile's `cordis.patch.yml`
   **verbatim with no redaction**, and the optional Zen key lives in its
@@ -56,7 +56,7 @@ pnpm install --frozen-lockfile
 pnpm run build
 pnpm pack --pack-destination .
 
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.3.tgz
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.4.tgz
 ```
 
 Update — there is no registry to re-resolve, so rebuild and re-add:
@@ -64,7 +64,7 @@ Update — there is no registry to re-resolve, so rebuild and re-add:
 ```sh
 pnpm run build && pnpm pack --pack-destination .
 dsh plugin --profile web remove dsh-opencode-free
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.3.tgz
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.4.tgz
 ```
 
 Uninstall the current package with:
@@ -91,7 +91,7 @@ Then, for each target profile (`desktop`, `web`):
 1. `pnpm pack` the plugin into a tarball (or download the pinned release tarball
    from `https://github.com/tkhs101/dsh-opencode-free/releases`).
 2. Copy the tarball into `$PROFILE_DIR`.
-3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.3.3.tgz"` to
+3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.3.4.tgz"` to
    `$PROFILE_DIR/package.json` `dependencies` and add `dsh-opencode-free`
    to its `dsh.profile.bundles` array.
 4. Run `pnpm install` in `$PROFILE_DIR`.

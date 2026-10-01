@@ -871,13 +871,25 @@ window.__ModuleLoader__.load({
 					startPolling(reading);
 					return;
 				}
+				// Whether this card was WATCHING this round, or is only looking
+				// at a report that was already on disk when the page opened.
+				var followed = pollRef.current.active;
 				pollRef.current.active = false;
 				stopPolling();
-				if (!pollRef.current.awaiting) return;
-				pollRef.current.awaiting = false;
-				setProbing(false);
-				// The round may have removed a model, so the offered list is
-				// re-read rather than assumed unchanged.
+				if (pollRef.current.awaiting) {
+					pollRef.current.awaiting = false;
+					setProbing(false);
+				}
+				if (!followed) return;
+				// Either kind of round this card WATCHED may have removed a
+				// model, and either kind leaves the rest of the card stale —
+				// the last probed time, the inconclusive notice. The automatic
+				// round reloaded only when a click had awaited it, so a card
+				// left open across one kept a 1970 timestamp and stale
+				// wording until it was reopened (review 2026-10-01). `followed`
+				// is what separates "this round finished while I was
+				// watching" from "this report was already on disk" — the
+				// latter must not spend a request on every page open.
 				loadCatalog().then(function (next) {
 					if (next !== null) setCatalog(next);
 				});
@@ -1168,7 +1180,11 @@ window.__ModuleLoader__.load({
 			}
 
 			var stamp = null;
-			if (catalog !== undefined && catalog !== null && typeof catalog.probedAt === "number") {
+			// `0` is what a catalogue that has never been probed reports, and it is
+				// not 1970: a round that has never run has no time. Rendering it put a
+				// 1970 stamp and stale inconclusive wording on a card that simply had
+				// not probed yet (review 2026-10-01).
+				if (catalog !== undefined && catalog !== null && typeof catalog.probedAt === "number" && catalog.probedAt > 0) {
 				var stampText = stampOf(catalog.probedAt);
 				if (stampText !== "") {
 					stamp = E("p", { className: "opf-stamp" },

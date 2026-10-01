@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,6 +19,7 @@ import {
   applyZenHeadersToNodeHeaders,
   applyZenIdentity,
   PROBE_MAX_TOKENS,
+  patchNodeHttpForZen,
   probeModel,
   ZEN_FAILURE_GUIDANCE,
   freeModels,
@@ -995,10 +997,66 @@ test('GUARD: a gate or a quota wall is never retried on another channel', async 
   }
 })
 
-test('GUARD: the strongest conclusion across channels wins, not the last one', async () => {
-  // Two channels produce two different failures, and the last is not
-  // automatically the truest. A positive "gone" must not be overwritten by a
-  // later "no conclusion" — that verdict is the only one that removes a model.
+test('GUARD: dead is only concluded when every channel that was asked finished', async () => {
+  // A 404 down the wrong channel reads exactly like a dead model — that is why
+  // the sweep exists at all. But a channel that never FINISHED has said nothing
+  // about the model, and "this request did not complete" is not "this model is
+  // gone". Ranking `dead` above that silence (which is what the old strength
+  // comparison did) meant one dropped socket on the second channel turned a
+  // wrong-channel 404 into a permanent removal.
+  //
+  // Silence vetoes; it does not merely lose an argument.
+  const GONE = () =>
+    new Response(JSON.stringify({ error: { message: 'Model does not exist' } }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  const TRANSPORT = () => {
+    const e = new TypeError('fetch failed')
+    e.cause = Object.assign(new Error('socket disconnected'), { code: 'ECONNRESET' })
+    throw e
+  }
+  // Never answers. It rejects past the probe's own deadline with the error that
+  // deadline produces, so the row says "timeout" for the reason a real timeout
+  // does — rather than this test asserting a classification nothing can reach.
+  const TIMEOUT = () =>
+    new Promise((_, reject) => {
+      setTimeout(() => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), 30)
+    })
+
+  const p = plugin.zenProvider(
+    () => 'probe-session',
+    () => undefined,
+  )
+  const model = p.getModels().find((m) => m.api === 'openai-completions')
+
+  for (const [label, silent] of [
+    ['transport', TRANSPORT],
+    ['timeout', TIMEOUT],
+  ]) {
+    for (const order of ['dead-first', 'silent-first']) {
+      let calls = 0
+      const outcome = await probeModel(model, {
+        provider: p,
+        apiKey: 'public',
+        timeoutMs: 5,
+        fetchImpl: async () => {
+          calls += 1
+          const silentNow = order === 'dead-first' ? calls === 2 : calls === 1
+          return silentNow ? silent() : GONE()
+        },
+      })
+      assert.ok(calls >= 2, `${label}/${order}: both channels were asked`)
+      assert.equal(outcome.kind, 'inconclusive', `${label}/${order}: the removal is vetoed`)
+      assert.equal(outcome.code, label, `${label}/${order}: the row says why it could not tell`)
+    }
+  }
+})
+
+test('GUARD: every channel saying dead still removes the model', async () => {
+  // The other half of the veto. Silence blocking a conclusion must not become a
+  // way to never conclude one: when both channels positively refuse, that is a
+  // real verdict and it still removes the model.
   const p = plugin.zenProvider(
     () => 'probe-session',
     () => undefined,
@@ -1010,24 +1068,15 @@ test('GUARD: the strongest conclusion across channels wins, not the last one', a
     apiKey: 'public',
     fetchImpl: async () => {
       calls += 1
-      // First channel: positive gone. Later ones: an empty stream, which is
-      // only "no conclusion".
-      if (calls === 1) {
-        return new Response(JSON.stringify({ error: { message: 'Model does not exist' } }), {
-          status: 404,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-      return new Response(
-        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        {
-          headers: { 'Content-Type': 'text/event-stream' },
-        },
-      )
+      return new Response(JSON.stringify({ error: { message: 'Model does not exist' } }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      })
     },
   })
-  assert.ok(calls >= 2, 'it retried')
-  assert.equal(outcome.kind, 'dead', 'the positive signal survives the weaker later ones')
+  assert.ok(calls >= 2, 'both channels were asked')
+  assert.equal(outcome.kind, 'dead', 'a positive refusal on every channel is conclusive')
+  assert.equal(outcome.http, 404)
 })
 
 test('GUARD: placeholder efforts never reach the wire', async () => {
@@ -1370,5 +1419,61 @@ test('every Zen-bound path sends the same identity header names', async () => {
   // header in one and not the other is exactly the drift being guarded against.
   for (const name of Object.keys(STATIC_ZEN_HEADERS)) {
     assert.ok(expected.has(name), `STATIC_ZEN_HEADERS carries ${name}, which the owned list does not`)
+  }
+})
+
+test("disposing the node:http patch leaves another plugin's wrapper alone", async () => {
+  // node:http/https is a process-wide object that every other plugin and the
+  // host itself shares. Cleanup restored our replacement unconditionally, so a
+  // plugin that wrapped `http.request` AFTER us had its wrapper removed the
+  // moment this plugin was disabled — silently, with nothing to show for it.
+  // The fetch guard has made this ownership check since the start; the two
+  // paths now agree (review 2026-10-01).
+  const req = createRequire(import.meta.url)
+  const http = req('node:http')
+  const before = http.request
+  const restore = patchNodeHttpForZen()
+  try {
+    assert.notEqual(http.request, before, 'the patch installed its wrapper')
+
+    function laterPlugin(...args) {
+      return http.request(...args)
+    }
+    http.request = laterPlugin
+    restore()
+    assert.equal(http.request, laterPlugin, 'a later plugin keeps its wrapper')
+    // Repeated disposal and a reload are both no-ops now, rather than stripping
+    // whatever is on top and leaving the process unwrapped.
+    restore()
+    assert.equal(http.request, laterPlugin, 'and disposing twice changes nothing')
+  } finally {
+    http.request = before
+    restore()
+  }
+})
+
+test('disposing the node:http patch unwraps it when nothing wrapped after', async () => {
+  // The other half: the ownership check must not turn disposal into a no-op.
+  //
+  // "Unwrapped" is asserted as "our wrapper is gone" rather than "the function
+  // object is the one from before this test": the stash is process-wide and
+  // holds the first pristine value any test ever saw, so an earlier test in
+  // this file may have left a different one in place. What matters is that
+  // unloading removes what we installed.
+  const req = createRequire(import.meta.url)
+  const http = req('node:http')
+  const before = http.request
+  try {
+    const restore = patchNodeHttpForZen()
+    const ours = http.request
+    assert.notEqual(ours, before, 'the patch installed its wrapper')
+    restore()
+    assert.notEqual(http.request, ours, 'unloading removes it')
+    const restoreAgain = patchNodeHttpForZen()
+    assert.notEqual(http.request, ours, 'and reloading installs a fresh one')
+    restoreAgain()
+    assert.notEqual(http.request, ours, 'which unloading removes in turn')
+  } finally {
+    http.request = before
   }
 })

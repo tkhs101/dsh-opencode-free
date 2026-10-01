@@ -18,6 +18,52 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `0.2.1` are not here, so they are not described. It is a predecessor of this
 > release, not something this release replaces or rolls back.
 
+## [0.3.4] - 2026-10-01
+
+Four defects and one UI follow-up, all reported by an upstream review that ran
+the branch on a real DSH `0.2.0-rc.2` with an isolated profile. Four of the five
+are the same shape: **a probe round's conclusion was never used to correct the
+premises the probe depended on.** Full rationale in
+`.agents/notes/implemented/bug-fix/2026-10-01-probe-conclusions-correct-their-premises.md`.
+
+### Fixed
+
+- **A temporary transport failure could remove a model permanently.** One channel
+  refusing and a second channel dropping its socket still concluded `dead`,
+  because the verdict ranking put a positive refusal above "no conclusion" — and
+  `dead` is the only verdict that writes the terminal `swept` marker. But a
+  request that never completed has said nothing about the model, and a 404 down
+  the wrong channel looks exactly like a dead one. Silence now **vetoes** rather
+  than losing an argument: `dead` requires every channel that was asked to
+  finish. The row keeps the reason and status, so "we could not tell" still says
+  why. The strength comparison is gone — under this rule there is nothing left
+  for it to compare.
+- **A channel the probe won on was discarded.** A model whose probe answered on
+  the second channel reported `ok` and then went on being routed by the first,
+  so the very failure the probe had just ruled out came back on the next chat.
+  The measured channel is now carried on the probe outcome, stored with the
+  verdict, and applied in both places that matter: when the round records it, and
+  when a warm read adopts a cache that already holds one — the half that makes it
+  survive a restart. A **refusal** never records a channel: it is evidence that
+  this one did not work, not that another would.
+- **A catalogue refresh could overwrite a probe round that was in flight.** The
+  finished-round report is restored at startup, but `adopt()` restored it on
+  every sync too — so a refresh during a round swapped the live progress for the
+  previous round's snapshot and the round carried on counting on the swapped-in
+  object, ending at **4/2** and persisting that. Restoration is now startup-only.
+  The 304 path never reached `adopt`, which is why only a real body showed it.
+- **Disabling the plugin could disable another plugin.** The `node:http` disposer
+  restored the original methods unconditionally, so a plugin that wrapped
+  `http.request` after this one had its wrapper removed along with ours. It now
+  restores only what is still our own wrapper — the ownership check the fetch
+  guard has made since the start. That also fixes the reload order, where an
+  older patch's disposer used to strip a newer patch's wrapper.
+- **A watched automatic round left the card stale.** The catalogue was re-read
+  only for a round a click had awaited, so a page open across the daily round
+  kept a 1970 timestamp and outdated inconclusive wording until it was reopened.
+  The card now distinguishes a round it **watched** from a report that was
+  already on disk when the page opened — the second still costs no request.
+
 ## [0.3.3] - 2026-10-01
 
 Three defects that `0.3.2` shipped with. The first two were found by running the
@@ -443,6 +489,7 @@ repository; the supporting commit and code reference for each one is in
   before the request.
   (`e4b9124`; `src/index.ts:422`)
 
+[0.3.4]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.4
 [0.3.3]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.3
 [0.3.2]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.2
 [0.3.1]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.1

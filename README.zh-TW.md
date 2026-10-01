@@ -47,6 +47,7 @@ dsh --version
 
 | 插件 | DSH |
 |---|---|
+| `0.3.4` | `0.2.0-rc.2` |
 | `0.3.3` | `0.2.0-rc.2` |
 | `0.3.2` | `0.2.0-rc.2` |
 | `0.3.1` | `0.2.0-rc.2` |
@@ -69,7 +70,7 @@ pnpm install --frozen-lockfile
 pnpm run build
 pnpm pack --pack-destination .
 
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.3.tgz
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.4.tgz
 ```
 
 請把 `web` 換成你的目標 profile。
@@ -98,7 +99,7 @@ dsh plugin --profile web list dsh-opencode-free --depth 0
 # 更新——沒有 registry 可解，請重新打包再裝：
 pnpm run build && pnpm pack --pack-destination .
 dsh plugin --profile web remove dsh-opencode-free
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.3.tgz
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.4.tgz
 
 # 或直接移除：
 dsh plugin --profile web remove dsh-opencode-free
