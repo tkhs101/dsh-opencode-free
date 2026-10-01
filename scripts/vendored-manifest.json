@@ -1,9 +1,0 @@
-{
-  "agent-note-tree.ts": "93afd668d6f52fa4",
-  "archive-agent-note.ts": "f0deee48236c2e52",
-  "build-board.ts": "ad5386fb0dbe39b0",
-  "check-note-anchors.ts": "b0be5a4ebd86dd1b",
-  "verify-agent-note-format.ts": "52f38557c49a7fe5",
-  "verify-agent-note-tree.ts": "260c64c9802535ef",
-  "verify-archived-agent-notes.ts": "0994febe26ecb3ee"
-}

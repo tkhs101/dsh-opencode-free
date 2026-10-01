@@ -2,14 +2,8 @@
 
 [English](README.md) | **繁體中文**
 
-[![CI](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml)
+[![CI](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-
-> [!IMPORTANT]
-> **本倉庫是 [`x5427876/dsh-opencode-free`](https://github.com/x5427876/dsh-opencode-free)
-> 的 fork，並且沒有發布到 npm。** npm 上所有叫 `dsh-opencode-free` 的套件都屬於
-> 上游作者，不屬於這個 fork。請用本機 tarball 安裝——見〈[安裝](#安裝)〉。
-> 這個 fork 的版本釋放在 [tkhs101/dsh-opencode-free](https://github.com/tkhs101/dsh-opencode-free/releases)。
 
 在 DeepSeek Harness（DSH）中使用 [OpenCode Zen](https://opencode.ai/docs/providers)
 的免費模型。不需要安裝 OpenCode、不需要登入、不需要 API key，也不需要另外架伺服器。
@@ -47,12 +41,8 @@ dsh --version
 
 | 插件 | DSH |
 |---|---|
-| `0.3.5` | `0.2.0-rc.2` |
-| `0.3.4` | `0.2.0-rc.2` |
-| `0.3.3` | `0.2.0-rc.2` |
-| `0.3.2` | `0.2.0-rc.2` |
-| `0.3.1` | `0.2.0-rc.2` |
-| `0.3.0` | `0.2.0-rc.1` |
+| `0.3.0` | `0.2.0-rc.2` |
+| `0.2.1` | `0.2.0-rc.2` |
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
@@ -61,20 +51,13 @@ dsh --version
 
 ## 安裝
 
-這個 fork 沒有上 npm，所以沒有 `dsh plugin add dsh-opencode-free@<版本>` 這條路徑
-——那會裝成**上游**的套件。請打包成 tarball 再指向它：
+從 npm 安裝這個固定版本：
 
 ```sh
-git clone https://github.com/tkhs101/dsh-opencode-free.git
-cd dsh-opencode-free
-pnpm install --frozen-lockfile
-pnpm run build
-pnpm pack --pack-destination .
-
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.5.tgz
+dsh plugin --profile web add dsh-opencode-free@0.3.0
 ```
 
-請把 `web` 換成你的目標 profile。
+範例使用 `web` profile，請換成你的目標 profile。
 
 檢查安裝結果：
 
@@ -97,12 +80,7 @@ dsh plugin --profile web list dsh-opencode-free --depth 0
 更新或移除：
 
 ```sh
-# 更新——沒有 registry 可解，請重新打包再裝：
-pnpm run build && pnpm pack --pack-destination .
-dsh plugin --profile web remove dsh-opencode-free
-dsh plugin --profile web add file:./dsh-opencode-free-0.3.5.tgz
-
-# 或直接移除：
+dsh plugin --profile web update dsh-opencode-free
 dsh plugin --profile web remove dsh-opencode-free
 ```
 

@@ -100,20 +100,19 @@ test('targets the DSH 0.2.0-rc.2 contracts', async () => {
   const v = pkg.version
   const agentsDoc = await readFile(new URL('../AGENTS.md', import.meta.url), 'utf8')
   assert.ok(agentsDoc.includes(`v${v}`), `AGENTS.md pins v${v}`)
-  assert.ok(agentsDoc.includes(`dsh-opencode-free-${v}.tgz`), `AGENTS.md names the ${v} tarball`)
-  // THE FORK CONTRACT: this repository is not on npm, so the name
-  // `dsh-opencode-free@<version>` on the registry belongs to the upstream author.
-  // An install guide that offers it sends users to someone else's build. This
-  // assertion is the one that would have caught the original guide (audit
-  // 2026-09-30), and it is deliberately about the ABSENCE of a command.
+  // The install guide must offer the version this package declares, from the
+  // registry the package is published to. It used to be the opposite assertion:
+  // a fork that is not on npm had to REFUSE the registry command, because
+  // `dsh-opencode-free@<version>` there resolves to someone else's build.
+  // Upstream, the registry command is the only correct install, so the invariant
+  // flips to its presence and to naming this exact version.
   assert.ok(
-    !/^\s*dsh plugin .*add\s+dsh-opencode-free@/m.test(agentsDoc),
-    'AGENTS.md must not offer an npm install as a command: `dsh-opencode-free@<version>` ' +
-      'resolves to the upstream package, not this fork (prose that warns against it is fine)',
+    /^\s*dsh plugin .*add\s+dsh-opencode-free@/m.test(agentsDoc),
+    'AGENTS.md installs from the registry: `dsh plugin … add dsh-opencode-free@<version>`',
   )
   assert.ok(
-    agentsDoc.includes(`file:./dsh-opencode-free-${v}.tgz`),
-    `AGENTS.md installs the ${v} tarball with file:`,
+    agentsDoc.includes(`dsh-opencode-free@${v}`),
+    `AGENTS.md installs ${v} specifically, not some other version`,
   )
   const changelog = await readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
   // POSITION, not just presence: `## [Unreleased]` sits above the released
