@@ -7,7 +7,7 @@
  * expressed as a DSH bundle for `0.2.0-rc.2`: no OpenCode install, no
  * separate server, native pi-ai transports, tools execute through DSH.
  */
-import { LlmError, resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
+import { resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
 import { PiAiAdapter } from "@deepseek-ai/dsh-llm-pi-ai";
 import type { PiAiAdapterOptions } from "@deepseek-ai/dsh-llm-pi-ai";
 import z from "@deepseek-ai/schemastery";
@@ -90,7 +90,8 @@ export interface Config {
   // volatile fields. Without this flag the detail-page card has no scope and
   // renders nothing. Cordis delivers a live Volatile ref at runtime; the
   // plain-array shape below covers tests and non-volatile hosts.
-  readonly hiddenModels?: readonly string[] | { readonly get: () => readonly string[] | undefined } | undefined;
+  readonly hiddenModels?:
+    readonly string[] | { readonly get: () => readonly string[] | undefined } | undefined;
 }
 
 export const Config = z.object({
@@ -104,9 +105,7 @@ const PI_AI_AUTH_CONTEXT: AuthContext = Object.freeze({
   },
   async fileExists(path: string): Promise<boolean> {
     const expanded =
-      path === "~" || path.startsWith("~/")
-        ? resolvePath(homedir(), path.slice(1).replace(/^\//, ""))
-        : path;
+      path === "~" || path.startsWith("~/") ? resolvePath(homedir(), path.slice(1).replace(/^\//, "")) : path;
     try {
       await access(expanded);
       return true;
@@ -197,6 +196,14 @@ function catalogPayload(catalog: Catalog): Record<string, unknown> {
     models: snapshot.capabilities.map((card) => ({ ...card })),
     source: snapshot.source,
     updatedAt: snapshot.updatedAt,
+    // Separate from updatedAt: the Zen gate has its own clock, and a panel that
+    // shows only one age would report a withdrawn model as current for a day.
+    gateCheckedAt: snapshot.gateCheckedAt,
+    // Usually empty. Non-empty means Zen serves a free-tier id that models.dev
+    // has not published yet, so the panel can say so rather than leave the user
+    // wondering why the list is short. A diagnostic; nothing downstream treats
+    // it as membership.
+    unknownFree: [...snapshot.unknownFree],
     refreshing: snapshot.refreshing,
     // Present only once a round has run; the panel treats absence as
     // "never probed" rather than as a fault.
@@ -211,11 +218,22 @@ function catalogPayload(catalog: Catalog): Record<string, unknown> {
  * third-party page cannot drive a refresh. The GET route is read-only and
  * passes trivially, which is why only the refresh handler calls this.
  */
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "0.0.0.0"]);
+
 function sameOrigin(req: RouteRequest): boolean {
   const headers = req.headers ?? {};
   const host = headers.host ?? "";
   const origin = headers.origin ?? headers.referer ?? "";
   if (host === "" || origin === "") return false;
+  // The Host header must name THIS machine. Comparing Origin against Host only
+  // proves the two agree with each other, and under DNS rebinding an attacker
+  // page at evil.com resolves to 127.0.0.1 — so both headers read evil.com and
+  // the check passes, letting a third-party page drive POST /probe and spend the
+  // shared anonymous bucket. CSRF is still covered (a browser will not forge
+  // Origin cross-origin); this closes the rebinding shape on top of it
+  // (audit 2026-09-30).
+  const name = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
+  if (!LOCAL_HOSTS.has(name.toLowerCase())) return false;
   try {
     return new URL(origin).host === host;
   } catch {
@@ -255,12 +273,12 @@ function registerCatalogRoutes(ctx: HostContext, catalog: Catalog): void {
         // "ask upstream now", so the daily gate must not swallow it. (The
         // automatic daily round is the lazy trigger in apply() instead.)
         //
-        // One path, two methods. POST runs a round to completion and answers
-        // with the settled snapshot (so the panel repaints once, from the
-        // answer). GET answers the LIVE progress mid-round — the panel polls
-        // it while its own POST is still in flight to paint the progress pill
-        // and the per-row badges. GET is read-only like the catalogue read, so
-        // it carries no origin fence; POST keeps the write route's.
+        // One path, two methods. POST STARTS a round and answers at once, with
+        // `running: true` — it no longer waits for the round to finish, because
+        // nothing needs it to. GET answers the live progress; the panel polls it
+        // until `running` goes false and then re-reads the catalogue for the
+        // settled snapshot. GET is read-only like the catalogue read, so it
+        // carries no origin fence; POST keeps the write route's.
         const probeHandler: RouteHandler = (req, res) => {
           const method = (req.method ?? "GET").toUpperCase();
           if (method === "GET") {
@@ -275,30 +293,49 @@ function registerCatalogRoutes(ctx: HostContext, catalog: Catalog): void {
             sendJson(res, 403, { error: "forbidden", reason: "cross-origin" });
             return;
           }
-          // A round is one request per model, so it is genuinely slow; the
-          // panel shows a busy button rather than a timeout. Failures are
-          // swallowed and reported as the unchanged snapshot plus
-          // `probeInconclusive`, never as a 5xx: the round is designed to
-          // conclude nothing without that being an error (D5).
-          catalog
-            .forceProbes()
-            .catch(() => undefined)
-            .then(() => sendJson(res, 200, catalogPayload(catalog)));
+          // Answer IMMEDIATELY, then let the panel follow the round by polling
+          // GET. This used to await the whole round, which made a click on
+          // "Probe now" a request that could stay open for minutes — a round is
+          // one request per model, and a model that hangs holds it for the full
+          // 15s each. Nothing was gained by blocking: the progress endpoint
+          // already reports `running`/`done`/`total` live, and the panel already
+          // re-paints from what the catalogue endpoint says.
+          //
+          // It also removes a failure mode we could not check for: if the host's
+          // web server enforces a request timeout, a multi-minute POST would
+          // fail rather than merely be slow, and the user would be told the
+          // probe request failed when the round was in fact running fine.
+          //
+          // 202 says "accepted, not finished". Deliberately NOT echoing the
+          // progress reading: a round sets `running` only after it has asked Zen
+          // what it serves, so a reading taken here is the PRE-round one, and a
+          // panel that adopted it would conclude the round had already finished
+          // and stop following it. The progress endpoint is the single owner of
+          // round lifecycle; the POST's only job is to say it started.
+          //
+          // Failures are swallowed, as before: the round is designed to conclude
+          // nothing without that being an error (D5), and it must never reject
+          // into a 5xx or an unhandled rejection now that nothing awaits it.
+          void catalog.forceProbes().catch(() => undefined);
+          sendJson(res, 202, catalogPayload(catalog));
         };
         const disposers = [
           wctx.webServer.register({ kind: "prefix", path: CATALOG_ROUTE, handler: readHandler }),
           wctx.webServer.register({ kind: "prefix", path: REFRESH_ROUTE, handler: refreshHandler }),
           wctx.webServer.register({ kind: "prefix", path: PROBE_ROUTE, handler: probeHandler }),
         ];
-        wctx.effect(() => () => {
-          for (const dispose of disposers) {
-            try {
-              dispose();
-            } catch {
-              // Best effort: another instance already released the route.
+        wctx.effect(
+          () => () => {
+            for (const dispose of disposers) {
+              try {
+                dispose();
+              } catch {
+                // Best effort: another instance already released the route.
+              }
             }
-          }
-        }, "opencode-free: catalogue routes");
+          },
+          "opencode-free: catalogue routes",
+        );
       } catch (error) {
         // A missing route degrades the panel only; the provider still works.
         console.warn(`opencode-free: catalogue routes failed: ${(error as Error)?.message ?? error}`);
@@ -311,7 +348,8 @@ function registerCatalogRoutes(ctx: HostContext, catalog: Catalog): void {
 
 export function apply(ctx: HostContext, config?: Config): void {
   const configuredKey = config?.apiKey?.trim() || undefined;
-  const getConfigKey = (): string | undefined => configuredKey || process.env[ZEN_API_KEY_ENV]?.trim() || undefined;
+  const getConfigKey = (): string | undefined =>
+    configuredKey || process.env[ZEN_API_KEY_ENV]?.trim() || undefined;
 
   // models.dev owns WHICH free models exist; Zen `/models` gates availability.
   // Built eagerly so the provider, the picker and the panel share one instance:
@@ -351,7 +389,8 @@ export function apply(ctx: HostContext, config?: Config): void {
     // models the user has switched ON: probing a model they hid is quota spent
     // on an answer they will never read, and it crowds out the ones they will.
     hidden: isHidden,
-    fetchImpl: ((url, init) => fetch(url, init as RequestInit) as unknown as Promise<FetchLikeResponse>) as FetchLike,
+    fetchImpl: ((url, init) =>
+      fetch(url, init as RequestInit) as unknown as Promise<FetchLikeResponse>) as FetchLike,
     now: Date.now,
     // Never rejects: `probeModel` converts every failure mode, including a
     // thrown transport error, into a three-state conclusion.
@@ -384,6 +423,10 @@ export function apply(ctx: HostContext, config?: Config): void {
       if (snapshot.source !== "builtin-fallback") void catalog.runProbes().catch(() => undefined);
       return provider.getModels().filter((m) => !isHidden(m.id));
     },
+    // Required by the pi-ai Provider interface, so it stays even though this
+    // host never calls it (zen-provider.ts records the verification). It is a
+    // pass-through, not a second implementation: the gate work lives in the
+    // catalogue, and both entry points now share one admissibility rule.
     refreshModels: (c: unknown) => (provider as { refreshModels: (c: unknown) => unknown }).refreshModels(c),
   };
   const auth = Object.freeze({
@@ -413,11 +456,10 @@ export function apply(ctx: HostContext, config?: Config): void {
     auth,
     resolveApiKey: async (route: string) => {
       if (route !== PROVIDER_ID) return undefined;
-      try {
-        return getConfigKey() ?? "public";
-      } catch {
-        throw new LlmError("OpenCode Zen authorization failed", "AUTH_FAILED");
-      }
+      // No try/catch: getConfigKey() is config-or-env-or-"public" and cannot
+      // throw. The catch was unreachable and advertised an AUTH_FAILED class
+      // that could never be produced (audit 2026-09-30).
+      return getConfigKey() ?? "public";
     },
     resolveAttachments: () => ctx.get("attachments"),
   } as unknown as PiAiAdapterOptions);
@@ -427,19 +469,39 @@ export function apply(ctx: HostContext, config?: Config): void {
   // flows calling fetch, axios/node-fetch style callers): same Zen identity,
   // no per-user config. Never let a side-channel patch failure break provider
   // registration.
+  //
+  // The two process-global patches hand back a restore function, and the host's
+  // lifecycle convention (`ctx.effect`, the same one the catalogue routes already
+  // use) is what puts them back. Without this, disabling the plugin left
+  // `globalThis.fetch` and `node:http`/`node:https` wrapped for the rest of the
+  // process — affecting the host and every other plugin, with no way to tell
+  // (found by audit 2026-09-30).
+  const restoreTransport: Array<() => void> = [];
   try {
     patchCompatDirectTransport(() => undefined);
   } catch {
     // Main-path streaming still works without the compat patch.
   }
   try {
-    patchGlobalFetchForZen(() => undefined);
+    restoreTransport.push(patchGlobalFetchForZen(() => undefined));
   } catch {
     // Wrappers above already cover the known paths.
   }
   try {
-    patchNodeHttpForZen(() => undefined);
+    restoreTransport.push(patchNodeHttpForZen(() => undefined));
   } catch {
     // Fetch-level coverage above is the common case.
   }
+  ctx.effect(
+    () => () => {
+      for (const restore of restoreTransport) {
+        try {
+          restore();
+        } catch {
+          // Best effort: another instance may have already unwrapped.
+        }
+      }
+    },
+    "opencode-free: transport patches",
+  );
 }

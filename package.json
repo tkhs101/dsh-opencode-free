@@ -1,14 +1,14 @@
 {
   "name": "dsh-opencode-free",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "packageManager": "pnpm@11.19.0",
   "description": "Free OpenCode Zen models in DeepSeek Harness through native HTTP requests. No OpenCode installation, login, API key, server, container, or LiteLLM is required.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/x5427876/dsh-opencode-free.git"
+    "url": "git+https://github.com/tkhs101/dsh-opencode-free.git"
   },
-  "homepage": "https://github.com/x5427876/dsh-opencode-free",
-  "bugs": "https://github.com/x5427876/dsh-opencode-free/issues",
+  "homepage": "https://github.com/tkhs101/dsh-opencode-free",
+  "bugs": "https://github.com/tkhs101/dsh-opencode-free/issues",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -51,8 +51,20 @@
     "build": "tsc",
     "pretest": "pnpm run build",
     "prepack": "pnpm run build",
+    "prepublishOnly": "node scripts/guard-dirty-publish.mjs && pnpm run check",
     "test": "tsx --test tests/*.test.mjs",
-    "check": "pnpm run typecheck && pnpm run test && pnpm pack --pack-destination .artifacts"
+    "check": "pnpm run format:check && pnpm run typecheck && pnpm run test && pnpm pack --pack-destination .artifacts && pnpm run verify-notes && pnpm run verify-vendored",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify-agent-note-tree": "tsx scripts/notes/verify-agent-note-tree.ts",
+    "verify-agent-note-format": "tsx scripts/notes/verify-agent-note-format.ts",
+    "verify-archived": "tsx scripts/notes/verify-archived-agent-notes.ts",
+    "verify-notes": "pnpm run verify-agent-note-tree && pnpm run verify-agent-note-format && pnpm run verify-archived",
+    "verify-vendored": "node scripts/verify-vendored.mjs",
+    "check-anchors": "tsx scripts/notes/check-note-anchors.ts",
+    "archive-agent-note": "tsx scripts/notes/archive-agent-note.ts",
+    "init-board": "tsx scripts/notes/build-board.ts --init board.html \"dsh-opencode-free\"",
+    "bundle-board": "tsx scripts/notes/build-board.ts --bundle .agents/notes board.html \"dsh-opencode-free\""
   },
   "keywords": [
     "dsh-plugin",
@@ -64,9 +76,6 @@
     "free"
   ],
   "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
@@ -76,22 +85,9 @@
     "@deepseek-ai/schemastery": "^3.18.4",
     "@earendil-works/pi-ai": "^0.87.1"
   },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-llm": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-llm-pi-ai": {
-      "optional": true
-    },
-    "@deepseek-ai/schemastery": {
-      "optional": true
-    },
-    "@earendil-works/pi-ai": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "^24.13.6",
+    "prettier": "^3.9.9",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   }

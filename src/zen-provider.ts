@@ -1,4 +1,3 @@
-
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
@@ -53,13 +52,30 @@ export function builtinFreeModels(): Model<Api>[] {
 
 /**
  * The identity/field template `catalog.ts` clones onto every derived record.
- * mimo-v2.5-free is the choice because it is the most completely populated
- * builtin free record; any builtin free record would serve. It carries the
- * Zen identity (provider/baseUrl/headers) so catalog.ts needs no import from
- * this module and no import cycle exists.
+ * It carries the Zen identity (provider/baseUrl/headers) so catalog.ts needs no
+ * import from this module and no import cycle exists.
+ *
+ * The pin was `mimo-v2.5-free`, described as the most completely populated
+ * builtin free record. pi-ai 0.87 renamed that record to
+ * `mimo-v2.6-flash-free`, so from the 0.87 port onward the `find` matched
+ * nothing and every caller fell through to its own fallback — on 2026-09-30
+ * that was `builtinFreeModels()[0]`, i.e. `big-pickle`, a model Zen does not
+ * serve at all. Nothing broke, and the reason is worth keeping in view: the
+ * template only supplies IDENTITY, the channel comes from `knownApis`
+ * inference, and capability fields are read from models.dev rather than
+ * inherited. But a silently-unmatched pin is a trap for the next reader, so the
+ * fallback lives here now — deterministic, and preferring a record the free
+ * tier actually serves.
  */
+const TEMPLATE_IDS = ["mimo-v2.6-flash-free", "mimo-v2.5-free"] as const;
+
 export function catalogTemplate(): Model<Api> | undefined {
-  return builtinFreeModels().find((m) => m.id === "mimo-v2.5-free");
+  const models = builtinFreeModels();
+  for (const id of TEMPLATE_IDS) {
+    const found = models.find((model) => model.id === id);
+    if (found !== undefined) return found;
+  }
+  return models.find((model) => model.id.includes("-free"));
 }
 
 /**
@@ -101,11 +117,10 @@ export function freeModels(): Model<Api>[] {
  * `zen-provider` does not import `catalog` at runtime (only its type), so
  * reading it the other way round introduces no cycle.
  */
-export const PLUGIN_VERSION = "0.3.1";
+export const PLUGIN_VERSION = "0.3.2";
 
 /** Derived, not written out: a second hardcoded copy is a second thing to forget. */
-export const OPENCODE_USER_AGENT =
-  `opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14 dsh-opencode-free/${PLUGIN_VERSION}`;
+export const OPENCODE_USER_AGENT = `opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14 dsh-opencode-free/${PLUGIN_VERSION}`;
 export const OPENCODE_CLIENT = "cli";
 export const OPENCODE_PROJECT = "global";
 /** The literal credential the free tier runs on; there is no other. */
@@ -123,6 +138,52 @@ export const STATIC_ZEN_HEADERS: Record<string, string> = {
   "x-opencode-project": OPENCODE_PROJECT,
 };
 
+/**
+ * The complete OpenCode identity, as one owned list.
+ *
+ * This set used to be written out four times — `STATIC_ZEN_HEADERS`,
+ * `compatRequestOptions()`, the fetch guard, and
+ * `applyZenHeadersToNodeHeaders()` — with a comment ("must stay in sync with
+ * requestOptions()") as the only thing holding them together. Upstream gates
+ * admission on exactly these headers, so one missed edit is a silent, total
+ * 403 on the path that was missed, reported to the user as "the anonymous tier
+ * refused" and therefore diagnosed in the wrong direction (audit 2026-09-30).
+ *
+ * Exported so `tests/compatibility.test.mjs` can assert that every call site
+ * produces the same header NAMES, which is the check that was missing.
+ */
+export const ZEN_IDENTITY_HEADERS: readonly string[] = Object.freeze([
+  "Authorization",
+  "User-Agent",
+  "x-client-request-id",
+  "x-opencode-client",
+  "x-opencode-project",
+  "x-opencode-request",
+  "x-opencode-session",
+]);
+
+/**
+ * Stamp the whole identity onto a `Headers`. Idempotent by construction: a
+ * value already present and non-empty is kept, so a caller who genuinely set an
+ * Authorization (a real Zen key) is never downgraded to the anonymous tier.
+ *
+ * `session` is the already-computed `ses_` value, so all three ids that must
+ * agree — x-opencode-session, x-client-request-id — come from one place.
+ */
+export function applyZenIdentity(
+  headers: Headers,
+  options: { readonly session: string; readonly apiKey: string },
+): Headers {
+  if (!headers.get("authorization")) headers.set("Authorization", `Bearer ${options.apiKey}`);
+  headers.set("User-Agent", OPENCODE_USER_AGENT);
+  headers.set("x-opencode-client", OPENCODE_CLIENT);
+  headers.set("x-opencode-project", OPENCODE_PROJECT);
+  headers.set("x-opencode-session", options.session);
+  if (!headers.get("x-opencode-request")) headers.set("x-opencode-request", requestHeader());
+  if (!headers.get("x-client-request-id")) headers.set("x-client-request-id", options.session);
+  return headers;
+}
+
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 function base62FromBytes(bytes: Uint8Array, length: number): string {
@@ -138,8 +199,25 @@ function base62FromBytes(bytes: Uint8Array, length: number): string {
  * rejects structurally invalid ids, while freshly generated valid ids pass.
  * Hashing keeps affinity stable per DSH session and distinct between sessions.
  */
+/**
+ * Per-process salt, generated at module load and never written down.
+ *
+ * The hash used to be unsalted and therefore deterministic: anyone who could
+ * guess or enumerate a DSH session id could recompute the same header and
+ * confirm that two requests belonged to the same session. Because upstream also
+ * routes on this header for sticky backends (see docs/reverse-engineering.md),
+ * that linkability extends to a session's boundaries and active hours, on
+ * top of the per-IP bucket the design already accepts (audit 2026-09-30).
+ *
+ * A restart changing every id is the intended behaviour, not a regression:
+ * upstream affinity is only useful WITHIN one DSH session, and the plugin
+ * already treats a restart as a cold start (the Zen gate is re-asked every boot
+ * and probe verdicts are keyed on model id, never on the session).
+ */
+const SESSION_SALT = randomBytes(32);
+
 export function sessionHeader(sessionId: string): string {
-  const hash = createHash("sha256").update(`${PROVIDER_ID}:${sessionId}`).digest();
+  const hash = createHash("sha256").update(SESSION_SALT).update(`${PROVIDER_ID}:${sessionId}`).digest();
   const hex = hash.subarray(0, 6).toString("hex");
   return `ses_${hex}${base62FromBytes(hash.subarray(6), 14)}`;
 }
@@ -187,7 +265,10 @@ export function stripStaleReasoning(payload: unknown): unknown | null {
 }
 
 /** Wrap fetch with a single retry that drops stale reasoning on Zen rotation. */
-export function withEncryptedContentFallback(inner?: FetchFunction, recorder?: TransportRecorder): FetchFunction {
+export function withEncryptedContentFallback(
+  inner?: FetchFunction,
+  recorder?: TransportRecorder,
+): FetchFunction {
   // The recorder wraps whatever fetch is really used, so it observes the same
   // rejection the transport sees. With one, it is the base and `inner` is
   // already folded into it — wrapping twice would only cost a hop.
@@ -266,7 +347,9 @@ export function describeTransportCause(error: unknown): string {
     const message = typeof value.message === "string" ? value.message : "";
     // A bare `TypeError: fetch failed` names no cause at all; the next link
     // (SocketError, ECONNRESET, ENOTFOUND, …) is the actionable half.
-    const head = [name, code].filter((part) => part !== undefined).join("/") || (current instanceof Error ? "Error" : typeof current);
+    const head =
+      [name, code].filter((part) => part !== undefined).join("/") ||
+      (current instanceof Error ? "Error" : typeof current);
     const text = message === "" || message === head ? head : `${head}: ${message}`;
     if (!parts.includes(text)) parts.push(text);
     current = value.cause;
@@ -330,6 +413,14 @@ export const OPENCODE_SUMMARIZATION_PROMPT =
 const PI_SUMMARIZATION_MARKER = "context summarization";
 
 type TranscriptMessage = Record<string, unknown> & { role?: unknown };
+/**
+ * The shape pi-ai 0.87 providers actually read. `toTranscript` used to declare
+ * it as the caller's own `T`, so a caller that passed a legacy `Context` and
+ * then read `.systemPrompt` off the result type-checked perfectly and got
+ * `undefined` at run time — a type lie on the request path's front door
+ * (audit 2026-09-30).
+ */
+export type TranscriptContext = ReturnType<typeof normalizeContext>;
 
 /**
  * Fold a legacy `Context` into the transcript pi-ai 0.87 providers read;
@@ -342,11 +433,11 @@ type TranscriptMessage = Record<string, unknown> & { role?: unknown };
  * point. Only `normalizeContext()` output can reach a provider, so this is the
  * one function every entry point must go through.
  */
-export function toTranscript<T>(context: T): T {
+export function toTranscript<T>(context: T): T | TranscriptContext {
   if (!context || typeof context !== "object") return context;
   const legacy = context as { systemPrompt?: unknown; tools?: unknown };
   if (legacy.systemPrompt === undefined && legacy.tools === undefined) return context;
-  return normalizeContext(context as unknown as Context) as unknown as T;
+  return normalizeContext(context as unknown as Context) as unknown as TranscriptContext;
 }
 
 /**
@@ -362,7 +453,18 @@ export function swapCompactionPrompt<T>(context: T, apiKey: unknown): T {
   if (!context || typeof context !== "object") return context;
   const sys = (context as { systemPrompt?: unknown }).systemPrompt;
   if (typeof sys === "string") {
-    if (sys.length > 2000 || !sys.toLowerCase().includes(PI_SUMMARIZATION_MARKER)) return context;
+    // Anchored, not substring. "Contains the phrase" also matched a user
+    // prompt that merely MENTIONED context summarization, and the whole prompt
+    // was then replaced — no log, no warning, and only on the anonymous path,
+    // so attaching a key silently "fixed" it. Verified 2026-09-30: a
+    // 93-character custom prompt containing the phrase came back as OpenCode
+    // compression-agent instructions.
+    if (sys.length > 2000 || !/^you are a context summarization/i.test(sys.trim())) return context;
+    // And never when the caller has real tools — the guard the transcript
+    // branch below already applies.
+    const msgs = (context as { messages?: unknown }).messages;
+    if (Array.isArray(msgs) && getCurrentTools(msgs as Parameters<typeof getCurrentTools>[0]).length > 0)
+      return context;
     return { ...(context as Record<string, unknown>), systemPrompt: OPENCODE_SUMMARIZATION_PROMPT } as T;
   }
   const msgs = (context as { messages?: unknown }).messages as TranscriptMessage[] | undefined;
@@ -374,12 +476,15 @@ export function swapCompactionPrompt<T>(context: T, apiKey: unknown): T {
   // `systemPrompt` before we get here). A decline that looks identical to a
   // swap is the failure mode worth being able to see, so it says so.
   if (prompt && prompt.length <= 2000 && prompt.toLowerCase().includes(PI_SUMMARIZATION_MARKER)) {
-    const skipped = getCurrentTools(transcript).length > 0
-      || msgs.filter((m) => m?.role !== "system").length !== 1
-      || msgs.filter((m) => m?.role !== "system")[0]?.role !== "user";
-    if (skipped) debugLog("compaction prompt seen but NOT swapped (tools present, or not a single user turn)");
+    const skipped =
+      getCurrentTools(transcript).length > 0 ||
+      msgs.filter((m) => m?.role !== "system").length !== 1 ||
+      msgs.filter((m) => m?.role !== "system")[0]?.role !== "user";
+    if (skipped)
+      debugLog("compaction prompt seen but NOT swapped (tools present, or not a single user turn)");
   }
-  if (!prompt || prompt.length > 2000 || !prompt.toLowerCase().includes(PI_SUMMARIZATION_MARKER)) return context;
+  if (!prompt || prompt.length > 2000 || !prompt.toLowerCase().includes(PI_SUMMARIZATION_MARKER))
+    return context;
   if (getCurrentTools(transcript).length > 0) return context;
   const nonSystem = msgs.filter((m) => m?.role !== "system");
   if (nonSystem.length !== 1 || nonSystem[0]?.role !== "user") return context;
@@ -402,7 +507,10 @@ const GATE_TOOLS = ["read", "bash"];
 const SHELL_ALIAS = "pwsh";
 const STUB_DESCRIPTION = "Unavailable in this request. Do not call.";
 
-export function applyAnonymousToolGate<T>(context: T, apiKey: unknown): { context: T; restoreShell: boolean } {
+export function applyAnonymousToolGate<T>(
+  context: T,
+  apiKey: unknown,
+): { context: T; restoreShell: boolean } {
   const key = typeof apiKey === "string" && apiKey.trim() ? apiKey : "public";
   const msgs = (context as { messages?: unknown } | null)?.messages as TranscriptMessage[] | undefined;
   // The gate operates on the transcript, because that is all a 0.87 provider
@@ -443,15 +551,26 @@ export function applyAnonymousToolGate<T>(context: T, apiKey: unknown): { contex
     const first = messages[0];
     messages =
       first?.role === "system"
-        ? [{ ...first, toolsAdded: [...((first.toolsAdded as unknown[]) ?? []), ...stubs] }, ...messages.slice(1)]
-        : [createInitialSystemMessage(undefined, stubs as never) as unknown as TranscriptMessage, ...messages];
+        ? [
+            { ...first, toolsAdded: [...((first.toolsAdded as unknown[]) ?? []), ...stubs] },
+            ...messages.slice(1),
+          ]
+        : [
+            createInitialSystemMessage(undefined, stubs as never) as unknown as TranscriptMessage,
+            ...messages,
+          ];
   }
   return { context: { ...(context as Record<string, unknown>), messages } as T, restoreShell };
 }
 
 /** Rename returned `bash` calls back to DSH's `pwsh` in place (events share `partial`). */
 function restoreShellCalls(value: unknown): void {
-  const v = value as { partial?: unknown; message?: unknown; error?: unknown; toolCall?: { name?: unknown } } | null;
+  const v = value as {
+    partial?: unknown;
+    message?: unknown;
+    error?: unknown;
+    toolCall?: { name?: unknown };
+  } | null;
   if (!v || typeof v !== "object") return;
   for (const msg of [v, v.partial, v.message, v.error] as { content?: unknown }[]) {
     if (!Array.isArray(msg?.content)) continue;
@@ -518,9 +637,18 @@ function enforceAnonymousTools(payload: unknown): unknown {
   debugLog(`ADMISSION BACKSTOP FIRED: re-adding ${missing.join(",")} at the payload boundary`);
   // Responses channel is detected by its own body field, not guessed.
   const responses = "input" in body && !("messages" in body);
-  const stub = (name: string): unknown => (responses
-    ? { type: "function", name, description: STUB_DESCRIPTION, parameters: { type: "object", properties: {} } }
-    : { type: "function", function: { name, description: STUB_DESCRIPTION, parameters: { type: "object", properties: {} } } });
+  const stub = (name: string): unknown =>
+    responses
+      ? {
+          type: "function",
+          name,
+          description: STUB_DESCRIPTION,
+          parameters: { type: "object", properties: {} },
+        }
+      : {
+          type: "function",
+          function: { name, description: STUB_DESCRIPTION, parameters: { type: "object", properties: {} } },
+        };
   return { ...body, tools: [...existing, ...missing.map(stub)] };
 }
 
@@ -548,7 +676,8 @@ export function classifyZenFailure(status: number, bodyText: string): ZenFailure
   if (ANON_GATED_PATTERN.test(body)) return "anon-gated";
   if (status === 429 || QUOTA_PATTERN.test(body)) return "quota-exhausted";
   if (status === 401 || BAD_KEY_PATTERN.test(body)) return "bad-key";
-  return "unknown";}
+  return "unknown";
+}
 
 /**
  * Which of the three markers {@link ANON_GATED_PATTERN} actually matched.
@@ -599,15 +728,25 @@ export function anonGateMarker(bodyText: string): AnonGateMarker {
  */
 const PROBE_PROMPT = "hi";
 /**
- * Reasoning models spend 64+ tokens thinking before any text, so a smaller
- * budget returns an empty completion and would read as "dead" — a false
- * negative on exactly the models most likely to be good. 1024 rather than 512:
- * the 512 floor was measured against a model that thought briefly, and
- * muse-spark defaults to xhigh, so the budget has to cover the reasoning AND
- * leave room for the answer. 9router settled on the same floor after its own
- * #3010. See scripts/test-live.mjs for the live check.
+ * The probe's output ceiling.
+ *
+ * 1024, chosen by a live A/B on output tokens (1024 vs 16, 33 models, two runs in
+ * agreement). The full data and the two superseded arguments live in
+ * `docs/adr/0002-catalogue-source-of-truth.md`; the A/B is reproducible with
+ * `scripts/probe-ab.mjs`. The short version: a smaller ceiling does not make the
+ * expensive models cheaper — it makes the two most expensive ones stop answering
+ * altogether, and the token median looks like a win precisely BECAUSE those two
+ * fall out of the sample. A budget that trades answers for tokens has not saved
+ * anything.
+ *
+ * `tests/compatibility.test.mjs` pins this value exactly, and pins that
+ * `ProbeDeps.maxTokens` still reaches the wire: an untested override made the A/B
+ * compare 1024 against 1024 and report "no difference" (audit 2026-09-30).
+ *
+ * Exported so `scripts/test-live.mjs` and the test suite pin THIS number rather
+ * than each carrying a literal of their own.
  */
-const PROBE_MAX_TOKENS = 1024;
+export const PROBE_MAX_TOKENS = 1024;
 /**
  * Same per-model ceiling as scripts/test-live.mjs, and the same 15s 9router's
  * per-model test uses. The round is sequential over the whole catalogue, so the
@@ -719,7 +858,7 @@ export function isModelUnavailableFailure(status: number, bodyText: string): boo
  * says "no status ever arrived" rather than repeating a zero.
  */
 export type ProbeOutcome =
-  | { kind: "ok" }
+  | { kind: "ok"; usage?: ProbeUsage }
   | { kind: "dead"; reason: string; code: "dead"; http: number }
   | {
       kind: "inconclusive";
@@ -730,13 +869,23 @@ export type ProbeOutcome =
       marker?: AnonGateMarker;
     };
 
+/**
+ * What the upstream said it spent, when it said.
+ *
+ * Carried for measurement, not for judgement: nothing in the round reads it.
+ * pi-ai already asks for `stream_options.include_usage` and attaches the parsed
+ * usage to the result, so this is a field being passed along rather than a new
+ * request — which matters, because the question it settles (does a 1024 ceiling
+ * actually cost more than a 16 one?) could not be answered from wall clock, and
+ * the number needed for the answer was being dropped on the floor.
+ */
+export interface ProbeUsage {
+  readonly input?: number | undefined;
+  readonly output?: number | undefined;
+}
+
 /** Why a probe did not get an answer the round could trust. */
-export type ProbeFailureCode =
-  | "dead"
-  | "timeout"
-  | "transport"
-  | ZenFailureKind
-  | "error";
+export type ProbeFailureCode = "dead" | "timeout" | "transport" | ZenFailureKind | "error";
 
 /**
  * The provider method a probe needs.
@@ -761,6 +910,15 @@ export interface ProbeDeps {
   /** Base fetch; defaults to the live global (already identity-guarded). */
   readonly fetchImpl?: typeof fetch | undefined;
   readonly timeoutMs?: number | undefined;
+  /**
+   * Output budget for the probe request. Defaults to {@link PROBE_MAX_TOKENS}.
+   *
+   * Exists so `scripts/probe-ab.mjs` can A/B the budget against the live tier
+   * without editing the constant, and so a test can pin the shape. It is NOT a
+   * tuning knob for production: the round must spend one fixed, disclosed amount
+   * of the shared bucket, so nothing in `index.ts` passes this.
+   */
+  readonly maxTokens?: number | undefined;
   readonly now?: (() => number) | undefined;
 }
 
@@ -814,15 +972,13 @@ function hasAnswer(result: Record<string, unknown> | undefined): boolean {
   if (!result || result.stopReason === "error") return false;
   const content = result.content;
   if (!Array.isArray(content)) return false;
-  return content.some(
-    (part) => {
-      if (part === null || typeof part !== "object") return false;
-      const typed = part as { type?: unknown; text?: unknown; thinking?: unknown };
-      if (typed.type === "text") return typeof typed.text === "string" && typed.text.trim() !== "";
-      if (typed.type === "thinking") return typeof typed.thinking === "string" && typed.thinking.trim() !== "";
-      return false;
-    },
-  );
+  return content.some((part) => {
+    if (part === null || typeof part !== "object") return false;
+    const typed = part as { type?: unknown; text?: unknown; thinking?: unknown };
+    if (typed.type === "text") return typeof typed.text === "string" && typed.text.trim() !== "";
+    if (typed.type === "thinking") return typeof typed.thinking === "string" && typed.thinking.trim() !== "";
+    return false;
+  });
 }
 
 /**
@@ -879,7 +1035,8 @@ function isCallerScoped(outcome: ProbeOutcome): boolean {
   // Only a failure carries a code; an `ok` never reaches here, but the type
   // says so and the check should not pretend otherwise.
   if (outcome.kind === "ok") return false;
-  if (outcome.code === "anon-gated" || outcome.code === "quota-exhausted" || outcome.code === "bad-key") return true;
+  if (outcome.code === "anon-gated" || outcome.code === "quota-exhausted" || outcome.code === "bad-key")
+    return true;
   // 403/429 only when it is NOT a "this model is gone" verdict: that sentence
   // is the wrong channel talking, and it must still be retried elsewhere.
   if (outcome.kind !== "dead" && (outcome.http === 403 || outcome.http === 429)) return true;
@@ -900,6 +1057,26 @@ function strength(outcome: ProbeOutcome): number {
 }
 
 /**
+ * The token counts the upstream reported, if it reported any.
+ *
+ * Deliberately forgiving about shape: this rides on whatever pi-ai parsed out
+ * of the stream, and a field that moves is a measurement problem, not a reason
+ * to fail a probe that already has its answer. Anything unrecognised comes back
+ * undefined rather than a guess.
+ */
+function usageOf(result: Record<string, unknown> | undefined): ProbeUsage | undefined {
+  const raw = (result as { usage?: unknown } | undefined)?.usage;
+  if (raw === null || typeof raw !== "object") return undefined;
+  const count = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const usage = {
+    input: count((raw as { input?: unknown }).input),
+    output: count((raw as { output?: unknown }).output),
+  };
+  return usage.input === undefined && usage.output === undefined ? undefined : usage;
+}
+
+/**
  * Send one minimal request to `model` on its current channel and classify it.
  *
  * Never throws: a probe that cannot reach a conclusion returns
@@ -917,8 +1094,9 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
   // generic `stopReason: "error"` and the recorder's cause into a socket
   // failure, so the error object alone would report a timeout as a dead
   // socket — the one misreading the reader cannot act on.
-  const expired = (error?: unknown): boolean => signal.aborted
-    || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
+  const expired = (error?: unknown): boolean =>
+    signal.aborted ||
+    (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
   let result: Record<string, unknown> | undefined;
   let thrown: unknown;
   try {
@@ -932,7 +1110,7 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     // only thing it did change was the channel.
     const stream = deps.provider.streamSimple(model, context, {
       apiKey: deps.apiKey ?? "public",
-      maxTokens: PROBE_MAX_TOKENS,
+      maxTokens: deps.maxTokens ?? PROBE_MAX_TOKENS,
       // The default reasoning effort for muse-spark is xhigh; a probe only
       // needs any reply, so it asks for the cheapest one.
       reasoning: "low",
@@ -952,17 +1130,23 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     thrown = error;
   }
   if (thrown !== undefined) {
-    const detail = thrown instanceof Error ? `${thrown.name}: ${thrown.message || "(empty)"}` : String(thrown);
+    const detail =
+      thrown instanceof Error ? `${thrown.name}: ${thrown.message || "(empty)"}` : String(thrown);
     const timedOut = expired(thrown);
     return {
       kind: "inconclusive",
-      reason: timedOut ? `probe timed out after ${deps.timeoutMs ?? PROBE_TIMEOUT_MS}ms` : `transport failure — ${detail.slice(0, 200)}`,
+      reason: timedOut
+        ? `probe timed out after ${deps.timeoutMs ?? PROBE_TIMEOUT_MS}ms`
+        : `transport failure — ${detail.slice(0, 200)}`,
       code: timedOut ? "timeout" : "transport",
       http: 0,
     };
   }
   // A reply settles the question: the model answers, so it is not dead.
-  if (hasAnswer(result)) return { kind: "ok" };
+  // The usage is carried through rather than dropped: it decides nothing here,
+  // but it is the only way to tell what a probe actually costs, and the
+  // upstream already computed it.
+  if (hasAnswer(result)) return { kind: "ok", usage: usageOf(result) };
   const { status, body, cause } = recorder.read();
   // The body is the only place the upstream's actual words exist, and an
   // `inconclusive` is never persisted — so without this a refusal is
@@ -1047,12 +1231,14 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
     if (outcome.kind === "ok" || isCallerScoped(outcome)) return outcome;
     if (last === null || strength(outcome) > strength(last)) last = outcome;
   }
-  return last ?? {
-    kind: "inconclusive",
-    reason: "no channel answered",
-    code: "unknown",
-    http: 0,
-  };
+  return (
+    last ?? {
+      kind: "inconclusive",
+      reason: "no channel answered",
+      code: "unknown",
+      http: 0,
+    }
+  );
 }
 
 /**
@@ -1111,10 +1297,7 @@ function compatRequestOptions<T extends StreamOptions>(
     sessionId: opencodeSession,
     timeoutMs: options?.timeoutMs ?? 180_000,
     maxRetries: options?.maxRetries ?? 2,
-    fetch: withEncryptedContentFallback(
-      options?.fetch as FetchFunction | undefined,
-      recorder,
-    ) as T["fetch"],
+    fetch: withEncryptedContentFallback(options?.fetch as FetchFunction | undefined, recorder) as T["fetch"],
     // "off" is offered as an explicit level (the user asked to keep it), but
     // pi-ai renders it as `reasoning: { effort: "none" }` by default and as
     // `effort: "off"` when explicitly chosen on the responses channel — two
@@ -1219,7 +1402,9 @@ export function patchCompatDirectTransport(getSessionId: SessionGetter = () => u
           const ctx = gate.context;
           const recorder = createTransportRecorder(options?.fetch as FetchFunction | undefined);
           const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder);
-          debugLog(`${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "compat")} ${shapeSummary(ctx, options)}`);
+          debugLog(
+            `${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "compat")} ${shapeSummary(ctx, options)}`,
+          );
           const out = origStream(model as never, ctx as never, processed as never);
           return withGuidance(out as object, gate.restoreShell, recorder);
         }) as never,
@@ -1232,7 +1417,9 @@ export function patchCompatDirectTransport(getSessionId: SessionGetter = () => u
           const ctx = gate.context;
           const recorder = createTransportRecorder(options?.fetch as FetchFunction | undefined);
           const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder);
-          debugLog(`${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "compat")} ${shapeSummary(ctx, options)}`);
+          debugLog(
+            `${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "compat")} ${shapeSummary(ctx, options)}`,
+          );
           const out = origStreamSimple(model as never, ctx as never, processed as never);
           return withGuidance(out as object, gate.restoreShell, recorder);
         }) as never,
@@ -1318,47 +1505,56 @@ function isZenRequest(input: unknown): boolean {
   }
 }
 
-export function patchGlobalFetchForZen(getSessionId: SessionGetter = () => undefined): void {
+export function patchGlobalFetchForZen(getSessionId: SessionGetter = () => undefined): () => void {
   const g = globalThis as Record<string, unknown>;
   if (!g[FETCH_GUARD_ORIGINAL_KEY]) g[FETCH_GUARD_ORIGINAL_KEY] = globalThis.fetch;
   const original = g[FETCH_GUARD_ORIGINAL_KEY] as typeof fetch;
   const callOriginal = (input: unknown, init: unknown): Promise<Response> =>
     (original as (u: never, i: never) => Promise<Response>)(input as never, init as never);
   const guarded = (async (input: unknown, init?: unknown) => {
+    if (!isZenRequest(input)) return callOriginal(input, init);
+    const rawInit = (init ?? {}) as Record<string, unknown>;
+    // The fallback below is scoped to the identity rewrite and NOTHING else.
+    // It used to wrap the whole body, so the inner `catch` that rethrows a
+    // network failure landed here too and the request went out a SECOND time
+    // with the un-rewritten `init` — no Authorization, no session — which the
+    // upstream answers 403 FreeTierError. A Wi-Fi blip then surfaced as "the
+    // anonymous tier refused us", destroying exactly the diagnosis
+    // createTransportRecorder/describeTransportCause exist to provide
+    // (found by audit 2026-09-30, reproduced: 1 call → 2 requests, 2nd auth=null).
+    let headers: Headers;
     try {
-      if (!isZenRequest(input)) return callOriginal(input, init);
-      const rawInit = (init ?? {}) as Record<string, unknown>;
-      const headers = new Headers(rawInit.headers as HeadersInit | undefined);
-      const existingSession = headers.get("x-opencode-session");
-      headers.set(
-        "x-opencode-session",
-        existingSession && ZEN_SESSION_PATTERN.test(existingSession)
-          ? existingSession
-          : sessionHeader(getSessionId() ?? randomUUID()),
-      );
-      if (!headers.get("authorization")) headers.set("Authorization", "Bearer public");
-      headers.set("User-Agent", OPENCODE_USER_AGENT);
-      headers.set("x-opencode-client", OPENCODE_CLIENT);
-      headers.set("x-opencode-project", OPENCODE_PROJECT);
-      if (!headers.get("x-opencode-request")) headers.set("x-opencode-request", requestHeader());
-      if (!headers.get("x-client-request-id"))
-        headers.set("x-client-request-id", headers.get("x-opencode-session") ?? sessionHeader(getSessionId() ?? randomUUID()));
-      debugLog(identitySummary(headers, "fetch"));
-      const startedAt = Date.now();
-      try {
-        const response = await callOriginal(input, { ...rawInit, headers });
-        debugLog(`fetch <- ${response.status} ${zenPath(input)} after ${Date.now() - startedAt}ms`);
-        return response;
-      } catch (error) {
-        const detail = error instanceof Error ? `${error.name}: ${error.message || "(empty)"}` : String(error);
-        debugLog(`fetch FAILED ${zenPath(input)} after ${Date.now() - startedAt}ms: ${detail.slice(0, 200)}`);
-        throw error;
-      }
+      headers = new Headers(rawInit.headers as HeadersInit | undefined);
+      const existing = headers.get("x-opencode-session");
+      const session =
+        existing && ZEN_SESSION_PATTERN.test(existing)
+          ? existing
+          : sessionHeader(getSessionId() ?? randomUUID());
+      applyZenIdentity(headers, { session, apiKey: ANONYMOUS_KEY });
     } catch {
+      // The identity could not be built. Send the request unchanged rather than
+      // crash the caller — but this is the ONLY case that falls back.
       return callOriginal(input, init);
+    }
+    debugLog(identitySummary(headers, "fetch"));
+    const startedAt = Date.now();
+    try {
+      const response = await callOriginal(input, { ...rawInit, headers });
+      debugLog(`fetch <- ${response.status} ${zenPath(input)} after ${Date.now() - startedAt}ms`);
+      return response;
+    } catch (error) {
+      const detail = error instanceof Error ? `${error.name}: ${error.message || "(empty)"}` : String(error);
+      debugLog(`fetch FAILED ${zenPath(input)} after ${Date.now() - startedAt}ms: ${detail.slice(0, 200)}`);
+      throw error;
     }
   }) as typeof fetch;
   globalThis.fetch = guarded;
+  // Restore, so unloading the plugin does not leave the process permanently
+  // wrapped — including for other plugins and the host itself, which share this
+  // global (found by audit 2026-09-30). Idempotent: calling it twice is a no-op.
+  return () => {
+    if (globalThis.fetch === guarded) globalThis.fetch = original;
+  };
 }
 
 /**
@@ -1367,10 +1563,7 @@ export function patchGlobalFetchForZen(getSessionId: SessionGetter = () => undef
  * tool). Other hosts pass through untouched.
  */
 export type NodeHeadersInit =
-  | Record<string, string | string[] | number | undefined>
-  | [string, string][]
-  | Headers
-  | undefined;
+  Record<string, string | string[] | number | undefined> | [string, string][] | Headers | undefined;
 
 function readNodeHeader(headers: NodeHeadersInit, name: string): string | undefined {
   if (!headers) return undefined;
@@ -1416,15 +1609,27 @@ export function applyZenHeadersToNodeHeaders(
     }
     (out as Record<string, string>)[name] = value;
   };
-  const session = readNodeHeader(out, "x-opencode-session");
-  set("x-opencode-session", session && ZEN_SESSION_PATTERN.test(session) ? session : sessionHeader(getSessionId() ?? randomUUID()));
-  if (!readNodeHeader(out, "authorization")) set("Authorization", "Bearer public");
-  set("User-Agent", OPENCODE_USER_AGENT);
-  set("x-opencode-client", OPENCODE_CLIENT);
-  set("x-opencode-project", OPENCODE_PROJECT);
-  if (!readNodeHeader(out, "x-opencode-request")) set("x-opencode-request", requestHeader());
-  if (!readNodeHeader(out, "x-client-request-id")) {
-    set("x-client-request-id", readNodeHeader(out, "x-opencode-session") ?? sessionHeader(getSessionId() ?? randomUUID()));
+  const existing = readNodeHeader(out, "x-opencode-session");
+  const session =
+    existing && ZEN_SESSION_PATTERN.test(existing) ? existing : sessionHeader(getSessionId() ?? randomUUID());
+  // The SAME owner the fetch guard uses, driven through the node:http shape's
+  // set() helper — one list, one session id, three ids that must agree.
+  for (const name of ZEN_IDENTITY_HEADERS) {
+    const want =
+      name === "Authorization"
+        ? `Bearer ${readNodeHeader(out, "authorization") ? String(readNodeHeader(out, "authorization")).replace(/^Bearers+/i, "") : ANONYMOUS_KEY}`
+        : name === "User-Agent"
+          ? OPENCODE_USER_AGENT
+          : name === "x-opencode-client"
+            ? OPENCODE_CLIENT
+            : name === "x-opencode-project"
+              ? OPENCODE_PROJECT
+              : name === "x-opencode-session" || name === "x-client-request-id"
+                ? session
+                : requestHeader();
+    if (name === "Authorization" && readNodeHeader(out, "authorization")) continue;
+    if (name === "x-opencode-request" && readNodeHeader(out, "x-opencode-request")) continue;
+    set(name, want);
   }
   return out;
 }
@@ -1449,7 +1654,9 @@ function splitHttpArgs(args: unknown[]): { options: Record<string, unknown>; cal
 }
 
 export function isZenNodeRequestOptions(options: Record<string, unknown>): boolean {
-  const host = String(options.hostname ?? options.host ?? "").split(":")[0]?.toLowerCase();
+  const host = String(options.hostname ?? options.host ?? "")
+    .split(":")[0]
+    ?.toLowerCase();
   return host === "opencode.ai" && String(options.path ?? "/").startsWith("/zen/v1");
 }
 
@@ -1466,13 +1673,19 @@ function nodeHttpStash(): Map<string, (...args: never[]) => unknown> {
   return created;
 }
 
-export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefined): void {
+export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefined): () => void {
   const require = createRequire(import.meta.url);
   const targets: [string, NodeHttpModule][] = [
     ["http", require("node:http")],
     ["https", require("node:https")],
   ];
   const stash = nodeHttpStash();
+  // The pristine function behind each replacement, so unloading can put them
+  // back. `stash` alone is not enough: it keeps the originals for idempotence
+  // across reloads, but nothing ever wrote them back onto the module objects,
+  // so a disabled plugin left every node:http request in the process wrapped
+  // (found by audit 2026-09-30).
+  const replaced: Array<[NodeHttpModule, string, unknown]> = [];
   for (const [modName, mod] of targets) {
     for (const fnName of ["request", "get"]) {
       const key = `${modName}.${fnName}`;
@@ -1485,15 +1698,24 @@ export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefine
         try {
           const { options, callback } = splitHttpArgs(args);
           if (!isZenNodeRequestOptions(options)) return callOriginal(this, args);
-          options.headers = applyZenHeadersToNodeHeaders(options.headers as NodeHeadersInit, getSessionId) as unknown as Record<string, unknown>;
+          options.headers = applyZenHeadersToNodeHeaders(
+            options.headers as NodeHeadersInit,
+            getSessionId,
+          ) as unknown as Record<string, unknown>;
           return callOriginal(this, [options, callback]);
         } catch {
           return callOriginal(this, args);
         }
       };
       mod[fnName] = wrapped as (...args: never[]) => unknown;
+      replaced.push([mod, fnName, original]);
     }
   }
+  return () => {
+    for (const [mod, fnName, original] of replaced) {
+      if (typeof original === "function") mod[fnName] = original as (...args: never[]) => unknown;
+    }
+  };
 }
 
 /**
@@ -1572,7 +1794,14 @@ function withGuidance<T extends object>(stream: T, restoreShell = false, recorde
         };
       }
       if (prop === Symbol.asyncIterator) {
-        const inner = (target as AsyncIterableIterator<unknown>)[Symbol.asyncIterator].bind(target);
+        // Not every stream shape is async-iterable — this module's own
+        // ProbeStreamer declares only `result()`. `undefined.bind` used to throw
+        // a TypeError whose message named "bind" and nothing about the real
+        // problem, from a property ACCESS rather than from the call
+        // (audit 2026-09-30).
+        const iter = (target as Record<symbol, unknown>)[Symbol.asyncIterator];
+        if (typeof iter !== "function") return Reflect.get(target, prop, target);
+        const inner = (iter as () => AsyncIterableIterator<unknown>).bind(target);
         return async function* () {
           for await (const event of inner()) {
             if (restoreShell) restoreShellCalls(event);
@@ -1605,7 +1834,10 @@ export function zenProvider(
 ): Provider {
   const fallbackSession = randomUUID();
   const catalog = options.catalog ?? null;
-  if (catalog !== null) activeCatalog = catalog;
+  // Unconditional: null is itself a valid value (the pre-catalogue path).
+  // Leaving the previous instance's catalogue in place made freeModels()
+  // report a provider that no longer existed (audit 2026-09-30).
+  activeCatalog = catalog;
   // Pre-gate catalogue: the full derived set is what Zen's live list gets
   // intersected against, so a model Zen dropped can come back when it returns.
   const baseline = catalog === null ? builtinFreeModels() : catalog.current().models;
@@ -1666,7 +1898,14 @@ export function zenProvider(
       const select = (ids: Set<unknown>) => baseline.filter((m) => ids.has(m.id));
       if (ctx.stored) {
         const restored = select(new Set(ctx.stored.models.map((m) => m.id)));
-        if (!(await ctx.publish({ update: () => { catalogue = restored; } }))) return;
+        if (
+          !(await ctx.publish({
+            update: () => {
+              catalogue = restored;
+            },
+          }))
+        )
+          return;
       }
       if (!ctx.allowNetwork || ctx.signal.aborted) return;
       const signal = ctx.signal;
@@ -1683,7 +1922,9 @@ export function zenProvider(
       if (catalog !== null) catalog.applyZenGate(availableIds);
       await ctx.publish({
         persist: { models: next, checkedAt: Date.now() },
-        update: () => { catalogue = next; },
+        update: () => {
+          catalogue = next;
+        },
       });
     },
     stream(model, context, options) {
@@ -1696,10 +1937,14 @@ export function zenProvider(
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(toTranscript(context), key), key);
       const { processed, recorder } = requestOptions(options, gate.context);
-      return withGuidance(provider.streamSimple(model, gate.context, {
-        ...processed,
-        reasoning: options?.reasoning ?? (model.id.startsWith("muse-spark-") ? "xhigh" : undefined),
-      }), gate.restoreShell, recorder);
+      return withGuidance(
+        provider.streamSimple(model, gate.context, {
+          ...processed,
+          reasoning: options?.reasoning ?? (model.id.startsWith("muse-spark-") ? "xhigh" : undefined),
+        }),
+        gate.restoreShell,
+        recorder,
+      );
     },
   };
 }

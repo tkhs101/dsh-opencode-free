@@ -1,0 +1,28 @@
+# The browser half is a hand-written ModuleLoader bundle: no build step, tab
+# indentation is load-bearing for the hand-editing workflow, and reformatting it
+# would bury the diff of every change to it. Formatter choice is a host decision
+# there, not ours.
+src/client.js
+
+# Generated / vendored
+lib/
+node_modules/
+.artifacts/
+pnpm-lock.yaml
+
+# Vendored verbatim from the write-notes-like-deepseek skill. Reformatting these
+# would create drift against the skill's own copies, so every future skill
+# update would arrive as a conflict here. Keep them byte-identical to upstream.
+scripts/notes/
+
+# Markdown: prettier only re-pads the inside of tables (measured: 74 changed
+# lines in README.md, all whitespace inside `| … |`). That is churn, not
+# enforcement, and it would fight the hand-aligned tables these docs use.
+*.md
+docs/**/*.md
+.scratch/**/*.md
+.agents/**/*.md
+# Generated audit artefacts — not source, and the HTML is a deliverable whose
+# formatting is deliberate (template CSS, verbatim evidence blocks).
+audit-report-*.html
+.claude/

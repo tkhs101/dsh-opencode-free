@@ -76,6 +76,8 @@ window.__ModuleLoader__.load({
 			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
 			"probeUntrusted": "本轮有模型没能测到（上游限流、匿名层被拒或网络异常），这些模型的显示保持不变。",
 			"probedAt": "上次探测",
+			"unknownFree": "另有模型 Zen 正在免费层供应、models.dev 却没有它们的资料：",
+			"unknownFreeWhy": "我们不知道它们的上下文长度与能力，也没有验证过它们能否在本插件使用的两条通道上应答，所以不列在选择器里；这不影响下方任何一行。",
 			"probing.now": "正在探测",
 			"probing.waiting": "等待中",
 			"probing.failed": "探测失败",
@@ -130,6 +132,8 @@ window.__ModuleLoader__.load({
 			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
 			"probeUntrusted": "Some models could not be measured this round (upstream throttling, the anonymous tier refusing, or a network error); those models keep their current visibility.",
 			"probedAt": "Last probe",
+			"unknownFree": "Models Zen serves on the free tier that models.dev carries no metadata for:",
+			"unknownFreeWhy": "their context length and capabilities are not knowable, and we have not verified that they answer on either channel this plugin uses, so they are not offered; this does not affect any row below.",
 			"probing.now": "Probing",
 			"probing.waiting": "Waiting",
 			"probing.failed": "Failed",
@@ -216,7 +220,7 @@ window.__ModuleLoader__.load({
 			".opf-card{display:flex;flex-direction:column;max-width:720px;background:#FFFFFF;border:1px solid rgba(229,229,234,.8);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.06),0 1px 3px rgba(0,0,0,.04);overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased}",
 			".opf-head{padding:28px 28px 20px}",
 			".opf-title{font-size:22px;font-weight:600;letter-spacing:-.01em;line-height:1.3;color:#1D1D1F}",
-			".opf-desc{margin:4px 0 20px;font-size:13px;line-height:1.5;color:#86868B}",
+			".opf-desc{margin:4px 0 20px;font-size:13px;line-height:1.5;color:#6B6B72}",
 			".opf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}",
 			".opf-actions{display:flex;align-items:center;gap:10px}",
 			".opf-btn{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:13px;font-weight:500;padding:6px 14px;border-radius:8px;border:1px solid #E5E5EA;background:#F5F5F7;color:#1D1D1F;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:background-color .15s ease-out}",
@@ -224,7 +228,7 @@ window.__ModuleLoader__.load({
 			".opf-btn:active{background:#E2E2E6}",
 			".opf-btn[disabled]{opacity:.55;cursor:default}",
 			".opf-btn svg{width:14px;height:14px;color:#515154;flex:none}",
-			".opf-stamp{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;line-height:1.5;color:#86868B}",
+			".opf-stamp{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;line-height:1.5;color:#6B6B72}",
 			".opf-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#34C759;flex:none}",
 			".opf-body{padding:8px 28px}",
 			".opf-list{display:flex;flex-direction:column;border:1px solid #E5E5EA;border-radius:12px;overflow:hidden;background:#FFFFFF;box-shadow:0 1px 2px rgba(0,0,0,.02)}",
@@ -235,11 +239,11 @@ window.__ModuleLoader__.load({
 			".opf-id{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',Monaco,Menlo,Consolas,'Liberation Mono','Courier New',monospace;font-size:13px;font-weight:500;letter-spacing:-.01em;color:#1D1D1F}",
 			".opf-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:500;line-height:1.6;white-space:nowrap;user-select:none}",
 			".opf-badge svg{width:12px;height:12px;flex:none}",
-			".opf-badge-vision{background:rgba(48,176,199,.10);color:#008397;border:1px solid rgba(48,176,199,.25)}",
-			".opf-badge-think{background:rgba(255,69,58,.08);color:#E0382E;border:1px solid rgba(255,69,58,.20)}",
+			".opf-badge-vision{background:rgba(48,176,199,.10);color:#00737F;border:1px solid rgba(48,176,199,.25)}",
+			".opf-badge-think{background:rgba(255,69,58,.08);color:#C22C22;border:1px solid rgba(255,69,58,.20)}",
 			".opf-badge-think svg{width:10px;height:10px}",
 			".opf-side{display:flex;align-items:center;gap:12px;flex:none}",
-			".opf-state{font-size:13px;color:#86868B;user-select:none}",
+			".opf-state{font-size:13px;color:#6B6B72;user-select:none}",
 			".opf-state.on{color:#1D1D1F;font-weight:500}",
 			".opf-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;user-select:none}",
 			".opf-switch input{position:absolute;opacity:0;width:0;height:0}",
@@ -247,11 +251,14 @@ window.__ModuleLoader__.load({
 			".opf-thumb{position:absolute;top:2px;left:2px;width:22px;height:22px;background:#FFFFFF;border-radius:50%;box-shadow:0 1.5px 3px rgba(0,0,0,.15),0 1px 1px rgba(0,0,0,.06);transition:transform .28s cubic-bezier(.4,0,.2,1)}",
 			".opf-switch input:checked+.opf-track{background:#34C759}",
 			".opf-switch input:checked+.opf-track .opf-thumb{transform:translateX(18px)}",
+			".opf-switch input:focus-visible+.opf-track{box-shadow:0 0 0 3px rgba(51,112,255,.45);outline:2px solid transparent}",
+			".opf-row:focus-within{background:#F0F5FF}",
+			".opf-row:focus-within .opf-id{text-decoration:underline;text-underline-offset:2px}",
 			".opf-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 28px 24px}",
-			".opf-hint{margin:0;font-size:12px;line-height:1.6;color:#86868B}",
+			".opf-hint{margin:0;font-size:12px;line-height:1.6;color:#6B6B72}",
 			".opf-legend{display:flex;align-items:center;gap:10px;flex:none}",
-			".opf-note{margin:0;font-size:12px;line-height:1.6;color:#86868B}",
-			".opf-error{margin:0;font-size:12px;color:#E0382E}",
+			".opf-note{margin:0;font-size:12px;line-height:1.6;color:#6B6B72}",
+			".opf-error{margin:0;font-size:12px;color:#C22C22}",
 			"@keyframes opf-spin{to{transform:rotate(360deg)}}",
 			"@keyframes opf-ping{0%{transform:scale(1);opacity:.75}80%,100%{transform:scale(2.4);opacity:0}}",
 			".opf-spin{animation:opf-spin 1s linear infinite}",
@@ -262,16 +269,16 @@ window.__ModuleLoader__.load({
 			".opf-pingring{position:absolute;display:inline-flex;width:100%;height:100%;border-radius:50%;background:#0071E3;animation:opf-ping 1.4s cubic-bezier(0,0,.2,1) infinite}",
 			".opf-pingdot{position:relative;display:inline-flex;width:8px;height:8px;border-radius:50%;background:#0071E3}",
 			".opf-capsulelabel{color:#1D1D1F;font-weight:500}",
-			".opf-count{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#0071E3}",
+			".opf-count{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#0060C0}",
 			".opf-bar{width:56px;height:6px;background:#E5E5EA;border-radius:9999px;overflow:hidden;flex:none}",
 			".opf-fill{height:100%;background:#0071E3;border-radius:9999px;transition:width .3s ease-out}",
 			".opf-probe{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9999px;font-size:12px;font-weight:500;line-height:1.6;white-space:nowrap;user-select:none}",
 			".opf-probe svg{width:14px;height:14px;flex:none}",
 			".opf-probe-ms{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px}",
-			".opf-probe-ok{background:rgba(52,199,89,.10);color:#28A745}",
-			".opf-probe-fail{background:rgba(255,59,48,.10);color:#FF3B30}",
+			".opf-probe-ok{background:rgba(52,199,89,.10);color:#1B7F32}",
+			".opf-probe-fail{background:rgba(255,59,48,.10);color:#C9251B}",
 			".opf-probe-busy{background:rgba(0,113,227,.10);color:#0071E3}",
-			".opf-probe-wait{background:rgba(229,229,234,.50);color:#86868B}",
+			".opf-probe-wait{background:rgba(229,229,234,.50);color:#6B6B72}",
 			".opf-waitdot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#C7C7CC;flex:none}",
 			".opf-capsule-done{background:rgba(52,199,89,.10);border-color:rgba(52,199,89,.28)}",
 			".opf-capsule-done .opf-capsulelabel{color:#1D1D1F}",
@@ -279,11 +286,11 @@ window.__ModuleLoader__.load({
 			".opf-capsule-mixed{background:rgba(255,149,0,.10);border-color:rgba(255,149,0,.30)}",
 			".opf-capsule-mixed .opf-pingdot,.opf-capsule-mixed .opf-pingring{background:#FF9500;animation:none;opacity:1}",
 			".opf-capsule-ok{color:#1D1D1F;font-weight:500}",
-			".opf-capsule-oknum{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#28A745}",
-			".opf-capsule-badnum{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#FF3B30}",
-			".opf-summaryline{display:flex;align-items:baseline;gap:6px;margin:0;font-size:12px;line-height:1.6;color:#86868B}",
-			".opf-capsule-gone{color:#FF9500;font-weight:500;padding-left:2px;border-left:1px solid rgba(0,0,0,.08)}",
-			".opf-capsule-skip{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#86868B}",
+			".opf-capsule-oknum{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#1B7F32}",
+			".opf-capsule-badnum{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#C9251B}",
+			".opf-summaryline{display:flex;align-items:baseline;gap:6px;margin:0;font-size:12px;line-height:1.6;color:#6B6B72}",
+			".opf-capsule-gone{color:#8A5200;font-weight:500;padding-left:2px;border-left:1px solid rgba(0,0,0,.08)}",
+			".opf-capsule-skip{font-family:'SF Mono',Monaco,Menlo,Consolas,monospace;font-size:11px;color:#6B6B72}",
 			".opf-row-probing{background:rgba(0,113,227,.02)}",
 			".opf-row-probing:hover{background:rgba(0,113,227,.04)}",
 			".opf-row-waiting{opacity:.8}"
@@ -398,6 +405,20 @@ window.__ModuleLoader__.load({
 			}
 		}
 
+		/**
+		 * Ids for the blind-spot note: a few names, then a count.
+		 *
+		 * Deliberately not a full list. These are ids the catalogue has no
+		 * record of, so they are the one string here this plugin cannot vouch
+		 * for; the note's job is to say the list is short and why, not to
+		 * become a second inventory that reads like the first.
+		 */
+		function unknownIdsText(list) {
+			var head = list.slice(0, 3);
+			var rest = list.length - head.length;
+			return head.join(", ") + (rest > 0 ? " (+" + String(rest) + ")" : "");
+		}
+
 		// ── error boundary (the dsh-better-workspace QuietBoundary pattern) ───
 
 		/** A render failure degrades THIS card, never the detail page. */
@@ -474,15 +495,38 @@ window.__ModuleLoader__.load({
 				   simply omits them, and the card degrades to "never probed"
 				   rather than failing to render. */
 				probedAt: typeof payload.probedAt === "number" && isFinite(payload.probedAt) ? payload.probedAt : null,
-				probeInconclusive: payload.probeInconclusive === true
+				probeInconclusive: payload.probeInconclusive === true,
+				/* Optional too, and for a stronger reason: a host that predates
+				   the blind-spot report simply omits it. Nothing here ever
+				   becomes a row — these ids are names, not models. */
+				unknownFree: names(payload.unknownFree)
+				// No `probe` key, and that is deliberate: the host answered the probe
+				// POST with the SAME catalogPayload() the GET route uses, and it has
+				// never carried progress. The 202 POST exists so a click does not
+				// block for minutes; live progress belongs to the GET endpoint
+				// alone. Reading a field nobody sends only teaches the next reader
+				// that it does (audit 2026-09-30).
 			};
+		}
+
+		// Every request carries a deadline. Without one, a host that accepts the
+		// connection and then goes quiet leaves the promise pending forever, so
+		// setBusy(false) / setProbing(false) never run and BOTH toolbar buttons stay
+		// disabled until the page is reloaded (audit 2026-09-30).
+		var REQUEST_TIMEOUT_MS = 20000;
+		function getJSON(url, options) {
+			var merged = Object.assign({}, options);
+			if (typeof AbortSignal === "function" && typeof AbortSignal.timeout === "function") {
+				merged.signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+			}
+			return fetch(url, merged);
 		}
 
 		/** GET the current catalogue. Resolves null on any failure. */
 		function loadCatalog() {
 			if (typeof fetch !== "function") return Promise.resolve(null);
 			try {
-				return Promise.resolve(fetch(CATALOG_URL, { headers: { accept: "application/json" } }))
+				return Promise.resolve(getJSON(CATALOG_URL, { headers: { accept: "application/json" } }))
 					.then(function (response) { return response && response.ok ? response.json() : null; })
 					.then(readSnapshot)
 					.catch(function (error) {
@@ -503,7 +547,7 @@ window.__ModuleLoader__.load({
 		function refreshCatalog() {
 			if (typeof fetch !== "function") return Promise.resolve(null);
 			try {
-				return Promise.resolve(fetch(REFRESH_URL, { method: "POST", headers: { accept: "application/json" } }))
+				return Promise.resolve(getJSON(REFRESH_URL, { method: "POST", headers: { accept: "application/json" } }))
 					.then(function (response) { return response && response.ok ? response.json() : null; })
 					.then(readSnapshot)
 					.catch(function (error) {
@@ -528,7 +572,7 @@ window.__ModuleLoader__.load({
 		function probeCatalog() {
 			if (typeof fetch !== "function") return Promise.resolve(null);
 			try {
-				return Promise.resolve(fetch(PROBE_URL, { method: "POST", headers: { accept: "application/json" } }))
+				return Promise.resolve(getJSON(PROBE_URL, { method: "POST", headers: { accept: "application/json" } }))
 					.then(function (response) { return response && response.ok ? response.json() : null; })
 					.then(readSnapshot)
 					.catch(function (error) {
@@ -542,35 +586,40 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * GET the live progress of the current (or last) probe round. Resolves
-		 * null on any failure; the progress pill simply keeps showing the last
-		 * reading until the POST that started the round answers.
+		 * One progress reading, normalised. Null when the payload is not one.
+		 *
+		 * Shared by the GET and by the probe POST, which now answers as soon as
+		 * the round is accepted and carries its own reading — two copies of this
+		 * normaliser would be two places for the `removed`/`marker`/`targets`
+		 * traps to reappear in.
 		 */
+		function readProgress(payload) {
+			if (payload === null || typeof payload !== "object") return null;
+			return {
+				running: payload.running === true,
+				total: typeof payload.total === "number" ? payload.total : 0,
+				done: typeof payload.done === "number" ? payload.done : 0,
+				current: typeof payload.current === "string" ? payload.current : null,
+				results: payload.results !== null && typeof payload.results === "object" ? payload.results : {},
+				// The round's scope. This normaliser copies field by
+				// field, so anything the host starts sending that is
+				// not listed here is dropped silently — the same trap
+				// `removed` and `marker` walked into. A missing entry
+				// leaves `targets` null, which the renderer reads as
+				// "older host, assume everything is in scope".
+				targets: Array.isArray(payload.targets)
+					? payload.targets.filter((id) => typeof id === "string")
+					: null,
+				startedAt: typeof payload.startedAt === "number" ? payload.startedAt : 0,
+			};
+		}
+
 		function loadProgress() {
 			if (typeof fetch !== "function") return Promise.resolve(null);
 			try {
-				return Promise.resolve(fetch(PROBE_URL, { method: "GET", headers: { accept: "application/json" } }))
+				return Promise.resolve(getJSON(PROBE_URL, { method: "GET", headers: { accept: "application/json" } }))
 					.then(function (response) { return response && response.ok ? response.json() : null; })
-					.then(function (payload) {
-						if (payload === null || typeof payload !== "object") return null;
-						return {
-							running: payload.running === true,
-							total: typeof payload.total === "number" ? payload.total : 0,
-							done: typeof payload.done === "number" ? payload.done : 0,
-							current: typeof payload.current === "string" ? payload.current : null,
-							results: payload.results !== null && typeof payload.results === "object" ? payload.results : {},
-							// The round's scope. This normaliser copies field by
-							// field, so anything the host starts sending that is
-							// not listed here is dropped silently — the same trap
-							// `removed` and `marker` walked into. A missing entry
-							// leaves `targets` null, which the renderer reads as
-							// "older host, assume everything is in scope".
-							targets: Array.isArray(payload.targets)
-								? payload.targets.filter((id) => typeof id === "string")
-								: null,
-							startedAt: typeof payload.startedAt === "number" ? payload.startedAt : 0,
-						};
-					})
+					.then(readProgress)
 					.catch(function (error) {
 						console.warn(TAG + " probe progress failed:", error && error.message ? error.message : error);
 						return null;
@@ -736,7 +785,7 @@ window.__ModuleLoader__.load({
 					if (cancelled || reading === null) return;
 					adopt(reading);
 				});
-				return function () { cancelled = true; pollActive = false; stopPolling(); };
+				return function () { cancelled = true; pollRef.current.active = false; stopPolling(); };
 			}, []);
 
 			function refresh() {
@@ -758,7 +807,7 @@ window.__ModuleLoader__.load({
 			   replaces them. Wiping the reading here is what made a finished
 			   probe look like nothing ever happened. */
 			var PROGRESS_POLL_MS = 800;
-			var pollTimer = null;
+			var pollRef = React.useRef({ timer: null, active: false, awaiting: false });
 			/* Whether the card is following a round, as a mutable flag rather
 			   than the `probing` state. The poll timer outlives the render that
 			   created it, and that render's `probing` is still the value from
@@ -766,39 +815,72 @@ window.__ModuleLoader__.load({
 			   tick and the live progress never appeared, leaving only the final
 			   report the POST reads back. Same lesson as pollTimer: the timer
 			   must not close over render state. */
-			var pollActive = false;
+			// Read through the ref, never the render-scope copy. See pollRef.
+			/* A manual round is in flight and the poll chain is responsible for
+			   closing it. Separate from `pollActive` because a pre-round reading
+			   (`running: false` before the round has started) must not be read as
+			   its end. */
+			// Read through the ref, never the render-scope copy. See pollRef.
 
 			function stopPolling() {
-				if (pollTimer !== null && typeof clearTimeout === "function") {
-					try { clearTimeout(pollTimer); } catch (error_) { /* best effort */ }
+				var timer = pollRef.current.timer;
+			if (timer !== null && typeof clearTimeout === "function") {
+					try { clearTimeout(timer); } catch (error_) { /* best effort */ }
 				}
-				pollTimer = null;
+				pollRef.current.timer = null;
 			}
 
 			function startPolling(reading) {
 				if (reading !== null) setProgress(reading);
 				if (typeof setTimeout !== "function") return;
 				stopPolling();
-				pollTimer = setTimeout(function () {
-					pollTimer = null;
-					if (!pollActive) return;
-					loadProgress().then(function (next) { startPolling(next); });
+				pollRef.current.timer = setTimeout(function () {
+					pollRef.current.timer = null;
+					if (!pollRef.current.active) return;
+					loadProgress().then(function (next) {
+						/* A real reading goes through `adopt`, which is what
+						   decides whether the round is over. Routing it back to
+						   `startPolling` instead would keep the pill moving but
+						   never let anything see the end — the chain would poll a
+						   finished round forever and the busy button would outlive
+						   it. A FAILED read is not a reading, so it re-arms and
+						   tries again rather than ending the chain. */
+						if (next === null) {
+							startPolling(null);
+							return;
+						}
+						adopt(next);
+					});
 				}, PROGRESS_POLL_MS);
 			}
 
 			/* Adopt a reading: a live one starts/keeps the poll, a finished one
 			   is retained as the resting report. `running: false` with results
-			   is a completed round, not an absence of one. */
+			   is a completed round, not an absence of one.
+
+			   The finished branch is also where a MANUAL round closes, because
+			   the POST no longer waits for it — it answers while the round is
+			   still starting, so the poll chain is the only thing that can
+			   observe the end. Without this the busy button would outlive the
+			   round and the card would keep showing the previous verdict. */
 			function adopt(reading) {
 				if (reading === null) return;
 				setProgress(reading);
 				if (reading.running === true) {
-					pollActive = true;
+					pollRef.current.active = true;
 					startPolling(reading);
-				} else {
-					pollActive = false;
-					stopPolling();
+					return;
 				}
+				pollRef.current.active = false;
+				stopPolling();
+				if (!pollRef.current.awaiting) return;
+				pollRef.current.awaiting = false;
+				setProbing(false);
+				// The round may have removed a model, so the offered list is
+				// re-read rather than assumed unchanged.
+				loadCatalog().then(function (next) {
+					if (next !== null) setCatalog(next);
+				});
 			}
 
 			function probe() {
@@ -807,20 +889,43 @@ window.__ModuleLoader__.load({
 				setProbing(true);
 				// Clear the previous round's report: this one replaces it.
 				setProgress(null);
-				pollActive = true;
-				loadProgress().then(startPolling);
+				pollRef.current.active = true;
+				pollRef.current.awaiting = true;
+				loadProgress().then(function (reading) {
+					/* A reading can already be finished — the round may not have
+					   started yet when this first poll lands, and the host answers
+					   `running: false` until it does. That is the PRE-round state,
+					   not a completed round, so it must not be read as the end of
+					   this one. The POST returning successfully is what confirms the
+					   round exists; until then the poll simply keeps going. */
+					if (reading === null || reading.running === true) {
+						adopt(reading);
+						return;
+					}
+					if (pollRef.current.awaiting) {
+						pollRef.current.active = true;
+						startPolling(reading);
+					} else {
+						adopt(reading);
+					}
+				});
+				/* The POST answers as soon as the round is ACCEPTED, so it is no
+				   longer the signal that the round ended — `adopt()` is. Stopping
+				   on the POST instead would cut the chain one tick after the click
+				   and freeze the progress area mid-round, which is the exact bug
+				   the note above `pollActive` records. */
 				probeCatalog().then(function (snapshot) {
-					pollActive = false;
-					stopPolling();
 					if (snapshot !== null) setCatalog(snapshot);
-					else setProbeError(t("probeFailed"));
-					// Read the finished round back so the report matches what
-					// actually landed, not the last poll before the POST.
-					loadProgress().then(function (reading) {
-						if (reading === null) return;
-						setProgress(reading);
-					});
-					setProbing(false);
+					else {
+						/* The round may still be running, so the poll is left alone
+						   and the busy state stands. Only a start that never took
+						   can be called a failure. */
+						if (pollRef.current.active) return;
+						pollRef.current.awaiting = false;
+						stopPolling();
+						setProbeError(t("probeFailed"));
+						setProbing(false);
+					}
 				});
 			}
 
@@ -1052,6 +1157,16 @@ window.__ModuleLoader__.load({
 				? E("p", { className: "opf-note" }, t("probeUntrusted"))
 				: null;
 
+			/* The blind spot, when there is one. Names only, and never a row:
+			   the models involved have no metadata, which is precisely why they
+			   are not offered. Rendered after the untrusted note because both
+			   explain an absence, and the user is reading top-down. */
+			var unknownNote = null;
+			if (catalog !== undefined && catalog !== null && catalog.unknownFree.length > 0) {
+				unknownNote = E("p", { className: "opf-note" },
+					t("unknownFree") + " " + unknownIdsText(catalog.unknownFree) + " " + t("unknownFreeWhy"));
+			}
+
 			var stamp = null;
 			if (catalog !== undefined && catalog !== null && typeof catalog.probedAt === "number") {
 				var stampText = stampOf(catalog.probedAt);
@@ -1243,6 +1358,7 @@ window.__ModuleLoader__.load({
 				E("div", { className: "opf-body" },
 					fallbackNote,
 					untrustedNote,
+					unknownNote,
 					removedNote,
 					refusedNote,
 					listArea,

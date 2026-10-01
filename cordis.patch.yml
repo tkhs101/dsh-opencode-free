@@ -2,4 +2,4 @@
 # model and persistent web configuration untouched.
 - insert:
     - id: opencode-free
-      name: 'dsh-opencode-free'
+      name: "dsh-opencode-free"

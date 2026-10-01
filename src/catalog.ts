@@ -21,7 +21,8 @@
  * import cycle is introduced.
  */
 import { Buffer } from "node:buffer";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -33,6 +34,44 @@ export const MODELS_DEV_URL = "https://models.dev/api.json";
 export const CACHE_VERSION = 1;
 /** D4: lazy revalidation window. */
 export const DEFAULT_TTL_MS = 86_400_000;
+/**
+ * Active-catalogue TTL, reached only when the previous fetch answered `304`.
+ *
+ * 24h is the conservative default; 6h is earned. Measured 2026-09-30: models.dev
+ * answers `If-None-Match` with `304` and 0 bytes, so a revalidation that HITS costs
+ * a few hundred bytes rather than 5.2MB, and the worst-case lag on a newly free
+ * model drops from a day to six hours. A provider that stopped honouring the header
+ * would instead see 5.2MB four times a day per user, so a MISS resets the interval
+ * and the cost falls back to one download a day. The shortened window is taken from
+ * observed behaviour and withdrawn the moment that behaviour stops — the full
+ * argument, including why a competitor's shorter window really is a re-download, is
+ * in `docs/adr/0002-catalogue-source-of-truth.md`.
+ */
+/**
+ * Floor between two MANUAL probe rounds. The automatic round is bounded by
+ * `probedToday(lastProbeAt, now)` (one per local calendar day), but `forceProbes()` is reachable
+ * from the POST route, which has no server-side rate limit, and each round is up
+ * to 34 real inference requests against a bucket shared per egress IP. Five
+ * minutes is far below anything a user would notice and far above a double click
+ * (audit 2026-09-30).
+ */
+export const FORCED_PROBE_MIN_INTERVAL_MS = 5 * 60_000;
+
+export const CATALOG_TTL_ACTIVE_MS = 6 * 60 * 60_000;
+/**
+ * How long a Zen availability answer is trusted before it is re-asked.
+ *
+ * This is a second, independent expiry axis, and it is not a guess about the
+ * catalogue's cost. `GET /zen/v1/models` spends no inference quota at all, so it
+ * can be asked far more often than a completion can be spent — which is the
+ * whole reason the round asks it before probing anything
+ * (see {@link refreshGate}). Thirty minutes keeps a withdrawn model out of the
+ * picker at minutes' notice instead of the 24h a catalogue-only refresh costs.
+ *
+ * Not persisted: a boot treats the gate as unasked. One tiny GET per start is
+ * cheaper than a schema change, and it self-heals after downtime for free.
+ */
+export const GATE_TTL_MS = 30 * 60_000;
 /** D1: bounded so a hung endpoint cannot pin a plugin fiber. */
 export const DEFAULT_TIMEOUT_MS = 10_000;
 /** R1: the real file is ~5.2MB; 20MB leaves headroom and rejects a runaway. */
@@ -128,9 +167,7 @@ const OPT_IN_THINKING_LEVELS = new Set<string>(["xhigh", "max"]);
  * offer levels upstream rejects, which surfaces as an
  * `UNSUPPORTED_REASONING_EFFORT` failure rather than as a clamp.
  */
-export function thinkingLevelMapFor(
-  record: CatalogRecord,
-): Record<string, string | null> | undefined {
+export function thinkingLevelMapFor(record: CatalogRecord): Record<string, string | null> | undefined {
   const options = record.reasoning_options;
   if (!Array.isArray(options)) return undefined;
   const published = new Set<string>();
@@ -190,11 +227,6 @@ export interface DerivedCatalog {
 }
 
 /**
- * Map one models.dev record onto a pi-ai model. `template` supplies identity
- * and every field models.dev does not publish. A record whose fields have the
- * wrong type falls back per-field rather than failing the whole catalogue.
- */
-/**
  * One models.dev record → one pi-ai model. Everything the plugin can learn
  * about a model's CAPABILITIES is taken from the record rather than inherited:
  *
@@ -210,7 +242,11 @@ export interface DerivedCatalog {
  * model rejects, which the host reports as `UNSUPPORTED_REASONING_EFFORT`
  * rather than clamping.
  */
-function buildModel(record: CatalogRecord, template: Model<Api>, knownApis?: ReadonlyMap<string, Api>): Model<Api> {
+function buildModel(
+  record: CatalogRecord,
+  template: Model<Api>,
+  knownApis?: ReadonlyMap<string, Api>,
+): Model<Api> {
   const id = typeof record.id === "string" && record.id !== "" ? record.id : "";
   const api = channelFor(record, knownApis);
   const limit = isPlainObject(record.limit) ? record.limit : {};
@@ -312,8 +348,8 @@ export async function fetchSection(options: FetchSectionOptions): Promise<FetchS
     const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
     if (response.status === 304) return { kind: "not-modified" };
     if (!response.ok) return { kind: "failed", reason: `http ${response.status}` };
-    const text = await response.text();
-    if (Buffer.byteLength(text, "utf8") > maxBytes) return { kind: "failed", reason: "response too large" };
+    const text = await readBounded(response, maxBytes);
+    if (text === null) return { kind: "failed", reason: "response too large" };
     let body: unknown;
     try {
       body = JSON.parse(text);
@@ -339,6 +375,51 @@ export async function fetchSection(options: FetchSectionOptions): Promise<FetchS
     const message = error instanceof Error ? error.message : String(error);
     return { kind: "failed", reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : message };
   }
+}
+
+/**
+ * Read a response body, refusing to grow past `maxBytes`.
+ *
+ * `await response.text()` first and check the length afterwards can only
+ * REJECT an oversized body, never prevent it: by the time the check ran, the
+ * whole thing was already resident in the DSH process. A 20MB ceiling that still
+ * admits a 400MB error page buys nothing, and the symptom (a desktop host dying
+ * with no visible cause) is three steps removed from the reason. Measured
+ * 2026-09-30: a 40MB body against a 20MB cap buffered all 40MB.
+ *
+ * `content-length` is consulted first because it makes the common case free; the
+ * streaming read is what makes the chunked case honest. Returns null when the
+ * body is refused, which the caller reports as `response too large` — the same
+ * reason string as before, so nothing downstream had to change.
+ */
+async function readBounded(response: FetchLikeResponse, maxBytes: number): Promise<string | null> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
+  const body = (response as { body?: ReadableStream<Uint8Array> | null }).body;
+  // No stream (a hand-rolled fetch double, or a Response subclass): fall back to
+  // the buffered read and check afterwards. Slightly less safe, and the only way
+  // to serve those inputs at all.
+  if (!body || typeof body.getReader !== "function") {
+    const text = await response.text();
+    return Buffer.byteLength(text, "utf8") > maxBytes ? null : text;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value === undefined) continue;
+    total += value.byteLength;
+    // Stop the transfer rather than finishing it: the point of the cap is not
+    // to spend the memory, and cancelling is what actually returns it.
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 export interface CatalogCacheRecord {
@@ -454,7 +535,10 @@ export async function readCache(path: string): Promise<CatalogCacheRecord | null
       fetchedAt: typeof parsed.fetchedAt === "number" ? parsed.fetchedAt : 0,
       models: parsed.models,
       probes: readProbes(parsed.probes),
-      lastProbeAt: typeof parsed.lastProbeAt === "number" && Number.isFinite(parsed.lastProbeAt) ? parsed.lastProbeAt : 0,
+      lastProbeAt:
+        typeof parsed.lastProbeAt === "number" && Number.isFinite(parsed.lastProbeAt)
+          ? parsed.lastProbeAt
+          : 0,
       lastRound: readLastRound(parsed.lastRound),
     };
   } catch {
@@ -494,7 +578,7 @@ function readLastRound(value: unknown): CatalogCacheRecord["lastRound"] {
     }
   }
   const targets = Array.isArray(value.targets)
-    ? value.targets.filter((id): id is string => typeof id === 'string')
+    ? value.targets.filter((id): id is string => typeof id === "string")
     : [];
   return { total, done, results, targets };
 }
@@ -511,9 +595,15 @@ export async function writeCacheAtomic(
     lastRound?: CatalogCacheRecord["lastRound"];
   },
 ): Promise<boolean> {
-  const temporary = `${path}.${process.pid}.tmp`;
+  // Unpredictable on purpose. `${path}.${process.pid}.tmp` was both the path and
+  // the pid: on a shared machine another local user could pre-create that exact
+  // name as a symlink and have `writeFile` follow it (audit 2026-09-30).
+  const temporary = join(dirname(path), `.catalog.${randomUUID()}.tmp`);
   try {
-    await mkdir(dirname(path), { recursive: true });
+    // 0700/0600 rather than the umask default: the file records which models
+    // this user hides and when each was last probed, which is nobody else's
+    // business on a multi-user host.
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const payload: Record<string, unknown> = {
       version: CACHE_VERSION,
       etag: record.etag,
@@ -528,11 +618,18 @@ export async function writeCacheAtomic(
     if (record.lastProbeAt !== undefined && record.lastProbeAt > 0) payload.lastProbeAt = record.lastProbeAt;
     const round = record.lastRound;
     if (round !== undefined && round.total > 0) payload.lastRound = round;
-    await writeFile(temporary, JSON.stringify(payload), "utf8");
+    await writeFile(temporary, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
     await rename(temporary, path);
     return true;
   } catch {
     // A cache we cannot persist is a performance loss, never a failure.
+    //
+    // But the staged file is OURS: on Windows a rename onto a target that is
+    // being written concurrently fails with EPERM/EBUSY, and leaving the staged
+    // copy behind means a crash loop accumulates one partial per attempt in the
+    // user's own cache directory (audit 2026-09-30, surfaced by the torn-write
+    // test rather than by inspection).
+    await rm(temporary, { force: true }).catch(() => undefined);
     return false;
   }
 }
@@ -553,6 +650,19 @@ export interface CatalogSnapshot {
   readonly capabilities: readonly ModelCapability[];
   readonly source: CatalogSource;
   readonly updatedAt: number;
+  /**
+   * When Zen last answered "which ids do you serve", or 0 if never this boot.
+   *
+   * Separate from {@link updatedAt} on purpose: the two expire on different
+   * clocks, and conflating them is how a withdrawn model stays in a picker for
+   * a whole catalogue TTL. Not persisted — a boot re-asks.
+   */
+  readonly gateCheckedAt: number;
+  /**
+   * Ids Zen serves that look free but the catalogue has no record of. A
+   * diagnostic, never a membership input — see {@link unknownFree}.
+   */
+  readonly unknownFree: readonly string[];
   readonly refreshing: boolean;
   /** When the last probe round ran; 0 means never. */
   readonly probedAt?: number;
@@ -575,6 +685,18 @@ export interface ModelCapability {
 
 /** Strongest-first thinking levels; `off` is never a badge. */
 const THINKING_LEVEL_RANK = ["max", "xhigh", "high", "medium", "low", "minimal"] as const;
+
+/**
+ * The only signal available for a model the catalogue has never heard of.
+ *
+ * A known model is free because its `cost` is all zero. An unknown one has no
+ * `cost` at all, so the id is the only thing left to read — and a "-free" in
+ * the name is a weaker claim than a price of zero, not an equal one. It is
+ * therefore used for a diagnostic line and for nothing else: never for
+ * membership, never for a capability badge. The panel says so in as many words,
+ * because a list that looks authoritative and is not is worse than no list.
+ */
+const FREE_ID_PATTERN = /(?:^|[-_])free(?:$|[-_.])/;
 
 /**
  * The badge level for one derived record: the strongest level whose map value
@@ -639,6 +761,81 @@ export interface CreateCatalogOptions {
   readonly userAgent?: string;
 }
 
+/**
+ * Everything a Catalogue owns, in one place.
+ *
+ * These were fourteen separate `let` bindings captured by the factory closure,
+ * which made the round scheduler reachable only by building a whole Catalogue,
+ * driving a round and reading the result. One owner object is what lets the
+ * scheduler take (state, deps) instead of capturing a dozen variables.
+ *
+ * `probeRun` stays a mutable object replaced wholesale at the start of every
+ * round: the panel polls a copy while the round mutates the original, and no
+ * verdict logic ever reads it.
+ */
+export interface CatalogState {
+  cache: CatalogCacheRecord | null;
+  models: Model<Api>[];
+  source: CatalogSource;
+  updatedAt: number;
+  zenIds: ReadonlySet<string> | null;
+  inflight: Promise<void> | null;
+  gateInflight: Promise<ReadonlySet<string> | null> | null;
+  /** Set when the last catalogue fetch was a 304 rather than a body download. */
+  lastFetchWasNotModified: boolean;
+  /** When Zen last answered the availability question; 0 = never this boot. */
+  gateCheckedAt: number;
+  probes: ProbeMap;
+  lastProbeAt: number;
+  probeUntrusted: boolean;
+  probeRun: {
+    running: boolean;
+    total: number;
+    done: number;
+    current: string | null;
+    results: Record<string, ProbeProgressResult>;
+    startedAt: number;
+    targets: string[];
+  };
+  probeInflight: Promise<void> | null;
+}
+
+/** Everything a Catalogue needs from the outside world. */
+export interface CatalogDeps {
+  readonly path: string;
+  readonly fetchImpl: FetchLike;
+  readonly now: () => number;
+  readonly userAgent: string | undefined;
+  readonly ttlMs: number;
+  readonly probe: CreateCatalogOptions["probe"];
+  readonly listZenIds: CreateCatalogOptions["listZenIds"];
+  readonly hidden: CreateCatalogOptions["hidden"];
+  readonly template: Model<Api>;
+  readonly knownApis: ReadonlyMap<string, Api> | undefined;
+  /** Bounds how long a sync waits for the warm cache read to land. */
+  readonly warmReadTimeoutMs: number;
+  /** Resolves once the warm cache read has settled. */
+  readonly warm: Promise<void>;
+}
+
+export function initialState(builtinBaseline: readonly Model<Api>[]): CatalogState {
+  return {
+    cache: null,
+    models: builtinBaseline.slice().sort(byId),
+    source: "builtin-fallback",
+    updatedAt: 0,
+    zenIds: null,
+    inflight: null,
+    gateInflight: null,
+    lastFetchWasNotModified: false,
+    gateCheckedAt: 0,
+    probes: {},
+    lastProbeAt: 0,
+    probeUntrusted: false,
+    probeRun: { running: false, total: 0, done: 0, current: null, results: {}, targets: [], startedAt: 0 },
+    probeInflight: null,
+  };
+}
 export interface Catalog {
   current(): CatalogSnapshot;
   /** Post-Zen-gate models — the single list the picker and the panel share. */
@@ -711,76 +908,555 @@ export type ProbeProgressResult =
       readonly marker?: string | undefined;
     };
 
+/**
+ * D2: at most one round per LOCAL calendar day — the plan's rule, compared
+ * against the previous round's local day via the injected `now` so a test can
+ * place both ends exactly.
+ *
+ * Calendar day, not a rolling 24h window: the bound is on how much of the
+ * shared anonymous bucket one day's sweep may spend, and "same day" is what a
+ * user reading the panel would expect. The known edge is a round at 23:50
+ * followed by one at 00:10 — different days, so both run. That is deliberate,
+ * not an oversight; `forceProbes` bypasses this gate entirely, so a manual
+ * click is never blocked either way.
+ */
+export function probedToday(lastProbeAt: number, now: () => number): boolean {
+  if (lastProbeAt <= 0) return false;
+  const previous = new Date(lastProbeAt);
+  const today = new Date(now());
+  return (
+    previous.getFullYear() === today.getFullYear() &&
+    previous.getMonth() === today.getMonth() &&
+    previous.getDate() === today.getDate()
+  );
+}
+
+/**
+ * The one list the picker and the panel share: the catalogue, narrowed by
+ * Zen's gate, minus everything a probe judged dead. A dead model is dropped
+ * from here and named nowhere — the user asked for it to simply not be in the
+ * list, so there is deliberately no companion "unavailable" list to restore
+ * or to go stale.
+ *
+ * `models` itself still carries dead entries, and that is load-bearing rather
+ * than untidy: `adopt` prunes verdicts for models the catalogue no longer
+ * has, so a dead model physically removed from `models` would lose its
+ * verdict on the next sync, come back as a fresh candidate, and be re-probed
+ * to the same answer. Keeping the record is what makes the verdict final.
+ */
+export function effectiveList(
+  models: readonly Model<Api>[],
+  zenIds: ReadonlySet<string> | null,
+  probes: ProbeMap,
+): Model<Api>[] {
+  const gated = zenIds === null ? [...models] : models.filter((model) => zenIds.has(model.id));
+  // Order comes from where the catalogue is born (derive / the offline
+  // floor); this only filters, so it cannot drift from it.
+  return gated.filter((model) => probes[model.id]?.verdict !== "dead");
+}
+
+function effectiveVisible(list: readonly Model<Api>[]): string[] {
+  return list.map((model) => model.id);
+}
+
+/**
+ * Models Zen serves, that the catalogue has never heard of, and whose id
+ * claims to be on the free tier.
+ *
+ * This is the one blind spot the two-source design cannot see past: membership
+ * comes from models.dev, so an id Zen has started serving before models.dev
+ * publishes it is invisible here — not "judged dead", not "gated out", simply
+ * never a candidate. On 2026-09-30 that was one live model
+ * (`jev-1.13-free`), while 24 ids models.dev still called free were correctly
+ * gated out, so the gate is demonstrably working and this is not a symptom of
+ * a broken intersection.
+ *
+ * It is reported rather than fixed, deliberately. Making these models usable
+ * needs an `api` channel and a `limit.context`/`limit.output`, and NEITHER is
+ * obtainable from any source available here: Zen's listing carries only
+ * `id`/`object`/`created`/`owned_by`, and matching a "-free"-suffixed id
+ * against other providers' records is a guess. A wrong number is worse than a
+ * conservative one, because a claimed context length is acted on. So the
+ * honest move is to say the model exists and that we will not guess for it.
+ */
+export function unknownFree(models: readonly Model<Api>[], zenIds: ReadonlySet<string> | null): string[] {
+  if (zenIds === null) return [];
+  const known = new Set(models.map((model) => model.id));
+  const out: string[] = [];
+  for (const id of zenIds) {
+    if (known.has(id) || !FREE_ID_PATTERN.test(id)) continue;
+    out.push(id);
+  }
+  // Same order as everything else the panel shows, and the same comparison
+  // that produces it: a locale-sensitive sort would make this list differ
+  // from the catalogue's own on a machine with a different ICU default.
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Which freshness window applies: a caller-pinned `ttlMs` is honoured verbatim
+ * (tests pin it), so only the default path shortens, and only after a 304 has
+ * proved the upstream honours the conditional header.
+ */
+export function effectiveTtl(
+  pinnedTtl: number | undefined,
+  fallbackTtl: number,
+  lastFetchWasNotModified: boolean,
+): number {
+  return pinnedTtl ?? (lastFetchWasNotModified ? CATALOG_TTL_ACTIVE_MS : fallbackTtl);
+}
+
+export function catalogueIsStale(updatedAt: number, now: () => number, ttl: number): boolean {
+  return now() - updatedAt > ttl;
+}
+
+/**
+ * "Never asked this boot" is stale by definition, not by arithmetic. Testing
+ * it as an inequality would let a small or injected clock read 0 as fresh,
+ * which is exactly the case where a real question is still outstanding.
+ */
+export function gateIsStale(gateCheckedAt: number, now: () => number): boolean {
+  return gateCheckedAt === 0 || now() - gateCheckedAt > GATE_TTL_MS;
+}
+
+/**
+ * How one probe outcome becomes the row the panel paints.
+ *
+ * This used to live inline in the round loop, where the interesting rule was
+ * invisible between the transport plumbing: the card cannot say "failed" without
+ * a `code`, and it must not call a re-confirmed death a removal. Both are
+ * load-bearing — a row with no reason is the bug this field exists to prevent,
+ * and reporting an old verdict as a fresh removal dates a change to this round
+ * that happened in an earlier one.
+ *
+ * `priorVerdict` is read BEFORE the round writes the new one, which is the only
+ * reason the `removed` flag can be answered at all.
+ */
+export function probeRowFor(
+  outcome:
+    | {
+        readonly kind?: string;
+        readonly code?: string;
+        readonly http?: number;
+        readonly marker?: string | null;
+      }
+    | null
+    | undefined,
+  elapsed: number,
+  priorVerdict: string | undefined,
+): ProbeProgressResult {
+  if (outcome !== undefined && outcome !== null && outcome.kind === "ok") {
+    return { status: "ok", ms: elapsed };
+  }
+  // A prober that predates the coded outcome still gets a reason: the verdict
+  // itself is the coarse fallback, never a silent failure.
+  const code =
+    typeof outcome?.code === "string" && outcome.code !== ""
+      ? outcome.code
+      : outcome?.kind === "dead"
+        ? "dead"
+        : "unknown";
+  return {
+    status: "failed",
+    ms: elapsed,
+    code,
+    http: typeof outcome?.http === "number" && isFinite(outcome.http) ? outcome.http : 0,
+    ...(code === "dead" ? { removed: priorVerdict !== "dead" } : {}),
+    // Which gate marker the body carried, so the refusal names itself instead of
+    // arriving as one anonymous "未测到".
+    ...(typeof outcome?.marker === "string" && outcome.marker !== "" ? { marker: outcome.marker } : {}),
+  };
+}
+
+/**
+ * A dead verdict is final ONLY once it has been earned by asking every channel.
+ * A verdict without that marker predates the sweep, so it gets one re-check:
+ * those are precisely the verdicts that may have been a wrong channel refused
+ * rather than a model that is gone — and a permanent verdict on a wrong channel
+ * is how a working model goes missing for good.
+ */
+function isSettled(id: string, probes: ProbeMap): boolean {
+  const record = probes[id];
+  if (record === undefined || record.verdict !== "dead") return false;
+  return record.swept === true;
+}
+
+/**
+ * What one round will ask, split into the two buckets the panel needs to tell
+ * "queued" from "skipped".
+ *
+ * `targets` are the models the user has switched ON that no earned verdict has
+ * settled — a probe costs a request from a bucket shared by everything behind
+ * this egress, so asking about a hidden model is an answer nobody will read.
+ *
+ * `notListed` are models Zen has dropped: out of the picker without ever being
+ * asked, zero requests spent. They still count toward the round's total,
+ * because the panel's tally has to add up and a silent hole in the list is
+ * exactly what a reader cannot explain.
+ */
+export function planRound(
+  models: readonly Model<Api>[],
+  live: readonly Model<Api>[],
+  servedSet: ReadonlySet<string> | null,
+  probes: ProbeMap,
+  hidden: ((id: string) => boolean) | undefined,
+): { targets: Model<Api>[]; notListed: Model<Api>[] } {
+  const isShown = (id: string): boolean => hidden?.(id) !== true;
+  return {
+    targets: live.filter((model) => isShown(model.id) && !isSettled(model.id, probes)),
+    notListed:
+      servedSet === null
+        ? []
+        : models.filter((model) => !servedSet.has(model.id) && probes[model.id]?.verdict !== "dead"),
+  };
+}
+
+// Warm start: a valid state.cache restores the catalogue without any network.
+function adopt(state: CatalogState, deps: CatalogDeps, record: CatalogCacheRecord): void {
+  const derived = derive(record.models, { knownApis: deps.knownApis, template: deps.template });
+  // An empty state.models dictionary is NOT a catalogue — it is a fetch that failed
+  // and got persisted anyway (a round writes one when the catalogue fetch
+  // never succeeded, see runProbeRound). Adopting it empties the picker on
+  // the next start, which is strictly worse than the missing verdicts that
+  // write was meant to preserve. Keep the offline floor and take only the
+  // probe state; this is the same fail-safe direction every other "we could
+  // not tell" path in this file already takes.
+  if (derived.candidates.length > 0) {
+    state.models = derived.candidates;
+    state.source = "models.dev";
+    state.updatedAt = record.fetchedAt;
+  }
+  if (Object.keys(record.probes).length > 0) state.probes = { ...record.probes };
+  if (record.lastProbeAt > state.lastProbeAt) state.lastProbeAt = record.lastProbeAt;
+  // The report of a round that already finished, so a restart shows the
+  // outcome instead of an empty progress area. `running` stays false: this is
+  // a completed round, not one to follow.
+  const restored = record.lastRound;
+  if (restored !== undefined && restored.total > 0) {
+    state.probeRun = {
+      running: false,
+      total: restored.total,
+      done: restored.done,
+      current: null,
+      results: { ...restored.results },
+      targets: Array.isArray(restored.targets) ? restored.targets.slice() : [],
+      startedAt: record.lastProbeAt,
+    };
+  }
+  // Verdicts for state.models the catalogue no longer carries are dropped: a
+  // vanished model is not in any round's target list, so keeping its verdict
+  // would only grow the state.cache file across upstream removals. This is also
+  // why a DEAD model is not removed from `state.models` above — see effectiveList.
+  const present = new Set(state.models.map((model) => model.id));
+  for (const id of Object.keys(state.probes)) if (!present.has(id)) delete state.probes[id];
+}
+
+function refreshGate(state: CatalogState, deps: CatalogDeps): Promise<ReadonlySet<string> | null> {
+  if (state.gateInflight !== null) return state.gateInflight;
+  state.gateInflight = (async () => {
+    const { listZenIds } = deps;
+    if (listZenIds === undefined) return null;
+    const raw: unknown = await listZenIds().catch(() => null);
+    const served = admissibleGate(state, raw);
+    if (served === null) return null;
+    state.zenIds = served;
+    state.gateCheckedAt = deps.now();
+    return served;
+  })().finally(() => {
+    state.gateInflight = null;
+  });
+  return state.gateInflight;
+}
+
+/**
+ * The ONE rule for "may this answer narrow the gate?".
+ *
+ * Three shapes are "could not tell", and all three must leave the gate alone:
+ * a failure (null), a non-array (this seam is also filled by a host refresh and
+ * by tests — iterating a bare string turns it into a set of single characters,
+ * i.e. a well-typed, well-formed, entirely wrong gate), and an empty list
+ * (`fetchZenModelIds` already collapses one to null, but the invariant belongs
+ * here, not at the state.source).
+ *
+ * DISJOINT is the fourth, and the one a list-emptiness check misses. A response
+ * that is perfectly well-formed and names NONE of the state.models we hold is far more
+ * likely to be a changed shape, a wrong egress, or a different tenant than it is
+ * to be a simultaneous withdrawal of every free model — and acting on it empties
+ * the picker outright, which is the one outcome this decision exists to prevent.
+ * Found by review 2026-09-30, after the `[]` guard shipped believing it was
+ * sufficient.
+ *
+ * This was previously written TWICE — once in `refreshGate`, once in
+ * `applyZenGate` — and only the first was ever executed, so "change one, forget
+ * the other" would have accumulated silently until some future host actually
+ * called `refreshModels` (audit 2026-09-30). One owner, both callers.
+ */
+function admissibleGate(state: CatalogState, raw: unknown): ReadonlySet<string> | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  if (state.models.length > 0) {
+    const held = new Set(state.models.map((model) => model.id));
+    let overlap = 0;
+    for (const id of raw) if (typeof id === "string" && held.has(id)) overlap += 1;
+    if (overlap === 0) return null;
+  }
+  const served = new Set<string>(raw.filter((id): id is string => typeof id === "string" && id !== ""));
+  return served.size > 0 ? served : null;
+}
+
+async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
+  const { path, fetchImpl, userAgent, warmReadTimeoutMs } = deps;
+  // Never fetch before the warm read settles: the response below is built
+  // from `state.cache` (for the conditional etag) and adopted over whatever the
+  // warm start installed, so letting the two interleave either resurrects a
+  // removed model or drops the persisted probe history.
+  await Promise.race([
+    deps.warm,
+    new Promise<void>((resolve) => setTimeout(resolve, warmReadTimeoutMs).unref?.()),
+  ]);
+  // R5: without a state.cache there is nothing a 304 could rebuild, so the
+  // conditional header must not be sent at all.
+  const result = await fetchSection({ fetchImpl, etag: state.cache?.etag, userAgent });
+  if (result.kind === "failed") return; // failure preserves the current catalogue
+  const stamp = deps.now();
+  if (result.kind === "not-modified") {
+    state.updatedAt = stamp;
+    // The endpoint honoured the header, so the short window is now earned.
+    state.lastFetchWasNotModified = true;
+    // Carry the new freshness into the state.cache file too, otherwise every boot
+    // would revalidate again despite the catalogue being current.
+    if (state.cache !== null) {
+      state.cache = { ...state.cache, fetchedAt: stamp };
+      await writeCacheAtomic(path, {
+        etag: state.cache.etag,
+        fetchedAt: stamp,
+        models: state.cache.models,
+        probes: state.probes,
+        lastProbeAt: state.lastProbeAt,
+        // Carried, not re-derived: a catalogue revalidation is not a probe
+        // round and has nothing new to report, but DROPPING it would delete
+        // the last round's report from disk. Found by review 2026-09-30 —
+        // the field predates the 6h window, which is what made the loss
+        // frequent enough to notice (up to four syncs a day instead of one).
+        lastRound: state.cache.lastRound,
+      });
+    }
+    return;
+  }
+  // Retain the etag: without this every revalidation would be a full
+  // 5.2MB download instead of a conditional request.
+  // A real body means the short window is withdrawn until a 304 earns it back.
+  state.lastFetchWasNotModified = false;
+  // Carry `lastRound` across the rebuild, exactly as the 304 branch above does.
+  // The 304 branch spreads the old record and so kept it; this branch built a
+  // fresh object and silently dropped the field, so the very next write
+  // deleted the last round's report from disk. The comment here used to claim
+  // the opposite of what the code did. Reproduced 2026-09-30: a second full
+  // sync after a round left `lastRound` absent.
+  const previousRound = state.cache?.lastRound;
+  state.cache = {
+    version: CACHE_VERSION,
+    etag: result.etag,
+    fetchedAt: stamp,
+    models: result.section,
+    probes: state.probes,
+    lastProbeAt: state.lastProbeAt,
+    lastRound: previousRound,
+  };
+  adopt(state, deps, state.cache);
+  // A sync is not a round and has nothing new to report, but its write replaces
+  // the whole record — so omitting the field deletes the report. Carried, not
+  // re-derived.
+  await writeCacheAtomic(path, {
+    etag: result.etag,
+    fetchedAt: stamp,
+    models: result.section,
+    probes: state.probes,
+    lastProbeAt: state.lastProbeAt,
+    lastRound: previousRound,
+  });
+}
+
+function runSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
+  if (state.inflight !== null) return state.inflight;
+  state.inflight = sync(state, deps).finally(() => {
+    state.inflight = null;
+  });
+  return state.inflight;
+}
+
+function runProbeSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
+  if (state.probeInflight !== null) return state.probeInflight;
+  state.probeInflight = runProbeRound(state, deps).finally(() => {
+    state.probeInflight = null;
+  });
+  return state.probeInflight;
+}
+
+/**
+ * Exported for tests, and for that is the whole point of the extraction: a round
+ * can now be driven with two plain objects, with no factory, no temp directory
+ * and no network. Everything else in this file moved for the same reason.
+ */
+export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Promise<void> {
+  const { path, hidden, probe } = deps;
+  const stamp = deps.now();
+  // Cheap authoritative availability first. One `GET /zen/v1/state.models` answers
+  // "does Zen serve this id at all" without spending inference quota, so a
+  // withdrawn model costs one GET instead of one completion — and the answer
+  // is Zen's own, not a reading of error prose. This is the same check 9router
+  // makes for its free provider, and it is the reason its availability test
+  // is fast.
+  //
+  // It is deliberately NOT recorded as a `dead` verdict. `dead` is permanent
+  // and learned by asking the model; membership is recomputed from the
+  // authority on every round, so a model Zen puts back simply reappears.
+  // Conflating the two is how a model that came back stays suppressed forever.
+  const servedSet = await refreshGate(state, deps);
+  const live = servedSet === null ? state.models : state.models.filter((model) => servedSet.has(model.id));
+  // A `dead` verdict is final ONLY once it has been earned by asking every
+  // channel. A verdict without that marker predates the sweep, so it gets one
+  // re-check: those are precisely the verdicts that may have been a wrong
+  // channel refused rather than a model that is gone — and a permanent verdict
+  // on a wrong channel is how a working model goes missing for good.
+  // The round's scope, decided by one pure function below.
+  const { targets, notListed } = planRound(state.models, live, servedSet, state.probes, hidden);
+  // The panel polls this while the round runs: a progress pill ("4/10") and
+  // one badge per row (ok with latency / failed / probing / waiting). It is
+  // replaced wholesale at the start of every round and frozen when the round
+  // ends, so a late poll never shows a previous round's leftovers as live.
+  state.probeRun = {
+    running: true,
+    // The round's whole scope, so the panel can tell "queued" from "skipped".
+    targets: [...targets, ...notListed].map((model) => model.id),
+    total: targets.length + notListed.length,
+    done: 0,
+    current: null,
+    results: {},
+    startedAt: stamp,
+  };
+  let untrusted = false;
+  for (const model of notListed) {
+    // At zero cost, with the reason that is actually known: Zen does not list
+    // it. This is what lets the panel say so rather than leave a gap.
+    state.probeRun.results[model.id] = {
+      status: "failed",
+      ms: 0,
+      code: "not-listed",
+      http: 0,
+      removed: true,
+    };
+    state.probeRun.done += 1;
+  }
+  try {
+    for (const model of targets) {
+      state.probeRun.current = model.id;
+      const started = deps.now();
+      let outcome: ProbeResult;
+      try {
+        outcome = await probe!(model);
+      } catch {
+        untrusted = true;
+        state.probeRun.results[model.id] = {
+          status: "failed",
+          ms: Math.max(0, deps.now() - started),
+          code: "error",
+          http: 0,
+        };
+        state.probeRun.done += 1;
+        continue;
+      }
+      // The row badge reports whether the model ANSWERED, not what the
+      // verdict was: `dead` removes the model from the list, but from this
+      // round's point of view it is still "did not answer usably". Only
+      // `ok` earns the green badge; everything else is red — and red carries
+      // WHY, because a red badge with no reason is not a report.
+      const elapsed = Math.max(0, deps.now() - started);
+      state.probeRun.results[model.id] = probeRowFor(outcome, elapsed, state.probes[model.id]?.verdict);
+      state.probeRun.done += 1;
+      if (outcome === undefined || outcome === null || outcome.kind === "inconclusive") {
+        untrusted = true;
+        continue;
+      }
+      if (outcome.kind !== "ok" && outcome.kind !== "dead") {
+        untrusted = true;
+        continue;
+      }
+      state.probes[model.id] = {
+        verdict: outcome.kind,
+        at: stamp,
+        ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
+        // Reaching here means the prober exhausted every channel before
+        // concluding, so this `dead` is earned and can be final.
+        ...(outcome.kind === "dead" ? { swept: true } : {}),
+      };
+    }
+  } finally {
+    state.probeRun.running = false;
+    state.probeRun.current = null;
+  }
+  // The round marker is written even when nothing concluded: it is the only
+  // thing that stops a fully-gated day from re-probing on every single read.
+  state.lastProbeAt = stamp;
+  state.probeUntrusted = untrusted;
+  // One atomic write per round, never per model: a half-finished round must
+  // not be read back as a complete set of verdicts.
+  //
+  // Written even when `state.cache` is null — i.e. a first boot whose catalogue
+  // fetch failed, where the round is running against the pi-ai offline floor.
+  // That round may spend up to 34 real requests from the shared anonymous
+  // bucket, and the guard used to throw all of it away, so the next DSH restart
+  // bought the same 34 again. `state.models` degrades to an empty dictionary, which
+  // `readCache` accepts and `adopt` treats as "nothing to derive", leaving the
+  // offline floor in place while the verdicts survive (audit 2026-09-30).
+  const report: NonNullable<CatalogCacheRecord["lastRound"]> = {
+    total: state.probeRun.total,
+    done: state.probeRun.done,
+    results: state.probeRun.results,
+    targets: state.probeRun.targets,
+  };
+  await writeCacheAtomic(path, {
+    etag: state.cache?.etag,
+    fetchedAt: state.cache?.fetchedAt ?? 0,
+    models: state.cache?.models ?? {},
+    probes: state.probes,
+    lastProbeAt: state.lastProbeAt,
+    // The report, so the panel's progress area survives a restart.
+    lastRound: report,
+  });
+  // Mirror the write back into the in-memory record. Every sync path carries
+  // `state.cache.lastRound` forward rather than re-deriving it, so a round that
+  // writes the report to disk without recording it here leaves the NEXT sync
+  // carrying `undefined` — which deleted the very report it had just written.
+  // Two writers of one field, only one of which updated the state.source of truth:
+  // reproduced 2026-09-30 (fixing the sync branch alone was not enough).
+  if (state.cache !== null) state.cache = { ...state.cache, lastRound: report };
+}
+
 export function createCatalog(options: CreateCatalogOptions): Catalog {
-  const { template, builtinBaseline, knownApis, cachePath: path, fetchImpl, ttlMs = DEFAULT_TTL_MS } = options;
+  const {
+    template,
+    builtinBaseline,
+    knownApis,
+    cachePath: path,
+    fetchImpl,
+    ttlMs = DEFAULT_TTL_MS,
+  } = options;
   const now = options.now ?? Date.now;
   const userAgent = options.userAgent;
   const probe = options.probe;
   const listZenIds = options.listZenIds;
   const hidden = options.hidden;
 
-  let cache: CatalogCacheRecord | null = null;
-  let models: Model<Api>[] = builtinBaseline.slice().sort(byId);
-  let source: CatalogSource = "builtin-fallback";
-  let updatedAt = 0;
-  let zenIds: ReadonlySet<string> | null = null;
-  let inflight: Promise<void> | null = null;
-  let probes: ProbeMap = {};
-  let lastProbeAt = 0;
-  let probeUntrusted = false;
-  // Live round state, replaced wholesale at the start of every round. Plain
-  // mutable object on purpose: the panel polls a copy while the round mutates
-  // the original, and no verdict logic ever reads this.
-  let probeRun: {
-    running: boolean;
-    total: number;
-    done: number;
-    current: string | null;
-    results: Record<string, ProbeProgressResult>;
-    startedAt: number;
-    targets: string[];
-  } = { running: false, total: 0, done: 0, current: null, results: {}, targets: [], startedAt: 0 };
-  let probeInflight: Promise<void> | null = null;
-
-  // Warm start: a valid cache restores the catalogue without any network.
-  const adopt = (record: CatalogCacheRecord): void => {
-    const derived = derive(record.models, { knownApis, template });
-    models = derived.candidates;
-    source = "models.dev";
-    updatedAt = record.fetchedAt;
-    if (Object.keys(record.probes).length > 0) probes = { ...record.probes };
-    if (record.lastProbeAt > lastProbeAt) lastProbeAt = record.lastProbeAt;
-    // The report of a round that already finished, so a restart shows the
-    // outcome instead of an empty progress area. `running` stays false: this is
-    // a completed round, not one to follow.
-    const restored = record.lastRound;
-    if (restored !== undefined && restored.total > 0) {
-      probeRun = {
-        running: false,
-        total: restored.total,
-        done: restored.done,
-        current: null,
-        results: { ...restored.results },
-        targets: Array.isArray(restored.targets) ? restored.targets.slice() : [],
-        startedAt: record.lastProbeAt,
-      };
-    }
-    // Verdicts for models the catalogue no longer carries are dropped: a
-    // vanished model is not in any round's target list, so keeping its verdict
-    // would only grow the cache file across upstream removals. This is also
-    // why a DEAD model is not removed from `models` above — see effectiveList.
-    const present = new Set(models.map((model) => model.id));
-    for (const id of Object.keys(probes)) if (!present.has(id)) delete probes[id];
-  };
+  const state = initialState(builtinBaseline);
 
   /**
-   * Resolves once the warm cache read has settled.
+   * Resolves once the warm state.cache read has settled.
    *
    * The warm start is deliberately fire-and-forget — a container must answer
    * synchronously — but that left it free to land AFTER a sync and replace the
    * fresher section with the older cached one, holding a removed model in the
-   * picker for a whole TTL. `sync()` therefore waits for this before fetching.
-   * The wait is one local `readFile` of the cache (megabytes, not a download)
+   * picker for a whole TTL. `sync(state, deps)` therefore waits for this before fetching.
+   * The wait is one local `readFile` of the state.cache (megabytes, not a download)
    * and is bounded, so a wedged filesystem delays a sync rather than hanging
    * it forever.
    */
@@ -790,112 +1466,67 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
     settleWarm = resolve;
   });
 
+  // Three one-liners over the pure rules above. They exist so the call sites
+  // read as questions ("is the catalogue stale?") rather than as expressions,
+  // and so the rules themselves can be exercised without a container.
+  const currentTtl = (): number => effectiveTtl(options.ttlMs, ttlMs, state.lastFetchWasNotModified);
+  const stale = (): boolean => catalogueIsStale(state.updatedAt, now, currentTtl());
+  const gateStale = (): boolean => gateIsStale(state.gateCheckedAt, now);
+
   const warmStart = (): void => {
     void readCache(path)
       .then((found) => {
         if (found === null) return;
-        cache = found;
-        // Adopted whatever its age: a stale cache is still a far better answer
+        state.cache = found;
+        // Adopted whatever its age: a stale state.cache is still a far better answer
         // than the offline floor, and `ensureFresh` revalidates on the first read
         // in the background rather than making the user wait for 5.2MB.
-        adopt(found);
+        adopt(state, deps, found);
       })
       .catch(() => undefined)
       .finally(settleWarm);
   };
   warmStart();
 
-  const stale = (): boolean => now() - updatedAt > ttlMs;
+  // An explicit `ttlMs` is a caller asking for exactly that window (tests pin
+  // it), so it is honoured verbatim and the adaptive step is skipped. Only the
+  // default path shortens, and only after a 304 proved the header works.
 
   /**
-   * D2: at most one round per LOCAL calendar day — the plan's rule, compared
-   * against the previous round's local day via the injected `now` so a test can
-   * place both ends exactly.
+   * Ask Zen, right now, which ids it serves — and remember the answer.
    *
-   * Calendar day, not a rolling 24h window: the bound is on how much of the
-   * shared anonymous bucket one day's sweep may spend, and "same day" is what a
-   * user reading the panel would expect. The known edge is a round at 23:50
-   * followed by one at 00:10 — different days, so both run. That is deliberate,
-   * not an oversight; `forceProbes` bypasses this gate entirely, so a manual
-   * click is never blocked either way.
-   */
-  const probedToday = (): boolean => {
-    if (lastProbeAt <= 0) return false;
-    const previous = new Date(lastProbeAt);
-    const today = new Date(now());
-    return (
-      previous.getFullYear() === today.getFullYear() &&
-      previous.getMonth() === today.getMonth() &&
-      previous.getDate() === today.getDate()
-    );
-  };
-
-  /**
-   * The one list the picker and the panel share: the catalogue, narrowed by
-   * Zen's gate, minus everything a probe judged dead. A dead model is dropped
-   * from here and named nowhere — the user asked for it to simply not be in the
-   * list, so there is deliberately no companion "unavailable" list to restore
-   * or to go stale.
+   * The ONE writer of `state.zenIds` and `state.gateCheckedAt`. Three call sites used to
+   * write the gate independently (`runProbeRound`, `applyZenGate`, and the host
+   * refresh); with two independent cadences now running, two writers would mean
+   * whichever finished last silently overwrote the other's answer, and a stale
+   * one winning that race would look exactly like an upstream change.
    *
-   * `models` itself still carries dead entries, and that is load-bearing rather
-   * than untidy: `adopt` prunes verdicts for models the catalogue no longer
-   * has, so a dead model physically removed from `models` would lose its
-   * verdict on the next sync, come back as a fresh candidate, and be re-probed
-   * to the same answer. Keeping the record is what makes the verdict final.
+   * Single-flight, because a poll and a probe round can reach it together and
+   * one GET answers both.
+   *
+   * `null` means "could not tell" and is the only reading that leaves the gate in
+   * force. A narrowed gate is the one update here that can empty a picker, and a
+   * timeout, a region refusal or a malformed body must never be read as "these
+   * state.models are gone".
    */
-  const effectiveList = (): Model<Api>[] => {
-    const gated = zenIds === null ? models : models.filter((model) => zenIds!.has(model.id));
-    // Order comes from where the catalogue is born (derive / the offline
-    // floor); this only filters, so it cannot drift from it.
-    return gated.filter((model) => probes[model.id]?.verdict !== "dead");
-  };
-
-  const effectiveVisible = (): string[] => effectiveList().map((model) => model.id);
-
-  const sync = async (): Promise<void> => {
-    // Never fetch before the warm read settles: the response below is built
-    // from `cache` (for the conditional etag) and adopted over whatever the
-    // warm start installed, so letting the two interleave either resurrects a
-    // removed model or drops the persisted probe history.
-    await Promise.race([warm, new Promise<void>((resolve) => setTimeout(resolve, WARM_READ_TIMEOUT_MS).unref?.())]);
-    // R5: without a cache there is nothing a 304 could rebuild, so the
-    // conditional header must not be sent at all.
-    const result = await fetchSection({ fetchImpl, etag: cache?.etag, userAgent });
-    if (result.kind === "failed") return; // failure preserves the current catalogue
-    const stamp = now();
-    if (result.kind === "not-modified") {
-      updatedAt = stamp;
-      // Carry the new freshness into the cache file too, otherwise every boot
-      // would revalidate again despite the catalogue being current.
-      if (cache !== null) {
-        cache = { ...cache, fetchedAt: stamp };
-        await writeCacheAtomic(path, {
-          etag: cache.etag,
-          fetchedAt: stamp,
-          models: cache.models,
-          probes,
-          lastProbeAt,
-        });
-      }
-      return;
-    }
-    // Retain the etag: without this every revalidation would be a full
-    // 5.2MB download instead of a conditional request.
-    cache = { version: CACHE_VERSION, etag: result.etag, fetchedAt: stamp, models: result.section, probes, lastProbeAt };
-    adopt(cache);
-    await writeCacheAtomic(path, { etag: result.etag, fetchedAt: stamp, models: result.section, probes, lastProbeAt });
-  };
-
-  const runSingle = (): Promise<void> => {
-    if (inflight !== null) return inflight;
-    inflight = sync().finally(() => {
-      inflight = null;
-    });
-    return inflight;
+  // The outside world, named once so the lifted functions can take it.
+  const deps: CatalogDeps = {
+    path,
+    fetchImpl,
+    now,
+    userAgent,
+    ttlMs,
+    probe,
+    listZenIds,
+    hidden,
+    template,
+    knownApis,
+    warmReadTimeoutMs: WARM_READ_TIMEOUT_MS,
+    warm,
   };
 
   /**
-   * D2/D6b: one ordered round over the models that are still unjudged.
+   * D2/D6b: one ordered round over the state.models that are still unjudged.
    *
    * Sequential `for…await` on purpose (no concurrency, no batching): the round
    * spends a shared anonymous-quota bucket, and firing 30+ requests at once
@@ -909,220 +1540,96 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    * key too. Recovery is manual and is for upstream changes (a model coming
    * back, a channel being fixed): delete
    * `$DSH_HOME/dsh-opencode-free/catalog.json` and the next start re-derives
-   * and re-probes the whole catalogue.
+   * and re-state.probes the whole catalogue.
    *
    * Only conclusive verdicts are recorded. An `inconclusive` — or a prober that
    * rejects — leaves the model exactly as it was (D5): one gated IP must never
    * empty the picker.
    */
-  const runProbeRound = async (): Promise<void> => {
-    const stamp = now();
-    // Cheap authoritative availability first. One `GET /zen/v1/models` answers
-    // "does Zen serve this id at all" without spending inference quota, so a
-    // withdrawn model costs one GET instead of one completion — and the answer
-    // is Zen's own, not a reading of error prose. This is the same check 9router
-    // makes for its free provider, and it is the reason its availability test
-    // is fast.
-    //
-    // It is deliberately NOT recorded as a `dead` verdict. `dead` is permanent
-    // and learned by asking the model; membership is recomputed from the
-    // authority on every round, so a model Zen puts back simply reappears.
-    // Conflating the two is how a model that came back stays suppressed forever.
-    const served = await listZenIds?.().catch(() => null) ?? null;
-    if (served !== null) zenIds = new Set(served);
-    const servedSet = served === null ? null : new Set(served);
-    const live = servedSet === null
-      ? models
-      : models.filter((model) => servedSet.has(model.id));
-    // A `dead` verdict is final ONLY once it has been earned by asking every
-    // channel. A verdict without that marker predates the sweep, so it gets one
-    // re-check: those are precisely the verdicts that may have been a wrong
-    // channel refused rather than a model that is gone — and a permanent verdict
-    // on a wrong channel is how a working model goes missing for good.
-    const settled = (id: string): boolean => {
-      const record = probes[id];
-      if (record === undefined || record.verdict !== "dead") return false;
-      return record.swept === true;
-    };
-    const isShown = (id: string): boolean => hidden?.(id) !== true;
-    const targets = live.filter((model) => isShown(model.id) && !settled(model.id));
-    // Models Zen dropped: out of `visible` without ever being asked. They still
-    // count toward the round, because the panel's tally has to add up and a
-    // silent hole in the list is exactly what a reader cannot explain.
-    const notListed = servedSet === null
-      ? []
-      : models.filter((model) => !servedSet.has(model.id) && probes[model.id]?.verdict !== "dead");
-    // The panel polls this while the round runs: a progress pill ("4/10") and
-    // one badge per row (ok with latency / failed / probing / waiting). It is
-    // replaced wholesale at the start of every round and frozen when the round
-    // ends, so a late poll never shows a previous round's leftovers as live.
-    probeRun = {
-      running: true,
-      // The round's whole scope, so the panel can tell "queued" from "skipped".
-      targets: [...targets, ...notListed].map((model) => model.id),
-      total: targets.length + notListed.length,
-      done: 0,
-      current: null,
-      results: {},
-      startedAt: stamp,
-    };
-    let untrusted = false;
-    for (const model of notListed) {
-      // At zero cost, with the reason that is actually known: Zen does not list
-      // it. This is what lets the panel say so rather than leave a gap.
-      probeRun.results[model.id] = { status: "failed", ms: 0, code: "not-listed", http: 0, removed: true };
-      probeRun.done += 1;
-    }
-    try {
-      for (const model of targets) {
-        probeRun.current = model.id;
-        const started = now();
-        let outcome: ProbeResult;
-        try {
-          outcome = await probe!(model);
-        } catch {
-          untrusted = true;
-          probeRun.results[model.id] = { status: "failed", ms: Math.max(0, now() - started), code: "error", http: 0 };
-          probeRun.done += 1;
-          continue;
-        }
-        // The row badge reports whether the model ANSWERED, not what the
-        // verdict was: `dead` removes the model from the list, but from this
-        // round's point of view it is still "did not answer usably". Only
-        // `ok` earns the green badge; everything else is red — and red carries
-        // WHY, because a red badge with no reason is not a report.
-        const elapsed = Math.max(0, now() - started);
-        if (outcome !== undefined && outcome !== null && outcome.kind === "ok") {
-          probeRun.results[model.id] = { status: "ok", ms: elapsed };
-        } else {
-          // A prober that predates the coded outcome still gets a reason: the
-          // verdict itself is the coarse fallback, never a silent failure.
-          const code = typeof outcome?.code === "string" && outcome.code !== ""
-            ? outcome.code
-            : outcome?.kind === "dead" ? "dead" : "unknown";
-          probeRun.results[model.id] = {
-            status: "failed",
-            ms: elapsed,
-            code,
-            http: typeof outcome?.http === "number" && isFinite(outcome.http) ? outcome.http : 0,
-            // Read BEFORE the verdict is written below, while it is still the
-            // pre-round one: a model already judged `dead` left the list in an
-            // earlier round, so re-asking it and re-confirming the answer
-            // removes nothing. Reporting that as a removal invents a change the
-            // round did not make — which is the difference between "this round
-            // took a model away" and "this round agreed with an old verdict".
-            ...(code === "dead" ? { removed: probes[model.id]?.verdict !== "dead" } : {}),
-            // Which gate marker the body carried, so the refusal names itself
-            // instead of arriving as one anonymous "未测到".
-            ...(typeof outcome?.marker === "string" && outcome.marker !== "" ? { marker: outcome.marker } : {}),
-          };
-        }
-        probeRun.done += 1;
-        if (outcome === undefined || outcome === null || outcome.kind === "inconclusive") {
-          untrusted = true;
-          continue;
-        }
-        if (outcome.kind !== "ok" && outcome.kind !== "dead") {
-          untrusted = true;
-          continue;
-        }
-        probes[model.id] = {
-          verdict: outcome.kind,
-          at: stamp,
-          ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
-          // Reaching here means the prober exhausted every channel before
-          // concluding, so this `dead` is earned and can be final.
-          ...(outcome.kind === "dead" ? { swept: true } : {}),
-        };
-      }
-    } finally {
-      probeRun.running = false;
-      probeRun.current = null;
-    }
-    // The round marker is written even when nothing concluded: it is the only
-    // thing that stops a fully-gated day from re-probing on every single read.
-    lastProbeAt = stamp;
-    probeUntrusted = untrusted;
-    // One atomic write per round, never per model: a half-finished round must
-    // not be read back as a complete set of verdicts.
-    if (cache !== null) {
-      await writeCacheAtomic(path, {
-        etag: cache.etag,
-        fetchedAt: cache.fetchedAt,
-        models: cache.models,
-        probes,
-        lastProbeAt,
-        // The report, so the panel's progress area survives a restart.
-        lastRound: {
-          total: probeRun.total,
-          done: probeRun.done,
-          results: probeRun.results,
-          targets: probeRun.targets,
-        },
-      });
-    }
-  };
-
-  const runProbeSingle = (): Promise<void> => {
-    if (probeInflight !== null) return probeInflight;
-    probeInflight = runProbeRound().finally(() => {
-      probeInflight = null;
-    });
-    return probeInflight;
-  };
 
   return {
     current(): CatalogSnapshot {
       // One pass over the single effective list feeds both `visible` and
       // `capabilities`, so the ids and the cards can never disagree.
-      const effective = effectiveList();
+      const effective = effectiveList(state.models, state.zenIds, state.probes);
       return {
-        models: models.slice(),
+        models: state.models.slice(),
         visible: effective.map((model) => model.id),
         capabilities: effective.map(modelCapability),
-        source,
-        updatedAt,
-        refreshing: inflight !== null,
-        probedAt: lastProbeAt,
-        probeInconclusive: probeUntrusted,
+        source: state.source,
+        updatedAt: state.updatedAt,
+        gateCheckedAt: state.gateCheckedAt,
+        unknownFree: unknownFree(state.models, state.zenIds),
+        refreshing: state.inflight !== null,
+        probedAt: state.lastProbeAt,
+        probeInconclusive: state.probeUntrusted,
       };
     },
     effectiveModels(): Model<Api>[] {
-      return effectiveList();
+      return effectiveList(state.models, state.zenIds, state.probes);
     },
     async ensureFresh(): Promise<void> {
-      if (inflight !== null) return inflight;
-      if (!stale()) return;
-      return runSingle();
+      // Two independent expiry axes. Both are STARTED before the first await,
+      // so they overlap rather than interleave; neither waits on the other,
+      // because the failure modes are unrelated — a Zen outage must not delay
+      // the catalogue, and a 5.2MB download must not delay a one-request gate.
+      const catalogue = state.inflight ?? (stale() ? runSingle(state, deps) : null);
+      const gate = gateStale() ? refreshGate(state, deps) : null;
+      // The gate is awaited first because it cannot reject: letting a catalogue
+      // failure skip it would silently drop the cheap, quota-free check.
+      if (gate !== null) await gate;
+      if (catalogue !== null) await catalogue;
     },
     async forceRefresh(): Promise<void> {
-      return runSingle();
+      return runSingle(state, deps);
     },
     async runProbes(): Promise<void> {
       if (probe === undefined) return;
-      if (probeInflight !== null) return probeInflight;
-      if (probedToday()) return;
-      return runProbeSingle();
+      if (state.probeInflight !== null) return state.probeInflight;
+      if (probedToday(state.lastProbeAt, now)) return;
+      return runProbeSingle(state, deps);
     },
     async forceProbes(): Promise<void> {
       if (probe === undefined) return;
-      return runProbeSingle();
+      // A manual round still costs one request per model from a bucket shared
+      // per egress IP, and the POST route has no rate limit of its own — so
+      // repeated clicks spent the whole office's quota. A short floor keeps the
+      // button honest without making it useless: the user asked for a fresh
+      // answer, not a second one five seconds later.
+      if (now() - state.lastProbeAt < FORCED_PROBE_MIN_INTERVAL_MS) return;
+      return runProbeSingle(state, deps);
     },
     probeProgress(): ProbeProgress {
-      // A copy: the round mutates `probeRun` while the panel reads this.
+      // A copy: the round mutates `state.probeRun` while the panel reads this.
       return {
-        running: probeRun.running,
-        total: probeRun.total,
-        done: probeRun.done,
-        current: probeRun.current,
-        results: { ...probeRun.results },
-        targets: probeRun.targets.slice(),
-        startedAt: probeRun.startedAt,
+        running: state.probeRun.running,
+        total: state.probeRun.total,
+        done: state.probeRun.done,
+        current: state.probeRun.current,
+        results: { ...state.probeRun.results },
+        targets: state.probeRun.targets.slice(),
+        startedAt: state.probeRun.startedAt,
       };
     },
     applyZenGate(ids: readonly string[] | null): void {
-      if (ids === null) return; // Zen failed: keep whatever gate is in force
-      zenIds = new Set(ids);
+      // The host's own refresh is a SECOND writer of `state.zenIds`, and the review
+      // that shipped the 30-minute gate is what made that worth saying out
+      // loud. Today only `refreshGate` runs — the host never calls
+      // `provider.refreshModels`, verified 2026-09-30 — so nothing can race. If
+      // a future host does call it, these two paths can interleave and the
+      // slower one can overwrite the newer answer, which is indistinguishable
+      // from an upstream change. Fold this into `refreshGate` before relying on
+      // it.
+      //
+      // Same admissibility rules meanwhile: a null, empty, non-array or wholly
+      // disjoint answer is not a membership decision, it is an absent one.
+      const served = admissibleGate(state, ids);
+      if (served === null) return;
+      state.zenIds = served;
+      // A host refresh answered the same question this poll would, so the
+      // freshness stamp moves too — otherwise the next read would spend a
+      // second GET on an answer already in hand.
+      state.gateCheckedAt = now();
     },
   };
 }

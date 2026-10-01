@@ -1,0 +1,18 @@
+{
+  "printWidth": 110,
+  "trailingComma": "all",
+  "overrides": [
+    {
+      "files": ["src/**/*.ts"],
+      "options": { "semi": true, "singleQuote": false }
+    },
+    {
+      "files": ["tests/**/*.mjs", "scripts/**/*.mjs", "*.mjs"],
+      "options": { "semi": false, "singleQuote": true }
+    },
+    {
+      "files": ["scripts/notes/**/*.ts"],
+      "options": { "semi": true, "singleQuote": true }
+    }
+  ]
+}

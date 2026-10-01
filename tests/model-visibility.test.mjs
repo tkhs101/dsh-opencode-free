@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROVIDER_ID, builtinFreeModels } from '../src/zen-provider.ts'
 
-const plugin = await import('../lib/index.js')
+const plugin = await import('../src/index.ts')
 
 // ── hermetic environment ─────────────────────────────────────────────────────
 // The plugin resolves its catalogue cache from $DSH_HOME and reads models.dev
@@ -29,7 +29,18 @@ after(async () => {
   globalThis.fetch = realFetch
   if (previousHome === undefined) delete process.env.DSH_HOME
   else process.env.DSH_HOME = previousHome
-  await rm(home, { recursive: true, force: true })
+  // Windows holds a brief lock on a directory that was just written, and a
+  // fire-and-forget `ensureFresh()` may still be mid-write. EBUSY here is a
+  // teardown race, never a test failure, and retrying settles it.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+      return
+    } catch (error) {
+      if (error?.code !== 'EBUSY' || attempt >= 5) throw error
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  }
 })
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -119,13 +130,19 @@ function makeHost() {
     webServer: {
       register: ({ path, handler }) => {
         routes.set(path, handler)
-        return () => { routes.delete(path) }
+        return () => {
+          routes.delete(path)
+        }
       },
     },
     effect: collect,
   }
   const ctx = {
-    llm: { registerAdapter: (providers, adapter) => { registered.push([providers, adapter]) } },
+    llm: {
+      registerAdapter: (providers, adapter) => {
+        registered.push([providers, adapter])
+      },
+    },
     get: () => undefined,
     inject: (requires, applyChild) => {
       if (requires.includes('webServer')) applyChild(webCtx)
@@ -136,7 +153,15 @@ function makeHost() {
     ctx,
     routes,
     registered,
-    dispose: () => { for (const d of disposers) { try { d() } catch { /* released elsewhere */ } } },
+    dispose: () => {
+      for (const d of disposers) {
+        try {
+          d()
+        } catch {
+          /* released elsewhere */
+        }
+      }
+    },
   }
 }
 
@@ -158,13 +183,20 @@ async function catalogueIds(config = {}) {
 }
 
 /** Drive a registered route and resolve with its status + parsed body. */
-function callRoute(host, path, method) {
+function callRoute(
+  host,
+  path,
+  method,
+  headers = { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' },
+) {
   const handler = host.routes.get(path)
   assert.ok(typeof handler === 'function', `route ${path} must be registered`)
   return new Promise((resolve, reject) => {
     const res = {
       status: 0,
-      writeHead(code) { this.status = code },
+      writeHead(code) {
+        this.status = code
+      },
       end(body) {
         try {
           resolve({ status: this.status, body: JSON.parse(body) })
@@ -174,10 +206,7 @@ function callRoute(host, path, method) {
       },
     }
     // The refresh route is fenced same-origin, so the headers are not optional.
-    handler(
-      { method, headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' } },
-      res,
-    )
+    handler({ method, headers }, res)
   })
 }
 
@@ -189,7 +218,10 @@ test('hiddenModels filters listModels (the hidden id leaves, nothing else does)'
   const victim = all[0]
   const ids = await listedIds(mount({ hiddenModels: [victim] }))
   assert.ok(!ids.includes(victim), 'hidden model must not be listed')
-  assert.deepEqual(ids.slice().sort(), all.filter((id) => id !== victim))
+  assert.deepEqual(
+    ids.slice().sort(),
+    all.filter((id) => id !== victim),
+  )
 })
 
 test('hiddenModels parsing trims, drops empties, dedupes', async () => {
@@ -251,7 +283,13 @@ test('a failed fetch leaves the pi-ai builtin floor in place (D8 offline floor)'
   // fetch trouble must degrade to the builtin set, never to an empty list.
   const ids = await catalogueIds()
   assert.ok(ids.length > 0, 'offline catalogue must never be empty')
-  assert.deepEqual(ids, builtinFreeModels().map((m) => m.id).slice().sort())
+  assert.deepEqual(
+    ids,
+    builtinFreeModels()
+      .map((m) => m.id)
+      .slice()
+      .sort(),
+  )
 })
 
 test('derived catalogue: deprecated stays until a probe judges it, paid drops out', async () => {
@@ -286,16 +324,33 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
 
     const ids = await listedIds(host)
     assert.ok(ids.includes('space-bunny-free'), 'a newly published free model must appear')
-    assert.ok(ids.includes('deepseek-v4-flash-free'), 'D1: a deprecated free model stays until a probe judges it')
+    assert.ok(
+      ids.includes('deepseek-v4-flash-free'),
+      'D1: a deprecated free model stays until a probe judges it',
+    )
     assert.ok(!ids.includes('gpt-6-astra'), 'a paid model must never enter the catalogue')
     // The payload names the offered models and nothing else. There is no list
     // of unavailable models, so a model that is not offered is simply absent —
     // and the panel has no second source that could disagree with the picker.
     // `models` carries one capability card per visible id, same order.
+    // `unknownFree` is not a second list of offered models: it is a diagnostic
+    // about ids the catalogue has never heard of, and it is empty here.
     assert.deepEqual(Object.keys(refreshed.body).sort(), [
-      'models', 'probeInconclusive', 'probedAt', 'refreshing', 'source', 'updatedAt', 'visible',
+      'gateCheckedAt',
+      'models',
+      'probeInconclusive',
+      'probedAt',
+      'refreshing',
+      'source',
+      'unknownFree',
+      'updatedAt',
+      'visible',
     ])
-    assert.deepEqual(refreshed.body.models.map((m) => m.id), refreshed.body.visible)
+    assert.deepEqual(refreshed.body.unknownFree, [])
+    assert.deepEqual(
+      refreshed.body.models.map((m) => m.id),
+      refreshed.body.visible,
+    )
     const bunny = refreshed.body.models.find((m) => m.id === 'space-bunny-free')
     assert.deepEqual(bunny, { id: 'space-bunny-free', image: true, thinking: 'max' })
     const pickle = refreshed.body.models.find((m) => m.id === 'big-pickle')
@@ -361,7 +416,15 @@ test('the progress reading reaches the wire with each failure reason intact', as
     const read = await callRoute(host, PROBE_ROUTE, 'GET')
     assert.equal(read.status, 200)
     const wire = JSON.parse(JSON.stringify(read.body))
-    assert.deepEqual(Object.keys(wire).sort(), ['current', 'done', 'results', 'running', 'startedAt', 'targets', 'total'])
+    assert.deepEqual(Object.keys(wire).sort(), [
+      'current',
+      'done',
+      'results',
+      'running',
+      'startedAt',
+      'targets',
+      'total',
+    ])
   } finally {
     host.dispose()
   }
@@ -375,7 +438,13 @@ test('GET on the probe route reports live progress without starting a round', as
     const idle = await callRoute(host, PROBE_ROUTE, 'GET')
     assert.equal(idle.status, 200)
     assert.deepEqual(idle.body, {
-      running: false, total: 0, done: 0, current: null, results: {}, targets: [], startedAt: 0,
+      running: false,
+      total: 0,
+      done: 0,
+      current: null,
+      results: {},
+      targets: [],
+      startedAt: 0,
     })
     // A read-only GET carries no origin fence (like the catalogue read);
     // only the POST that spends quota does.
@@ -383,4 +452,65 @@ test('GET on the probe route reports live progress without starting a round', as
   } finally {
     host.dispose()
   }
+})
+
+test('the probe POST answers while the round is still running', async () => {
+  // A click on "Probe now" used to hold an HTTP request open for the whole
+  // round — one request per model, each able to burn its full 15s timeout.
+  // Nothing needed that: the progress endpoint already reports `running` live,
+  // and the panel already follows it. 202 says "accepted, not finished", and
+  // the round is handed back inside the response so a caller that never polls
+  // can still see that one started.
+  const host = mount({})
+  try {
+    const read = await callRoute(host, PROBE_ROUTE, 'POST', {
+      host: '127.0.0.1:3080',
+      origin: 'http://127.0.0.1:3080',
+    })
+    assert.equal(read.status, 202, 'accepted, not waited on')
+    assert.equal(
+      read.body.probe,
+      undefined,
+      'no progress reading: one taken now would be the pre-round state',
+    )
+    assert.ok(Array.isArray(read.body.visible), 'the catalogue travels with it, so the card can repaint')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a same-origin POST must still name this machine (DNS rebinding)', async () => {
+  // Origin and Host agreeing is not enough: under DNS rebinding an attacker's
+  // page at evil.example resolves to 127.0.0.1, so the browser sends
+  // `Origin: http://evil.example` TOGETHER WITH `Host: evil.example` and the two
+  // match. The check therefore has to be that the Host NAMES THE LOCAL MACHINE
+  // (audit 2026-09-30). This is a desktop app on loopback, and a rebinding page
+  // that reached it could spend the shared anonymous bucket through POST /probe.
+  const host = mount({})
+
+  const local = await callRoute(host, REFRESH_ROUTE, 'POST', {
+    host: '127.0.0.1:3080',
+    origin: 'http://127.0.0.1:3080',
+  })
+  assert.equal(local.status, 200, 'a genuine local same-origin POST is still allowed')
+
+  for (const name of ['localhost:3080', '[::1]:3080']) {
+    const ok = await callRoute(host, REFRESH_ROUTE, 'POST', { host: name, origin: `http://${name}` })
+    assert.equal(ok.status, 200, `${name} is this machine and must be allowed`)
+  }
+
+  const rebound = await callRoute(host, REFRESH_ROUTE, 'POST', {
+    host: 'evil.example:3080',
+    origin: 'http://evil.example:3080',
+  })
+  assert.equal(rebound.status, 403, 'a rebound host is refused even though Origin and Host agree')
+  assert.equal(rebound.body.reason, 'cross-origin')
+
+  const reboundProbe = await callRoute(host, PROBE_ROUTE, 'POST', {
+    host: 'evil.example:3080',
+    origin: 'http://evil.example:3080',
+  })
+  assert.equal(reboundProbe.status, 403, 'and the quota-spending route is fenced the same way')
+
+  host.dispose?.()
 })

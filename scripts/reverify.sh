@@ -10,7 +10,13 @@ set -u
 
 BASE="https://opencode.ai/zen/v1"
 MODEL="${ZEN_MODEL:-muse-spark-1.3-contributor-free}"
-UA="opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14 dsh-opencode-free/0.3.1"
+# 版本在執行時讀取，不寫死。這支腳本原本帶著第四份手抄的 User-Agent，而守住它
+# 的測試只斷言 `dsh-opencode-free/<version>` 這段後綴——於是 `opencode/1.18.31`
+# 這個前綴可以悄悄過期，而 ② 號燈仍在用一份與外掛實際送出不同的身份去問上游。
+# 那正是這支腳本存在的理由。found by audit 2026-09-30。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_VERSION="$(node -p "require(\"${SCRIPT_DIR}/../package.json\").version" 2>/dev/null || echo unknown)"
+UA="opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14 dsh-opencode-free/${PLUGIN_VERSION}"
 SESS="ses_$(node -e "process.stdout.write(require('crypto').randomBytes(6).toString('hex'))")AbCdEfGhIjKlMn"
 REQ="msg_abcdef123456AbCdEfGhIjKlMn"
 # 匿名層要求 stream:true，且 tools 含名為 read 與 bash 的工具（2026-09-27 重播實測），缺一即 403。
@@ -58,12 +64,16 @@ esac
 
 echo "== ③ 帶 key hi =="
 if [ -z "${OPENCODE_API_KEY:-}" ]; then
-  yellow "SKIP：未設 OPENCODE_API_KEY"
+  yellow "SKIP：未設 OPENCODE_API_KEY（唯讀設定：read -rs -p \"Zen key: \" OPENCODE_API_KEY）"
   exit 0
 fi
-resp="$(curl -s --max-time 60 -w "\nHTTP:%{http_code}" "$BASE/responses" \
+# The key travels through stdin, never argv. `-H "Authorization: Bearer $KEY"`
+# put the full credential in the process table — visible to any local user via
+# `ps`, and, with the README's former inline form, in ~/.bash_history forever.
+# `-H @-` reads headers from stdin instead, so it never reaches either. found by
+# audit 2026-09-30.
+resp="$(printf 'Authorization: Bearer %s\n' "$OPENCODE_API_KEY" | curl -s --max-time 60 -w "\nHTTP:%{http_code}" -H @- "$BASE/responses" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $OPENCODE_API_KEY" \
   -H "User-Agent: $UA" \
   -H "x-opencode-client: cli" \
   -H "x-opencode-project: global" \
