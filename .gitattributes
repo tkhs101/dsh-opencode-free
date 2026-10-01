@@ -1,0 +1,9 @@
+# scripts/notes/ is vendored byte-for-byte from the write-notes-like-deepseek
+# skill and must stay byte-identical to it: scripts/verify-vendored.mjs compares
+# sha256 digests against the skill's own copies.
+#
+# Without this, git normalises the CRLF line endings the skill ships to LF on
+# checkout, and EVERY fresh clone reports seven files as drifted — a guard that
+# is red everywhere is a guard nobody reads. Cost: renames show as whole-file
+# rewrites on this one path only.
+scripts/notes/** -text
