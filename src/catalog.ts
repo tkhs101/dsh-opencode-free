@@ -571,7 +571,7 @@ function readLastRound(value: unknown): CatalogCacheRecord["lastRound"] {
           ms: entry.ms,
           code: typeof entry.code === "string" ? entry.code : "unknown",
           http: typeof entry.http === "number" && isFinite(entry.http) ? entry.http : 0,
-          ...(entry.removed === false ? { removed: false } : {}),
+          ...(typeof entry.removed === "boolean" ? { removed: entry.removed } : {}),
           ...(typeof entry.marker === "string" && entry.marker !== "" ? { marker: entry.marker } : {}),
         };
       }

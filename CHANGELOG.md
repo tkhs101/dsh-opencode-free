@@ -102,6 +102,13 @@ supporting commit and code reference for each one is in
   this round removed stays accurate.
   (`20d8b01`, `a1cfae4`; `src/client.js:635`, `src/client.js:1156`)
 
+- **A restart could re-announce a removal that already happened.** The round
+  report survived the restart, but not its `removed` flag: the write path kept
+  only the `false` form, so a row that really did remove a model came back with
+  no flag — and the card reads a missing flag as a fresh removal. The write and
+  read paths are inverses of each other again.
+  (`src/catalog.ts` `readLastRound`; `tests/catalog.test.mjs`)
+
 - **The strongest thinking level a model offers is no longer quietly downgraded.**
   The level the plugin asks for reaches the wire; a level the model does not
   publish is still clamped down rather than offered.

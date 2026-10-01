@@ -1699,6 +1699,13 @@ test('re-confirming an old death removes nothing and is marked as such', async (
       baselineModels: baseline(),
     })
     await reopened.forceProbes()
+    // `forceProbes()` cannot run a second round here and never could: the floor
+    // compares against the frozen clock, so `now() - lastProbeAt` is 0. The
+    // re-check is the warm start's fire-and-forget round — which is why this
+    // test read whichever report happened to be mounted. That is a real race,
+    // and it showed up only on some Node versions: a restored report answered
+    // `removed: undefined` where the finished round answers `false`.
+    await waitFor(() => reopened.probeProgress().results['big-pickle']?.removed === false)
     assert.ok(probe.calls.includes('big-pickle'), 'the legacy verdict was re-checked')
     // Upstream said the same thing. The model was ALREADY out of the list, so
     // this round removed nothing and must not claim to have.
@@ -1773,6 +1780,16 @@ test('a finished round report survives a restart', async () => {
     )
     assert.equal(after.results['big-pickle'].status, 'ok', 'including the per-row verdict')
     assert.equal(after.results['deepseek-v4-flash-free'].code, 'dead', 'and the reason a row failed')
+    // The whole ROW, not just the fields readLastRound happens to mention. The
+    // write path and the read path were not inverses of each other: `removed`
+    // survived only in its `false` form, so a row that DID remove a model came
+    // back as "no removal claim" — and `isFreshRemoval` reads a missing `removed`
+    // as a fresh removal, which is the opposite of what happened.
+    assert.deepEqual(
+      after.results['deepseek-v4-flash-free'],
+      before.results['deepseek-v4-flash-free'],
+      'a restored report is the report that was written, row for row',
+    )
   })
 })
 
