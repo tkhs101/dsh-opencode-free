@@ -5,7 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Note on 0.2.1 — two different builds, one version number.** The npm
-> registry lists a `0.2.1` published 2026-09-22. That artifact is **not** the
+> registry lists a `0.2.1` published 2026-09-29 (2026-09-22 is the package's
+> `created` time, when `0.1.0` shipped). That artifact is **not** the
 > `0.2.1` in this repository's history: the commit that sets
 > `package.json` to `0.2.1` here is `02ef277` (2026-09-29), merged from upstream
 > and only reachable from this repository after that merge. They are different
@@ -16,6 +17,106 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > what is visible in this repository's history; the contents of the published
 > `0.2.1` are not here, so they are not described. It is a predecessor of this
 > release, not something this release replaces or rolls back.
+
+## [0.3.2] - 2026-09-30
+
+Competitive review of the three sibling plugins (`opencode2dsh`,
+`dsh-opencode-free-models`, `dsh-our-free-model`) against how this plugin reads
+the model list. Two of the four ideas that came out of it were **dropped after
+measurement**, which is the more useful half.
+
+### Changed
+
+- **The Zen availability gate now expires on its own clock.** It was refreshed
+  only as the first step of the daily probe round, so a model Zen withdrew
+  stayed in the picker for up to 24 hours — long enough to be picked and to
+  fail. `GET /zen/v1/models` costs no inference quota, so it is now re-asked
+  every 30 minutes, lazily on read, with no new timer. `zenIds` gained a single
+  writer: with two cadences running, two writers would mean the older answer
+  could silently overwrite the newer one.
+- **The catalogue re-check interval adapts to what the endpoint actually does.**
+  Measured 2026-09-30: models.dev answers `If-None-Match` with `304` and zero
+  bytes. So a re-check that hits costs a few hundred bytes rather than a
+  5.2 MB download, and the interval drops to 6 hours — but only after a `304`
+  has earned it. A fetch that transfers the body puts the interval back to
+  24 hours, so an endpoint that stops honouring the header costs one download a
+  day instead of four. The 6-hour window lives only inside a long-running
+  process: the evidence that earned it is in-memory, and every boot re-downloads
+  once and starts over at 24 hours.
+- **The detail-page panel reports the blind spot in the two-source design.**
+  If Zen serves a free-tier id that models.dev has not published yet, the panel
+  names it. It is deliberately not added to the picker: its channel and context
+  limits are not obtainable from any source available here, and a wrong number
+  there is acted on rather than merely displayed. The ids are not a second list
+  of offered models and never become rows.
+
+### Fixed
+
+- **`catalogTemplate()` no longer silently matches nothing.** It pinned
+  `mimo-v2.5-free`, which pi-ai 0.87 renamed to `mimo-v2.6-flash-free`, so every
+  caller had been falling back to `builtinFreeModels()[0]` — `big-pickle`, a
+  model Zen does not serve. Harmless in content (the template supplies identity
+  only; the channel is inferred and capabilities come from models.dev), but the
+  fallback is now explicit and prefers a record the free tier serves.
+- **An empty Zen listing can no longer reach the gate.** Neither can a
+  *disjoint* one: a well-formed answer naming none of the models we hold is far
+  likelier to be a changed shape, a wrong egress or a different tenant than a
+  simultaneous withdrawal of every free model, and acting on it emptied the
+  picker — the one outcome the gate exists to prevent. Null, non-array, empty
+  and wholly-disjoint are all now "could not tell", on both doors into the
+  gate. Found by review; the `[]`-only guard shipped believing it was
+  sufficient. The 30-minute window is what made this reachable often enough to
+  matter, since any catalogue read can now trigger it.
+- **"Probe now" no longer holds an HTTP request open for the whole round.** It
+  answers `202` as soon as the round is accepted. A round is one request per
+  model and a hung model can hold it for its full 15 s, so the button used to
+  leave a request open for minutes — and if the host's web server enforces a
+  request timeout, that would have failed rather than merely been slow. Two jobs
+  moved to the progress poll, which already existed: noticing that the round
+  ended, and releasing the busy button. The response carries no progress
+  reading, because a round marks itself running only after asking Zen what it
+  serves — a reading taken at that instant is the pre-round one, and a panel
+  that adopted it would conclude the round had finished before it began.
+- **A catalogue revalidation no longer erases the last round's report.** The
+  sync path rewrote the whole cache record without carrying `lastRound`, so up
+  to four revalidations a day could each delete it. Pre-existing, but the
+  shorter window is what made the loss frequent.
+
+### Not changed, and why
+
+- **The probe's output budget stays at 1024 — now on measured evidence, and the
+  measurement reversed the review's own recommendation.** A review of the
+  siblings suggested it was ~64x more expensive than necessary. Two rounds of
+  correction followed. First, the stated reason was stale: an empty reply is
+  `inconclusive`, not `dead`, and both leave the model in the picker. Second,
+  the first A/B measured wall clock when the claimed benefit is tokens, and
+  `usage.output` — already computed by pi-ai and dropped by `probeOnce` — is now
+  carried through. Re-measured over 33 models in two agreeing runs:
+
+  | model | 1024 | 16 | verdict |
+  |---|---|---|---|
+  | muse-spark-1.2 | 158 / 236 tokens | none | ok → **inconclusive** |
+  | muse-spark-1.3 | 69 / 160 tokens | none | ok → **inconclusive** |
+
+  The token median does fall (48 → 16) — but precisely *because* the two most
+  expensive models stop answering and drop out of the sample. A smaller ceiling
+  does not make expensive models cheap; it makes the priciest ones go silent.
+  `probe-ab.mjs` now checks answer quality before it checks tokens, and fails.
+  The original reasoning was right and its remembered consequence was wrong: an
+  empty reply is not a death sentence, but it is not a clean success either, and
+  on this provider it lands on the models that cost the most.
+- **Probing stays sequential, but the reason is not "it is fast".** The same
+  review showed the ~0.5 s figure is a zero-hang sample, which is the worst
+  sample to extrapolate a tail from. A hanging model costs the full 15 s
+  *every day, permanently* — `settled()` only covers `dead` verdicts, so a
+  timeout lands as `inconclusive`, is never persisted, and is re-asked
+  tomorrow, having learned nothing while the model stays in the picker. Still
+  not worth concurrency: the daily round is fire-and-forget, and the only
+  user-perceived cost is the "Probe now" button, which is better addressed by
+  making the POST non-blocking than by changing the scheduler.
+- `docs/adr/0002-catalogue-source-of-truth.md` records both reversals with the
+  evidence, and rewrites its "not doing" list as contracts that state what
+  evidence would overturn each entry.
 
 ## [0.3.1] - 2026-09-30
 
@@ -231,5 +332,6 @@ repository; the supporting commit and code reference for each one is in
   before the request.
   (`e4b9124`; `src/index.ts:422`)
 
+[0.3.2]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.2
 [0.3.1]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.1
 [0.3.0]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.0

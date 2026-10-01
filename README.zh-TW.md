@@ -2,9 +2,14 @@
 
 [English](README.md) | **繁體中文**
 
-[![npm](https://img.shields.io/npm/v/dsh-opencode-free)](https://www.npmjs.com/package/dsh-opencode-free)
-[![CI](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml)
+[![CI](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+> [!IMPORTANT]
+> **本倉庫是 [`x5427876/dsh-opencode-free`](https://github.com/x5427876/dsh-opencode-free)
+> 的 fork，並且沒有發布到 npm。** npm 上所有叫 `dsh-opencode-free` 的套件都屬於
+> 上游作者，不屬於這個 fork。請用本機 tarball 安裝——見〈[安裝](#安裝)〉。
+> 這個 fork 的版本釋放在 [tkhs101/dsh-opencode-free](https://github.com/tkhs101/dsh-opencode-free/releases)。
 
 在 DeepSeek Harness（DSH）中使用 [OpenCode Zen](https://opencode.ai/docs/providers)
 的免費模型。不需要安裝 OpenCode、不需要登入、不需要 API key，也不需要另外架伺服器。
@@ -42,35 +47,59 @@ dsh --version
 
 | 插件 | DSH |
 |---|---|
+| `0.3.2` | `0.2.0-rc.2` |
 | `0.3.1` | `0.2.0-rc.2` |
 | `0.3.0` | `0.2.0-rc.1` |
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
-不要忽略 peer dependency 警告。
+四個 peer 依賴是**必要**的，不是選用的：`src/` 每一個都在頂層 import，宿主少了
+任何一個都會載入失敗。不要忽略 peer dependency 警告。
 
 ## 安裝
 
-範例使用 `web` profile，請換成你的目標 profile。
+這個 fork 沒有上 npm，所以沒有 `dsh plugin add dsh-opencode-free@<版本>` 這條路徑
+——那會裝成**上游**的套件。請打包成 tarball 再指向它：
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.3.1
+git clone https://github.com/tkhs101/dsh-opencode-free.git
+cd dsh-opencode-free
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm pack --pack-destination .
+
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
 ```
+
+請把 `web` 換成你的目標 profile。
 
 檢查安裝結果：
 
 ```sh
 dsh plugin --profile web list dsh-opencode-free --depth 0
-dsh --profile web --dump-config
 ```
 
-套件只出現一次，而且 composed config 裡出現 `opencode-free`，就代表安裝正確。
+套件只出現一次，就代表安裝正確。若要確認插件也進了 composed config，可以跑
+`dsh --profile web --dump-config` 並找 `opencode-free`——但請先讀下面的警告，
+那個指令會把你的機密原印出來。
+
+> [!WARNING]
+> `dsh --profile web --dump-config` 會**逐字、且不做任何遮蔽**地印出 profile 的
+> `cordis.patch.yml`，而選用的 Zen key 就寫在那裡（見〈[設定](#設定)〉）。
+> 請在沒有設定 key 的 profile 上跑它，或直接跳過、只靠
+> `dsh plugin … list` 判斷。
+
 其他 profile 和插件不會變動。
 
 更新或移除：
 
 ```sh
-dsh plugin --profile web update dsh-opencode-free
+# 更新——沒有 registry 可解，請重新打包再裝：
+pnpm run build && pnpm pack --pack-destination .
+dsh plugin --profile web remove dsh-opencode-free
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
+
+# 或直接移除：
 dsh plugin --profile web remove dsh-opencode-free
 ```
 
@@ -104,6 +133,16 @@ models.dev——Muse Spark 是 `minimal`…`xhigh`，Space Bunny 是 `low`…`ma
 
 每個模型的識圖能力、上下文大小與最大輸出同樣讀自 models.dev：只有在模型宣告支援
 圖片時才會附上截圖，選擇器裡的上下文數字也是該模型自己的，而不是抄另一個模型的。
+
+**這兩個來源各自按自己的時鐘讀取**，因為它們回答的是不同問題、代价也不同。哪些模型
+*免費*由 models.dev 決定，它的目錄是一份 5.2MB 的完整檔案，所以大約一天讀一次——除非
+端點已確認它認得條件請求，那之後重驗只要幾百位元組而不是重新下載。哪些模型 Zen *目前
+仍在供應*由一個小 GET 決定，而它完全不花推理額度，所以每 30 分鐘重問一次。這就是下
+架的模型能在幾分鐘內、而不是一天之內從選單消失的原因。
+
+若 Zen 正在供應某個 models.dev 尚未發布的免費模型，插件詳情頁會說明並點名。它不會被
+加進選單：該模型的上下文長度與能力沒有任何來源查得到，而猜錯的數字會被拿來用，不只
+是顯示而已。
 
 **這張表是快照，不是合約。** 它的用途是讓你認出自己在選什麼；真正的清單是插件最後
 一次讀到的內容。到插件詳情頁就能看到並調整：那裡的清單依模型 id 字母排序，你開著
@@ -160,8 +199,11 @@ models.dev——Muse Spark 是 `minimal`…`xhigh`，Space Bunny 是 `low`…`ma
 道——刪掉插件的快取檔並重啟 DSH 一次：
 
 ```
-%USERPROFILE%\.dsh\dsh-opencode-free\catalog.json
+$DSH_HOME/dsh-opencode-free/catalog.json     # 未設 DSH_HOME 時為 ~/.dsh/…
 ```
+
+`$DSH_HOME` 有設定時優先，而 DSH Desktop 的 profile 通常就是這種情況——在那種機器上
+刪 `%USERPROFILE%\.dsh\…` 那條路徑會刪不到東西，什麼也不會改變。
 
 下次啟動會重新讀 models.dev，把每個模型都當成未探測過，全部重探。這是唯一的回頭路，
 所以在你依賴那個更短的清單之前，值得先知道。
@@ -217,7 +259,10 @@ DSH Desktop 沒有 shell 環境，請用第 1 種方式。在該 profile 的 `co
 開始對話前先驗證 key。這個指令會送出一個 16 token 的請求：
 
 ```sh
-OPENCODE_API_KEY=<你的 Zen key> ./scripts/reverify.sh
+# key 進環境變數，不進命令列：
+read -rs -p "Zen key: " OPENCODE_API_KEY; echo
+OPENCODE_API_KEY="$OPENCODE_API_KEY" ./scripts/reverify.sh
+unset OPENCODE_API_KEY
 ```
 
 看 ③ 號燈：綠燈代表 key 有效；紅燈代表 key 無效或上游有問題。

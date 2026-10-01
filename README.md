@@ -2,9 +2,15 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
-[![npm](https://img.shields.io/npm/v/dsh-opencode-free)](https://www.npmjs.com/package/dsh-opencode-free)
-[![CI](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml)
+[![CI](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhs101/dsh-opencode-free/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+> [!IMPORTANT]
+> **This repository is a fork of [`x5427876/dsh-opencode-free`](https://github.com/x5427876/dsh-opencode-free)
+> and is NOT published to npm.** Every package on the npm registry named
+> `dsh-opencode-free` belongs to the upstream author, not to this fork. Install
+> from a local tarball — see [Install](#install). Releases of this fork live on
+> [tkhs101/dsh-opencode-free](https://github.com/tkhs101/dsh-opencode-free/releases).
 
 Use the free [OpenCode Zen](https://opencode.ai/docs/providers) models in
 DeepSeek Harness (DSH). You do not need to
@@ -45,35 +51,62 @@ dsh --version
 
 | Plugin | DSH |
 |---|---|
+| `0.3.2` | `0.2.0-rc.2` |
 | `0.3.1` | `0.2.0-rc.2` |
 | `0.3.0` | `0.2.0-rc.1` |
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
-Do not ignore peer dependency warnings.
+The four peer dependencies are **required**, not optional: `src/` imports each of
+them at the top level, so a host missing one fails to load the plugin. Do not
+ignore peer dependency warnings.
 
 ## Install
 
-The examples use the `web` profile. Replace it with your target profile.
+This fork is not on npm, so there is no `dsh plugin add dsh-opencode-free@<version>`
+to run — that would install the *upstream* package instead. Build a tarball and
+point the installer at it:
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.3.1
+git clone https://github.com/tkhs101/dsh-opencode-free.git
+cd dsh-opencode-free
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm pack --pack-destination .
+
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
 ```
+
+Replace `web` with your target profile.
 
 Check the install:
 
 ```sh
 dsh plugin --profile web list dsh-opencode-free --depth 0
-dsh --profile web --dump-config
 ```
 
-The install is correct when the package appears once and `opencode-free`
-appears in the composed config. Other profiles and plugins do not change.
+The install is correct when the package appears once. To confirm the plugin also
+reached the composed config, run `dsh --profile web --dump-config` and look for
+`opencode-free` — but read the warning below first, because that command prints
+your profile's secrets.
+
+> [!WARNING]
+> `dsh --profile web --dump-config` prints your profile's `cordis.patch.yml`
+> **verbatim, with no redaction** — and that is where the optional Zen key lives
+> (see [Configuration](#configuration)). Either run it on a profile with no key
+> configured, or skip it and rely on `dsh plugin … list` alone.
+
+Other profiles and plugins do not change.
 
 Update or remove:
 
 ```sh
-dsh plugin --profile web update dsh-opencode-free
+# update — no registry to resolve, so rebuild and re-add:
+pnpm run build && pnpm pack --pack-destination .
+dsh plugin --profile web remove dsh-opencode-free
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
+
+# or just remove:
 dsh plugin --profile web remove dsh-opencode-free
 ```
 
@@ -88,6 +121,20 @@ what they are called, and how large their context is. The plugin reads it in the
 background — at most once a day, never blocking a request — and caches the
 result, so a newly published free model shows up on its own. There is nothing
 to reinstall when Zen adds one.
+
+Those two sources are read on **separate clocks**, because they answer different
+questions and cost different amounts. Which models are *free* comes from
+models.dev, whose catalogue is one 5.2 MB file, so it is read about once a day —
+more often once the endpoint has confirmed it honours a conditional request,
+which makes a re-check cost a few hundred bytes instead of a download. Which
+models Zen *currently serves* comes from a single small `GET` that costs no
+inference quota at all, so it is re-asked every 30 minutes. That is what keeps a
+withdrawn model out of the picker within minutes instead of within a day.
+
+If Zen is serving a free-tier model that models.dev has not published yet, the
+detail-page panel says so and names it. It is not added to the picker: its
+context length and capabilities are not knowable from anywhere, and a wrong
+number there is acted on rather than merely displayed.
 
 Models currently listed as free and not retired upstream:
 
@@ -186,8 +233,12 @@ If you want the whole catalogue re-judged anyway — after Zen brings a model
 back, or fixes a channel — delete the plugin's cache file and restart DSH once:
 
 ```
-%USERPROFILE%\.dsh\dsh-opencode-free\catalog.json
+$DSH_HOME/dsh-opencode-free/catalog.json     # falls back to ~/.dsh/… when DSH_HOME is unset
 ```
+
+`$DSH_HOME` takes priority when it is set, which is the common case for a DSH
+Desktop profile — deleting the `%USERPROFILE%\.dsh\…` path on such a machine
+would delete nothing and change nothing.
 
 The next start re-reads models.dev, treats every model as unprobed, and probes
 them all again. This is the only way back, so it is worth knowing before you
@@ -272,7 +323,10 @@ entry in the profile's `cordis.patch.yml`:
 Verify the key before you chat. This sends one 16-token request:
 
 ```sh
-OPENCODE_API_KEY=<your Zen key> ./scripts/reverify.sh
+# The key goes into the environment, never onto a command line:
+read -rs -p "Zen key: " OPENCODE_API_KEY; echo
+OPENCODE_API_KEY="$OPENCODE_API_KEY" ./scripts/reverify.sh
+unset OPENCODE_API_KEY
 ```
 
 Check lamp ③. Green means the key works. Red means the key is invalid or the
@@ -348,13 +402,33 @@ pnpm run test       # build, then run offline tests
 pnpm run check      # typecheck, test, and pack
 ```
 
-The unit tests use in-memory fixtures. They do not use the network or free
-quota. These scripts send real requests:
+The unit tests use in-memory fixtures and a temporary `$DSH_HOME`. They do not
+use the network or free quota.
+
+The scripts below live in the **repository, not in the tarball** — run them from
+a clone (or `git clone` first). They send real requests to the shared anonymous
+bucket:
 
 | Script | What it checks |
 |---|---|
 | `scripts/reverify.sh` | ① catalogue reachable, ② anonymous gate, ③ API key (only when `OPENCODE_API_KEY` is set) |
 | `node scripts/test-live.mjs [model-id ...]` | Sends one short anonymous request per model. It declares no tools, so a `replied:false` usually means the gate said no rather than that the model is gone — it is not an availability test. Run `pnpm run build` first. |
+| `node scripts/probe-ab.mjs [heavy light]` | A/Bs the probe's output budget against the live tier (default 1024 vs 16). **Consumes real quota across the whole catalogue** and is how `PROBE_MAX_TOKENS` was chosen — see `docs/adr/0002`. Run `pnpm run build` first. |
+
+### What it patches in your process
+
+`apply()` wraps three process-wide entry points so that requests the plugin
+does not make itself still carry the OpenCode identity:
+
+- `globalThis.fetch`
+- `node:http` and `node:https` — their `request` and `get`
+
+The scope is strictly the Zen base URL `https://opencode.ai/zen/v1`. Every other
+host and path is passed through untouched, with the original arguments
+byte-for-byte. The wraps are idempotent across reloads (the pristine originals
+are stashed on `globalThis` under `__dshOpenCodeFree*`) and are restored when the
+plugin is unloaded. If you run another extension in the same process that talks
+to that base URL, its requests will be given the same identity headers.
 
 For Agents that install or verify this plugin, see [`AGENTS.md`](AGENTS.md).
 

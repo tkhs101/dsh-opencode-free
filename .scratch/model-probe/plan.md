@@ -168,3 +168,7 @@
 | 面板「deprecated 灰字」文案 | 改「探测判定失败」 | `grep -c "已停止维护" src/client.js` = 0 |
 | spec-v0.2「不做背景自动刷新」 | 标注被显式取代 | 该文件含取代标注 |
 | `test-live.mjs` 被当作可用性判据的用法 | 加注释纠正 | 注释在位 |
+
+> **Superseded.** 本文件是历史推理，已落地。当前事实见
+> [`docs/adr/0002-catalogue-source-of-truth.md`](../../docs/adr/0002-catalogue-source-of-truth.md)
+> 与 [`CHANGELOG.md`](../../CHANGELOG.md)；已知矛盾见 [`../README.md`](../README.md)。

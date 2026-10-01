@@ -93,3 +93,7 @@
 4. 一天内重复点手动 → 仍可跑（手动不受每日上限约束）；自动一天只跑一轮
 5. 探针请求体含 read+bash、streaming、max_tokens≥512（有守卫用例）
 6. `hiddenModels` 显隐行为不回归；`pnpm test` 全绿且行为用例不减少
+
+> **Superseded.** 本文件是历史推理，已落地。当前事实见
+> [`docs/adr/0002-catalogue-source-of-truth.md`](../../docs/adr/0002-catalogue-source-of-truth.md)
+> 与 [`CHANGELOG.md`](../../CHANGELOG.md)；已知矛盾见 [`../README.md`](../README.md)。

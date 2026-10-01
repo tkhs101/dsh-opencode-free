@@ -133,3 +133,7 @@ profile.piProvider = filtered; // profiles() 返回的 profile 用 filtered
 2. 关闭某模型 → 模型选择器无此模型；打开 → 恢复。
 3. 改动持久：重启 DSH 后开关状态与显隐一致。
 4. 无 `hiddenModels` 的老用户：全显，现有测试全过。
+
+> **Superseded.** 本文件是历史推理，已落地。当前事实见
+> [`docs/adr/0002-catalogue-source-of-truth.md`](../../docs/adr/0002-catalogue-source-of-truth.md)
+> 与 [`CHANGELOG.md`](../../CHANGELOG.md)；已知矛盾见 [`../README.md`](../README.md)。

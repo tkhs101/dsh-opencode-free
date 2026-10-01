@@ -3,14 +3,28 @@
 Use this guide when a user asks an Agent to install, update, verify, or remove
 `dsh-opencode-free`.
 
+> **This repository is a fork of `x5427876/dsh-opencode-free` and is not
+> published to npm.** The package named `dsh-opencode-free` on the npm registry
+> belongs to the upstream author. A `dsh plugin add dsh-opencode-free@<version>`
+> therefore installs **upstream's** build, not this fork's — never run it as an
+> install step. Build a tarball and install that with `file:` instead.
+
 ## Safety
 
 - Confirm the target DSH profile; use `web` only when it is the user's target.
-- Use the pinned `v0.3.1` release assets for a first install, never a moving branch.
+- Use the pinned `v0.3.2` release assets for a first install, never a moving branch.
 - Never print API keys, credential stores, or request bodies.
+  `dsh --profile <name> --dump-config` prints the profile's `cordis.patch.yml`
+  **verbatim with no redaction**, and the optional Zen key lives in its
+  `config.apiKey`. Run it only on a profile with no key configured, or skip it —
+  `dsh plugin --profile <name> list dsh-opencode-free --depth 0` is the check
+  that does not touch secrets.
 - Do not start, stop, or restart DSH without explicit permission.
 - Preserve the DSH profile, unrelated plugins, and stored credentials.
 - Do not delete any DSH profile during install, update, verification, or uninstall.
+- `scripts/reverify.sh` and `scripts/test-live.mjs` are not in the tarball; run
+  them from a clone. `reverify.sh` sends real requests against the shared
+  anonymous bucket, so run it only when the user has asked for a live check.
 
 ## Detect the installation
 
@@ -32,14 +46,27 @@ it is already listed, use update or uninstall instead of installing again.
 
 ## Existing DSH CLI
 
-When `dsh`, Node.js, and pnpm are already available, install the pinned npm
-package directly:
+This fork has no npm release, so there is no registry name to resolve. Build a
+tarball from a clone and install that:
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.3.1
+git clone https://github.com/tkhs101/dsh-opencode-free.git
+cd dsh-opencode-free
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm pack --pack-destination .
+
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
 ```
 
-Update with `dsh plugin --profile web update dsh-opencode-free`.
+Update — there is no registry to re-resolve, so rebuild and re-add:
+
+```sh
+pnpm run build && pnpm pack --pack-destination .
+dsh plugin --profile web remove dsh-opencode-free
+dsh plugin --profile web add file:./dsh-opencode-free-0.3.2.tgz
+```
+
 Uninstall the current package with:
 
 ```sh
@@ -48,16 +75,30 @@ dsh plugin --profile web remove dsh-opencode-free
 
 ## Desktop profile install (DSH Desktop)
 
-The DSH Desktop app composes profiles under `~/.dsh/profiles`. For each target
-profile (`desktop`, `web`):
+DSH Desktop composes profiles under a home directory — `~/.dsh/profiles/<name>/`,
+relocated to `$DSH_HOME/profiles/<name>/` when `DSH_HOME` is set. **Resolve it
+before copying anything**; guessing puts the tarball somewhere `pnpm install`
+will not see it, and the failure looks like a missing file rather than a wrong
+directory.
 
-1. `pnpm pack` the plugin into a tarball (or download the pinned release tarball).
-2. Copy the tarball into the profile directory.
-3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.3.1.tgz"` to
-   the profile's `package.json` `dependencies` and add `dsh-opencode-free`
+```sh
+DSH_ROOT="${DSH_HOME:-$HOME/.dsh}"
+PROFILE_DIR="$DSH_ROOT/profiles/desktop"    # or .../profiles/web
+```
+
+Then, for each target profile (`desktop`, `web`):
+
+1. `pnpm pack` the plugin into a tarball (or download the pinned release tarball
+   from `https://github.com/tkhs101/dsh-opencode-free/releases`).
+2. Copy the tarball into `$PROFILE_DIR`.
+3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.3.2.tgz"` to
+   `$PROFILE_DIR/package.json` `dependencies` and add `dsh-opencode-free`
    to its `dsh.profile.bundles` array.
-4. Run `pnpm install` in the profile directory.
+4. Run `pnpm install` in `$PROFILE_DIR`.
 5. The user must restart DSH once for the plugin to load.
+
+The `file:` specifier is relative, so the tarball must sit in the same
+directory as that `package.json` — not in the repository you packed from.
 
 v1 carries no persisted login: the Zen key comes from the plugin row's
 `config.apiKey` or the `OPENCODE_API_KEY` environment variable, falling back
@@ -70,14 +111,15 @@ For the existing CLI path, run:
 
 ```sh
 dsh plugin --profile web list dsh-opencode-free --depth 0
-dsh --profile web --dump-config
 ```
 
 Success requires:
 
 1. The requested package version appears once.
-2. `opencode-free` appears once in the composed config after install
-   or update, and is absent after uninstall.
+2. `dsh --profile web --dump-config` shows `opencode-free` exactly once after
+   install or update, and absent after uninstall — **but read the Safety
+   section first**: that command prints secrets, so only run it on a profile
+   with no `config.apiKey` set.
 3. No unrelated profile or plugin changed.
 4. A running DSH process was not restarted by the operation.
 

@@ -138,3 +138,7 @@ pi-ai 内置表降级为**已知通道覆盖表**与**离线兜底基线**，不
 6. 现有行为覆盖不回归（过滤/volatile/未知 id/隐藏不可 resolve/端点与 picker 恒等）；新增目录派生、ETag 304、失败降级、端点用例通过
 7. `pnpm exec tsc --noEmit` 与 `pnpm test` 全绿
 8. `docs/adr/0002-catalogue-source-of-truth.md` 已写，`docs/spec-v0.2.md` 中被取代的目录决策已同步
+
+> **Superseded.** 本文件是历史推理，已落地。当前事实见
+> [`docs/adr/0002-catalogue-source-of-truth.md`](../../docs/adr/0002-catalogue-source-of-truth.md)
+> 与 [`CHANGELOG.md`](../../CHANGELOG.md)；已知矛盾见 [`../README.md`](../README.md)。

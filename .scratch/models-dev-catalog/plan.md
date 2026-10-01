@@ -161,3 +161,7 @@
 | `src/client.js` 内联 `MODELS` | 删块 | `grep -c MODELS` = 0 |
 | `zen-provider.ts` synthetic 列表 | 删块 | `grep -c synthetic` = 0 |
 | `zen-provider.refreshModels` | **不退役**（仍是 Zen 闸门归属地，spec D12） | — |
+
+> **Superseded.** 本文件是历史推理，已落地。当前事实见
+> [`docs/adr/0002-catalogue-source-of-truth.md`](../../docs/adr/0002-catalogue-source-of-truth.md)
+> 与 [`CHANGELOG.md`](../../CHANGELOG.md)；已知矛盾见 [`../README.md`](../README.md)。

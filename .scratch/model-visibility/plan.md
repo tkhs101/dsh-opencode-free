@@ -105,3 +105,7 @@ picker 可见性由 provider models 经 `PiAiAdapter` 驱动，无现成开关�
 ## Retirement
 
 - 无。加法变更；旧行为（全量列表）= 空 `hiddenModels` 默认保留。A2（定制错误）/A3（目录契约）保持 defer，不建兼容分支。
+
+> **Superseded.** 本文件是历史推理，已落地。当前事实见
+> [`docs/adr/0002-catalogue-source-of-truth.md`](../../docs/adr/0002-catalogue-source-of-truth.md)
+> 与 [`CHANGELOG.md`](../../CHANGELOG.md)；已知矛盾见 [`../README.md`](../README.md)。
