@@ -118,6 +118,62 @@ measurement**, which is the more useful half.
   evidence, and rewrites its "not doing" list as contracts that state what
   evidence would overturn each entry.
 
+### Fixed — audit remediation
+
+A full audit on 2026-09-30 (`.claude/audits/`) found 51 issues; all are fixed
+here. The rationale for each decision lives in `.agents/notes/`; the audit
+report itself is a pre-remediation snapshot and says so.
+
+**Two bugs that changed what users saw**
+
+- **A network failure became a second request.** The global fetch guard's
+  fallback `catch` wrapped the whole function, so the inner rethrow of a socket
+  error was caught by it and the request was re-sent with the *un-rewritten*
+  `init` — no `Authorization`, no session. Wi-Fi jitter therefore surfaced as
+  "the anonymous tier refused us", which is exactly the diagnosis
+  `TransportRecorder` and `describeTransportCause` exist to avoid.
+- **The probe round report vanished.** Two writers, one field. The full-sync
+  branch rebuilt the cache record without `lastRound`, and the round wrote to
+  disk without updating the in-memory copy the next sync reads. Either path
+  deleted the report. The test guarding it covered only the `304` branch and —
+  because it pinned no `ttlMs` — never actually performed a revalidation at all.
+
+**Correctness and cost**
+
+- Forced probes are floored at 5 minutes: the POST route had no rate limit, and
+  one round is up to 34 real requests against a bucket shared per egress IP.
+- A peer marked `optional` is imported unconditionally at the top level, so a
+  missing one failed at load with no installer warning — while both READMEs say
+  "do not ignore peer dependency warnings".
+- The response size cap ran *after* `response.text()`, so an oversized body was
+  already fully resident when it was rejected.
+- A dead socket re-asking a settled verdict is unchanged; but an unswept `dead`
+  verdict is now re-checked, so a wrong channel cannot suppress a working model
+  permanently.
+
+**The test suite was not hermetic.** `tests/compatibility.test.mjs` never set
+`DSH_HOME`, so its 26 cases read and rewrote the developer's real
+`~/.dsh/dsh-opencode-free/catalog.json` and really requested models.dev — while
+this README claimed the suite does not use the network. Found by mutation-testing
+the suite against itself; see `.agents/notes/implemented/testing/`.
+
+**Accessibility** — every palette colour now meets WCAG AA against the card
+(measured 2.99–4.35:1 before, 26/26 pass now), and the model switch declares a
+focus indicator it previously had none of.
+
+**Supply chain and process** — CI covers the Node range `engines` promises,
+pins actions to commit SHAs, runs `pnpm audit`, and gates formatting.
+`scripts/notes/` is vendored from the write-notes skill and guarded by sha256,
+because being ignored by the formatter also means being unchecked.
+
+**Not fixed, deliberately**
+
+- `LICENSE` credits `dsh-claude-subscription contributors`. That is the upstream
+  author's line, inherited verbatim by this fork; changing a copyright
+  attribution is not this repository's decision.
+- `createCatalog` is still 202 lines. Lowering it further means restructuring the
+  interface implementation, whose payoff does not justify the blast radius.
+
 ## [0.3.1] - 2026-09-30
 
 The availability check works on a current host. `0.3.0` fixed the symptom on the
