@@ -18,6 +18,34 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `0.2.1` are not here, so they are not described. It is a predecessor of this
 > release, not something this release replaces or rolls back.
 
+## [0.3.5] - 2026-10-02
+
+Two more findings from the follow-up review, which confirmed the previous five
+fixed. Both are the same shape again: a conclusion is published one step later
+than the fact it describes. Full rationale in
+`.agents/notes/implemented/bug-fix/2026-10-02-await-the-round-you-asked-for.md`.
+
+### Fixed
+
+- **A slow catalogue gate could end the poll before the requested round started.**
+  The backend publishes `running: true` only after the Zen catalogue gate
+  answers — one cheap GET — so a round slower than the 800 ms poll interval hands
+  the card the **previous** round's report, which reads as complete. The button
+  came back, the panel settled, and the round that really did start was never
+  seen. The card now compares the reading's `startedAt` against the one that was
+  on screen when the button was pressed: still equal means ours has not been
+  published yet, so it keeps waiting — bounded at 30 s, and without repainting
+  the stale report under a busy button.
+  (`src/client.js` `adopt`, `probe`)
+- **A model was shown working before its channel was applied.** Per-model results
+  are painted as they land, so a model already displayed as working must already
+  be routed the way it worked. The measured channel was applied when the round
+  **finished**, leaving a visibly successful model on the channel the probe had
+  just ruled out for as long as the rest of the sequential round took — up to
+  15 s per remaining model. It is applied per model now; the cache write stays
+  once per round.
+  (`src/catalog.ts` `runProbeRound`)
+
 ## [0.3.4] - 2026-10-01
 
 Four defects and one UI follow-up, all reported by an upstream review that ran
@@ -489,6 +517,7 @@ repository; the supporting commit and code reference for each one is in
   before the request.
   (`e4b9124`; `src/index.ts:422`)
 
+[0.3.5]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.5
 [0.3.4]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.4
 [0.3.3]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.3
 [0.3.2]: https://github.com/tkhs101/dsh-opencode-free/releases/tag/v0.3.2

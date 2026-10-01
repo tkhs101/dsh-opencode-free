@@ -1384,3 +1384,109 @@ test('the probe timestamp needs a real time, not the epoch', async () => {
     mounted.dispose()
   }
 })
+
+test('a slow catalogue gate does not end the poll before the requested round starts', async () => {
+  // The backend publishes `running: true` only after the Zen catalogue gate
+  // answers, and that gate costs one cheap GET. A round slower than the poll
+  // interval therefore hands the card the PREVIOUS round's report — which reads
+  // as complete. `awaiting` existed to cover exactly this and did so on the
+  // first read, but the poll chain consumed it on the next one: the button came
+  // back, the panel settled, and the round that really did start was never seen
+  // (review 2026-10-02). Every round carries a `startedAt`, so the stamp on
+  // screen when the button was pressed is what tells the two apart.
+  const OLD = 1759146617000
+  const previous = {
+    running: false,
+    total: 2,
+    done: 2,
+    current: null,
+    results: {
+      'big-pickle': { status: 'ok', ms: 90 },
+      'space-bunny-free': { status: 'failed', ms: 15003, code: 'timeout', http: 0 },
+    },
+    targets: null,
+    startedAt: OLD,
+  }
+  const live = {
+    running: true,
+    total: 3,
+    done: 1,
+    current: 'muse-spark-1.3-contributor-free',
+    results: { 'muse-spark-1.3-contributor-free': { status: 'ok', ms: 140 } },
+    startedAt: OLD + 5000,
+  }
+  const done = {
+    running: false,
+    total: 3,
+    done: 3,
+    current: null,
+    results: {
+      'big-pickle': { status: 'ok', ms: 90 },
+      'space-bunny-free': { status: 'failed', ms: 15003, code: 'timeout', http: 0 },
+      'muse-spark-1.3-contributor-free': { status: 'ok', ms: 140 },
+    },
+    targets: null,
+    startedAt: OLD + 5000,
+  }
+  let phase = 'previous'
+  let polls = 0
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'POST') {
+        return { ok: true, status: 202, json: async () => SNAPSHOT }
+      }
+      if (url.endsWith('/api/probe') && method === 'GET') {
+        polls += 1
+        if (phase === 'previous') return { ok: true, json: async () => previous }
+        if (phase === 'live') return { ok: true, json: async () => live }
+        return { ok: true, json: async () => done }
+      }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    // The card finishes its first read first, as a reader's would: the previous
+    // round is ON SCREEN when the button is pressed, which is the state the
+    // stamp is captured from.
+    await mounted.fireTimers()
+    mounted.findButton('立即探测').props.onClick()
+    await mounted.fireTimers()
+    // The gate has not answered, so every read is still the previous round.
+    await mounted.fireTimers()
+    await mounted.fireTimers()
+    assert.ok(polls >= 2, 'the chain kept polling through the stale readings')
+    // The harm was the panel settling and the button coming back while the
+    // round the reader asked for had not even started. It stays busy.
+    assert.ok(
+      collect(mounted.rerender()).texts.some((t) => t.includes('探测中')),
+      'and the button stays busy: the requested round has not reported yet',
+    )
+    const pollsBeforeLive = polls
+    assert.ok(polls > 2, 'the chain is still asking, not just idle-but-busy')
+
+    phase = 'live'
+    await mounted.fireTimers()
+    assert.ok(
+      collect(mounted.rerender()).texts.some((t) => t.includes('1/3')),
+      'the round that really started is followed',
+    )
+
+    phase = 'done'
+    await mounted.fireTimers()
+    await mounted.fireTimers()
+    const settled = collect(mounted.rerender()).texts
+    assert.ok(
+      settled.some((t) => t.includes('探测完成')),
+      'and its report is shown',
+    )
+    assert.ok(
+      [...walk(mounted.rerender())].some(
+        (n) => n.tag === 'button' && [...walk(n)].some((d) => d.text === '立即探测'),
+      ),
+      'the button is released when THAT round ends, not when the stale one did',
+    )
+  } finally {
+    mounted.dispose()
+  }
+})

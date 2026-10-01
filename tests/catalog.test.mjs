@@ -3036,3 +3036,77 @@ test('a refusal never records a channel', async () => {
     assert.equal(record.api, undefined, 'a dead verdict carries no channel')
   })
 })
+
+test('a model is routed the moment its probe answers, not when the round ends', async () => {
+  // Per-model results are painted as they land, so a model the panel is already
+  // showing as working must already be routed the way it worked. Applying the
+  // measured channel when the round FINISHED left a visibly successful model
+  // still going down the channel the probe had just ruled out — for as long as
+  // the rest of the (sequential) round took, which on a slow model is the full
+  // 15 s timeout per remaining model (review 2026-10-02).
+  //
+  // The cache write must stay once per round: a half-finished round must not be
+  // read back as a complete set of verdicts.
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    let hold = false
+    let enterHold = () => undefined
+    let releaseHold = () => undefined
+    const paused = new Promise((resolve) => {
+      enterHold = resolve
+    })
+    const held = new Promise((resolve) => {
+      releaseHold = resolve
+    })
+
+    const probe = async (model) => {
+      // big-pickle is first and answers on the channel inference did NOT pick.
+      if (model.id === 'big-pickle') return { kind: 'ok', api: 'openai-responses', ms: 120 }
+      if (hold && model.id === 'deepseek-v4-flash-free') {
+        enterHold()
+        await held
+      }
+      return { kind: 'ok' }
+    }
+    const api = (c, id) => c.current().models.find((m) => m.id === id)?.api
+
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: scriptedFetch([fakeResponse({ etag: '"v1"', body: apiBody() })]),
+      probe,
+    })
+    await catalog.forceRefresh()
+    assert.equal(api(catalog, 'big-pickle'), 'openai-completions', 'inference to begin with')
+
+    hold = true
+    const round = catalog.forceProbes()
+    await paused
+    const running = catalog.probeProgress()
+    assert.equal(running.running, true, 'the round is still going')
+    assert.equal(
+      api(catalog, 'big-pickle'),
+      'openai-responses',
+      'the answered model is already routed, mid-round',
+    )
+    assert.equal(
+      api(catalog, 'deepseek-v4-flash-free'),
+      channelFor({ id: 'deepseek-v4-flash-free', ...apiBody().opencode.models['deepseek-v4-flash-free'] }),
+      'and a model that has not answered yet is untouched',
+    )
+
+    releaseHold()
+    await round
+    const onDisk = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+    assert.equal(
+      onDisk.probes['big-pickle'].api,
+      'openai-responses',
+      'the measurement is persisted when the round writes',
+    )
+    assert.equal(
+      Object.keys(onDisk.probes).length,
+      catalog.probeProgress().total,
+      'one write per round, carrying every verdict at once',
+    )
+  })
+})

@@ -807,7 +807,23 @@ window.__ModuleLoader__.load({
 			   replaces them. Wiping the reading here is what made a finished
 			   probe look like nothing ever happened. */
 			var PROGRESS_POLL_MS = 800;
-			var pollRef = React.useRef({ timer: null, active: false, awaiting: false });
+			/* How long a requested round may stay unpublished before the card stops
+			   believing it. The gate is one cheap GET; anything past this is a backend
+			   that is not going to start, and holding the poll open on it would leave
+			   the button busy for ever. */
+			var AWAIT_GRACE_MS = 30_000;
+			var pollRef = React.useRef({
+				timer: null,
+				active: false,
+				awaiting: false,
+				since: 0,
+				/* The most recent reading adopted, and the `startedAt` of the round that
+					   was on screen when a round was REQUESTED. Every round is stamped, so
+					   the second is what separates "the round I asked for is not out yet"
+					   from "it just finished". */
+				last: null,
+				saw: null,
+			});
 			/* Whether the card is following a round, as a mutable flag rather
 			   than the `probing` state. The poll timer outlives the render that
 			   created it, and that render's `probing` is still the value from
@@ -865,6 +881,7 @@ window.__ModuleLoader__.load({
 			   round and the card would keep showing the previous verdict. */
 			function adopt(reading) {
 				if (reading === null) return;
+				pollRef.current.last = reading;
 				setProgress(reading);
 				if (reading.running === true) {
 					pollRef.current.active = true;
@@ -874,6 +891,33 @@ window.__ModuleLoader__.load({
 				// Whether this card was WATCHING this round, or is only looking
 				// at a report that was already on disk when the page opened.
 				var followed = pollRef.current.active;
+				/* A finished reading while we are STILL waiting for the round this
+					   card asked for is not that round finishing. The backend publishes
+					   `running: true` only after the Zen catalogue gate answers, and that
+					   gate costs one cheap GET — so a round slower than the poll interval
+					   hands us the PREVIOUS round's report, which reads as complete.
+					   Consuming `awaiting` there ended the chain one tick early: the
+					   button came back, the panel settled, and the round that really did
+					   start was never seen (review 2026-10-02). Keep waiting — bounded, so
+					   a backend that never starts the round cannot hold the poll open. */
+				if (
+					pollRef.current.awaiting &&
+					/* `startedAt` is what says whether this finished report IS the round
+						   asked for. A finished reading whose stamp still matches the one on
+						   screen when the button was pressed is the PREVIOUS round — ours has
+						   not been published yet. Without an identity the two are
+						   indistinguishable, and consuming `awaiting` on the earlier one is
+						   what ended the chain a tick early (review 2026-10-02). */
+					reading.startedAt === pollRef.current.saw &&
+					Date.now() - pollRef.current.since < AWAIT_GRACE_MS
+				) {
+					/* `null`, deliberately: re-arming with the previous round's report
+						   would paint a finished report under a busy button, which is the
+						   confusion this branch exists to avoid. The click already cleared the
+						   progress area; the real reading repaints it when it arrives. */
+					startPolling(null);
+					return;
+				}
 				pollRef.current.active = false;
 				stopPolling();
 				if (pollRef.current.awaiting) {
@@ -903,6 +947,9 @@ window.__ModuleLoader__.load({
 				setProgress(null);
 				pollRef.current.active = true;
 				pollRef.current.awaiting = true;
+				pollRef.current.since = Date.now();
+				pollRef.current.saw =
+					pollRef.current.last === null ? null : pollRef.current.last.startedAt;
 				loadProgress().then(function (reading) {
 					/* A reading can already be finished — the round may not have
 					   started yet when this first poll lands, and the host answers
@@ -916,7 +963,13 @@ window.__ModuleLoader__.load({
 					}
 					if (pollRef.current.awaiting) {
 						pollRef.current.active = true;
-						startPolling(reading);
+						/* The same identity test `adopt()` makes. A finished reading that
+							   still carries the stamp of the round that was on screen when
+							   the button was pressed is the PREVIOUS one: ours has not been
+							   published yet, and repainting it would present that round's
+							   report as this one's result (review 2026-10-02). */
+						if (reading.startedAt === pollRef.current.saw) startPolling(null);
+						else adopt(reading);
 					} else {
 						adopt(reading);
 					}

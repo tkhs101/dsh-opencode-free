@@ -1474,15 +1474,17 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // concluding, so this `dead` is earned and can be final.
         ...(outcome.kind === "dead" ? { swept: true } : {}),
       };
+      // Applied HERE, not when the round ends. A row is painted the moment its
+      // verdict lands, so a model shown as working must already be routed the
+      // way it worked — waiting for the last model to finish left a visibly
+      // successful model still going down the channel the probe had just ruled
+      // out (review 2026-10-02). The cache write stays once per round.
+      if (outcome.kind === "ok") applyMeasuredChannel(state.models, state.probes);
     }
   } finally {
     state.probeRun.running = false;
     state.probeRun.current = null;
   }
-  // A model this round got an answer on is now routed by MEASUREMENT rather
-  // than by inference, for the rest of this process and — through the probe
-  // record — for every restart after it.
-  applyMeasuredChannel(state.models, state.probes);
   // The round marker is written even when nothing concluded: it is the only
   // thing that stops a fully-gated day from re-probing on every single read.
   state.lastProbeAt = stamp;
