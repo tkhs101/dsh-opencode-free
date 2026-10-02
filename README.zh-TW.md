@@ -58,6 +58,13 @@ dsh plugin --profile web list dsh-opencode-free --depth 0
 dsh --profile web --dump-config
 ```
 
+> [!WARNING]
+> `--dump-config` 會**逐字、且不做任何遮蔽**地印出 profile 的
+> `cordis.patch.yml`，而設定的 Zen key 就寫在那份檔案裡（見〈[設定](#設定)〉）。
+> 請只在沒有設定 key 的 profile 上跑它，或直接跳過——單靠
+> `dsh plugin --profile web list dsh-opencode-free --depth 0`
+> 就足以判斷安裝是否正確。
+
 套件只出現一次，而且 composed config 裡出現 `opencode-free`，就代表安裝正確。
 其他 profile 和插件不會變動。
 

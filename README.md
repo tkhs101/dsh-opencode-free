@@ -60,6 +60,13 @@ dsh plugin --profile web list dsh-opencode-free --depth 0
 dsh --profile web --dump-config
 ```
 
+> [!WARNING]
+> `--dump-config` prints your profile's `cordis.patch.yml` **verbatim, with no
+> redaction**, and that file is where a configured Zen key lives (see
+> [Configuration](#configuration)). Run it only on a profile with no key set, or
+> skip it — `dsh plugin --profile web list dsh-opencode-free --depth 0` on its own
+> already answers whether the install is correct.
+
 The install is correct when the package appears once and `opencode-free`
 appears in the composed config. Other profiles and plugins do not change.
 

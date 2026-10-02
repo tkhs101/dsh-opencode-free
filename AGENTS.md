@@ -8,6 +8,11 @@ Use this guide when a user asks an Agent to install, update, verify, or remove
 - Confirm the target DSH profile; use `web` only when it is the user's target.
 - Use the pinned `v0.2.1` release assets for a first install, never a moving branch.
 - Never print API keys, credential stores, or request bodies.
+  `dsh --profile <name> --dump-config` prints the profile's `cordis.patch.yml`
+  **verbatim with no redaction**, and a configured Zen key lives in its
+  `config.apiKey`. Run it only on a profile with no key set, or skip it —
+  `dsh plugin --profile <name> list dsh-opencode-free --depth 0` is the check
+  that touches no secrets.
 - Do not start, stop, or restart DSH without explicit permission.
 - Preserve the DSH profile, unrelated plugins, and stored credentials.
 - Do not delete any DSH profile during install, update, verification, or uninstall.
@@ -68,7 +73,9 @@ Success requires:
 
 1. The requested package version appears once.
 2. `opencode-free` appears once in the composed config after install
-   or update, and is absent after uninstall.
+   or update, and is absent after uninstall — **but read the Safety section
+   first**: `--dump-config` prints secrets, so only run it on a profile with no
+   `config.apiKey` set.
 3. No unrelated profile or plugin changed.
 4. A running DSH process was not restarted by the operation.
 
