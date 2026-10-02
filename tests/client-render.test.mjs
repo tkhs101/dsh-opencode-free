@@ -1287,7 +1287,7 @@ test('a watched automatic round re-reads the catalogue when it ends', async () =
   // awaited. An automatic round — the daily one, or the lazy read that starts
   // one — left the card holding the metadata it loaded at mount: a stale "last
   // probed" time and stale inconclusive wording, until the page was reopened
-  // (review 2026-10-01).
+  //.
   //
   // The card is mounted while the round is ALREADY running, which is how a page
   // opened during the daily round meets it. The catalogue answers differently
@@ -1364,7 +1364,7 @@ test('a watched automatic round re-reads the catalogue when it ends', async () =
 
 test('the probe timestamp needs a real time, not the epoch', async () => {
   // `0` is what a catalogue that has never been probed reports, and rendering it
-  // as a date put a 1970 stamp on the card (review 2026-10-01). Pinned here
+  // as a date put a 1970 stamp on the card. Pinned here
   // because the stamp is the only place the value reaches the reader.
   const mounted = await renderCard({ hidden: [], snapshot: { ...SNAPSHOT, probedAt: 0 } })
   try {
@@ -1392,7 +1392,7 @@ test('a slow catalogue gate does not end the poll before the requested round sta
   // as complete. `awaiting` existed to cover exactly this and did so on the
   // first read, but the poll chain consumed it on the next one: the button came
   // back, the panel settled, and the round that really did start was never seen
-  // (review 2026-10-02). Every round carries a `startedAt`, so the stamp on
+  //. Every round carries a `startedAt`, so the stamp on
   // screen when the button was pressed is what tells the two apart.
   const OLD = 1759146617000
   const previous = {

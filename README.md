@@ -2,6 +2,7 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
+[![npm](https://img.shields.io/npm/v/dsh-opencode-free)](https://www.npmjs.com/package/dsh-opencode-free)
 [![CI](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml/badge.svg)](https://github.com/x5427876/dsh-opencode-free/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -44,21 +45,20 @@ dsh --version
 
 | Plugin | DSH |
 |---|---|
-| `0.3.0` | `0.2.0-rc.2` |
 | `0.2.1` | `0.2.0-rc.2` |
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
-The four peer dependencies are **required**, not optional: `src/` imports each of
-them at the top level, so a host missing one fails to load the plugin. Do not
-ignore peer dependency warnings.
+The four peer dependencies are **required**: `src/` imports each of them at the
+top level, so a host missing one fails to load the plugin. Do not ignore peer
+dependency warnings.
 
 ## Install
 
 Install the pinned package from npm:
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.3.0
+dsh plugin --profile web add dsh-opencode-free@0.2.1
 ```
 
 The examples use the `web` profile. Replace it with your target profile.
@@ -71,14 +71,7 @@ dsh plugin --profile web list dsh-opencode-free --depth 0
 
 The install is correct when the package appears once. To confirm the plugin also
 reached the composed config, run `dsh --profile web --dump-config` and look for
-`opencode-free` — but read the warning below first, because that command prints
-your profile's secrets.
-
-> [!WARNING]
-> `dsh --profile web --dump-config` prints your profile's `cordis.patch.yml`
-> **verbatim, with no redaction** — and that is where the optional Zen key lives
-> (see [Configuration](#configuration)). Either run it on a profile with no key
-> configured, or skip it and rely on `dsh plugin … list` alone.
+`opencode-free`.
 
 Other profiles and plugins do not change.
 

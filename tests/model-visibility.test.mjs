@@ -484,7 +484,7 @@ test('a same-origin POST must still name this machine (DNS rebinding)', async ()
   // page at evil.example resolves to 127.0.0.1, so the browser sends
   // `Origin: http://evil.example` TOGETHER WITH `Host: evil.example` and the two
   // match. The check therefore has to be that the Host NAMES THE LOCAL MACHINE
-  // (audit 2026-09-30). This is a desktop app on loopback, and a rebinding page
+  //. This is a desktop app on loopback, and a rebinding page
   // that reached it could spend the shared anonymous bucket through POST /probe.
   const host = mount({})
 

@@ -505,14 +505,14 @@ window.__ModuleLoader__.load({
 				// never carried progress. The 202 POST exists so a click does not
 				// block for minutes; live progress belongs to the GET endpoint
 				// alone. Reading a field nobody sends only teaches the next reader
-				// that it does (audit 2026-09-30).
+				// that it does.
 			};
 		}
 
 		// Every request carries a deadline. Without one, a host that accepts the
 		// connection and then goes quiet leaves the promise pending forever, so
 		// setBusy(false) / setProbing(false) never run and BOTH toolbar buttons stay
-		// disabled until the page is reloaded (audit 2026-09-30).
+		// disabled until the page is reloaded.
 		var REQUEST_TIMEOUT_MS = 20000;
 		function getJSON(url, options) {
 			var merged = Object.assign({}, options);
@@ -898,7 +898,7 @@ window.__ModuleLoader__.load({
 					   hands us the PREVIOUS round's report, which reads as complete.
 					   Consuming `awaiting` there ended the chain one tick early: the
 					   button came back, the panel settled, and the round that really did
-					   start was never seen (review 2026-10-02). Keep waiting — bounded, so
+					   start was never seen. Keep waiting — bounded, so
 					   a backend that never starts the round cannot hold the poll open. */
 				if (
 					pollRef.current.awaiting &&
@@ -907,7 +907,7 @@ window.__ModuleLoader__.load({
 						   screen when the button was pressed is the PREVIOUS round — ours has
 						   not been published yet. Without an identity the two are
 						   indistinguishable, and consuming `awaiting` on the earlier one is
-						   what ended the chain a tick early (review 2026-10-02). */
+						   what ended the chain a tick early. */
 					reading.startedAt === pollRef.current.saw &&
 					Date.now() - pollRef.current.since < AWAIT_GRACE_MS
 				) {
@@ -930,7 +930,7 @@ window.__ModuleLoader__.load({
 				// the last probed time, the inconclusive notice. The automatic
 				// round reloaded only when a click had awaited it, so a card
 				// left open across one kept a 1970 timestamp and stale
-				// wording until it was reopened (review 2026-10-01). `followed`
+				// wording until it was reopened. `followed`
 				// is what separates "this round finished while I was
 				// watching" from "this report was already on disk" — the
 				// latter must not spend a request on every page open.
@@ -967,7 +967,7 @@ window.__ModuleLoader__.load({
 							   still carries the stamp of the round that was on screen when
 							   the button was pressed is the PREVIOUS one: ours has not been
 							   published yet, and repainting it would present that round's
-							   report as this one's result (review 2026-10-02). */
+							   report as this one's result. */
 						if (reading.startedAt === pollRef.current.saw) startPolling(null);
 						else adopt(reading);
 					} else {
@@ -1236,7 +1236,7 @@ window.__ModuleLoader__.load({
 			// `0` is what a catalogue that has never been probed reports, and it is
 				// not 1970: a round that has never run has no time. Rendering it put a
 				// 1970 stamp and stale inconclusive wording on a card that simply had
-				// not probed yet (review 2026-10-01).
+				// not probed yet.
 				if (catalog !== undefined && catalog !== null && typeof catalog.probedAt === "number" && catalog.probedAt > 0) {
 				var stampText = stampOf(catalog.probedAt);
 				if (stampText !== "") {

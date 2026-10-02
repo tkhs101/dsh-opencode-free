@@ -8,8 +8,7 @@
 不用「模仿」（見 `CONTEXT.md`）。
 
 > ⏳ 時效：本文件初版是 2026-09-22 的快照，2026-09-27 補上工具名稱閘門
-> （§8）與踩雷紀錄，2026-09-29 補上 pi-ai 0.87 transcript（§9），
-> 2026-09-30 補上 §8 的出口保險與那一輪的發現。上游無第三方合約，行為隨時會變；
+> （§8）與踩雷紀錄，2026-09-29 補上 pi-ai 0.87 transcript（§9）。上游無第三方合約，行為隨時會變；
 > 若 `scripts/reverify.sh` 出現非預期燈號，先重跑腳本確認，仍異常則按
 > 「方法：MITM 錄封包 + 差分」重驗並更新本文件與 ADR。
 
@@ -92,7 +91,7 @@ SSE）。插件同樣直連，不裝 OpenCode、不起 server、不用 LiteLLM�
 （[opencode#42500](https://github.com/anomalyco/opencode/issues/42500)），
 `x-opencode-client`/session headers 解不了 UA 這道鎖。
 
-> ⚠️ 推論（部分驗證）：UA 尾段插件名（`dsh-opencode-free/0.2.0`，Pi 版是
+> ⚠️ 推論（部分驗證）：UA 尾段插件名（`dsh-opencode-free/0.2.1`，Pi 版是
 > `pi-opencode-direct/0.1.7`）不影響閘門。2026-09-27 帶 `dsh-opencode-free`
 > 尾段的請求已匿名 200，所以這個尾段目前可以通過；尚未測試其他尾段字串。
 > 之前寫的「匿名全死、無法差分」是 §8 的誤判，現在可以用重播做 A/B。
@@ -134,15 +133,11 @@ Pi core 壓縮時強制 `cacheRetention: "none"`，pi-ai 會吞掉自己的親�
 
 - 活目錄：`GET https://opencode.ai/zen/v1/models`（免認證公開端點，
   本機實測回 200）取 `data[].id`。
-- 過濾（已改）：不再只認 Pi 內建 `opencode` 目錄。現行做法是
-  `src/catalog.ts` 讀 models.dev 的 `opencode.models`（`cost` 全零才進目錄；
-  `status` 已降級為純粹的目錄資格，`active` 與 `deprecated` 都留著，
-  **是否顯示改由每日一輪實測探針判定**——2026-09-29 起，取代原本
-  「`status ≠ deprecated` 為預設可見」的規則），Pi 內建表降級為「已知通道覆蓋表」
-  與離線兜底基線。見 ADR-0002。
-- 對應：`catalog.ts` 的 `derive()`（判定與元數據映射）+
-  `zenProvider().refreshModels()`（Zen 在列這道閘門）；
-  傳輸與身份仍在 `src/zen-provider.ts`。
+- 過濾：只收錄 Pi 內建 `opencode` 目錄中 `api ∈ {openai-responses,
+  openai-completions}` 且 `cost` 全零的模型——能力與限額沿用 Pi 官方
+  元數據，不自己猜。
+- 對應：`freeModels()` + `zenProvider().refreshModels()`；
+  我們原樣移植（`src/zen-provider.ts`）。
 
 ### 5. 加密重播：後端輪轉的 400 重試
 
@@ -227,17 +222,6 @@ DSH 在 Windows 用 `dsh-base` 的 `tool-pwsh` 取代 `tool-bash`，送出的是
 主路徑（`zenProvider().stream*`）與 compat 路徑都套用。`stream: true` 由 pi-ai
 保證，插件不用處理。
 
-**出口保險（2026-09-30 起，`enforceAnonymousTools`）。** 上面的對策改的是
-`context`，而 context 到網路之間還有幾層，工具可能就在那一段不見了。探針不能
-假設上游四層都做過——§8 這道閘門正是探針自己賴以取得答案的條件，問錯形狀就等於
-自己量自己。因此探針在 `onPayload`（字節離開前插件能碰到的最後一道邊界）**重新
-斷言 `read`／`bash`**：冪等（已在就不寫）、兩種通道形狀都認（responses 把工具名
-放在 `type` 旁、completions 放在 `function` 裡）、用 body 自己的欄位判通道而不是
-猜。它不判 key：探針無論走匿名還是帶 key 都必須被放行。附帶一項自報機制
-`anonGateMarker`：`anon-gated` 折起了三種上游條件，而報文是這件事唯一存在過的
-地方（`inconclusive` 不落盤），所以那一輪結束時要答得出「是哪一種閘門」——三種
-條件的修法並不相同。
-
 2026-09-27 DSH rc.2（Windows、`web` profile、無 key）實測：7 個免費模型都能對話；
 `pwsh` 與 `read` 工具往返都完成（軌跡記錄顯示 DSH 收到 `pwsh`）；
 除錯記錄 18 個請求全部 `200`、全部 `Bearer public`。
@@ -248,20 +232,6 @@ DSH 在 Windows 用 `dsh-base` 的 `tool-pwsh` 取代 `tool-bash`，送出的是
 Nemotron 3.5 Lightning 當時 10 秒後回 `200`，之後只送 `: keep-alive`、
 沒有內容；同時用 Pi 呼叫同一模型也一樣，所以是上游該模型卡住，不是閘門或插件問題。
 判斷方法：`200` 代表已通過閘門；之後沒資料，就用 Pi 對照，兩邊都卡就是上游。
-
-2026-09-30 DSH `0.2.0-rc.1`（同樣環境）：面板某一輪 10 個模型只測到 1 個，其餘
-9 個回 `403 FreeTierError`，而同一批模型在 DSH 裡正常作答。抓宿主真正發到線上的
-請求才看到真相：**body 裡沒有 `tools`**。`applyAnonymousToolGate` 確實執行了
-（同一函數下一行的 `compatRequestOptions` 也執行了，`x-stainless-timeout: 180`
-就是證據），但工具沒活到線上——丟失發生在插件管不到的一層。上游原文
-`OpenCode's free tier can only be used from within OpenCode` 不是在說額度、不是
-在說網絡、也不是在說這個模型，它在說**這條請求不像 OpenCode 客戶端發的**；
-先前把它讀成「匿名層／IP／額度」的結論，與 2026-09-27 那次是同一個陷阱，只是
-這次探針用的是自己的請求形狀。修法是上面的出口保險，不是補丁：這份代碼存在的
-目的就是問上游這個模型還能不能用，而上游的准入條件就是請求形狀，把准入條件在出口
-保證住是它自己的責任。宿主裡連續三輪，1/10 ＋ 9 次閘門拒絕 → 8/10 ＋ 0 次；剩下
-兩行各是對的（`ling` 是真 400 `Endpoint is unavailable`，`nemotron-3.5` 是 HTTP
-200 超時——被放行了只是不作答）。教訓：**閘門條件要在出口保證，不能靠上層幫你做。**
 
 維護注意：
 
@@ -315,12 +285,7 @@ provider。provider 拿到的是 `TranscriptContext`（執行時就是 `{ messag
   的大型暫存檔（`Access is denied`，疑似防毒鎖檔）而失敗；headless 走同一條
   `PiAiAdapter` → 插件路徑。
 - pi-ai 0.87 的內建 `opencode` 目錄把 `mimo-v2.5-free` 換成
-  `mimo-v2.6-flash-free`。**這一條只適用於 Pi 版那條線**（它的免費清單來自
-  pi-ai 內建表）：本插件的免費清單來自 models.dev（ADR-0002），pi-ai 內建表
-  已被降級為「已知通道覆蓋表」與離線兜底，所以清單不隨它變動——我們的清單本來
-  就已經是 `mimo-v2.6-flash-free`，且帶更完整的模態 metadata。
-- 該次驗證只覆蓋 headless。web UI 未驗證（同一次記錄，原因是本機 esbuild
-  的暫存檔被防毒鎖住），所以「面板行為」在 rc.2 上仍待實機確認。
+  `mimo-v2.6-flash-free`，插件的免費清單隨之改變（上游兩者當時都還在）。
 
 ## 我們相對 Pi 版的改編（非仿冒部分）
 

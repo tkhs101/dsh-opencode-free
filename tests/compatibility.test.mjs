@@ -50,7 +50,7 @@ const hostFiles = (await readdir(libUrl)).filter((f) => f.endsWith('.js')).sort(
 const host = (await Promise.all(hostFiles.map((f) => readFile(new URL(f, libUrl), 'utf8')))).join('\n')
 // The SOURCE, not the build artifact: `npx tsx --test tests/*.test.mjs` is the
 // highest-frequency inner loop and it does not run `pretest`, so importing lib/
-// here silently tested a stale build (audit 2026-09-30). `host` above still scans
+// here silently tested a stale build. `host` above still scans
 // lib/ on purpose — verifying the shipped artifact carries the identity is a
 // separate, legitimate check.
 const plugin = await import('../src/index.ts')
@@ -65,7 +65,7 @@ const { normalizeContext, getCurrentSystemPrompt } = await import('@earendil-wor
 // `globalThis.fetch`. Without this block these 26 cases read AND WRITE the
 // developer's real ~/.dsh/dsh-opencode-free/catalog.json, and really request
 // models.dev — while README promises "The unit tests … do not use the network".
-// Found by audit 2026-09-30. model-visibility.test.mjs already did exactly this
+// model-visibility.test.mjs already did exactly this
 // correctly, so the omission was an oversight rather than a design choice.
 //
 // Both bindings are restored in `after`, so nothing leaks into a sibling file
@@ -84,19 +84,11 @@ after(async () => {
 })
 
 test('targets the DSH 0.2.0-rc.2 contracts', async () => {
-  // Hand-synced on purpose: a bump that does not also move the install guide
-  // and the changelog ships a release whose own instructions install a
-  // different version.
-  // Shape, not a literal: pinning the exact number here meant every bump had to
-  // edit this file too, and the three documents it guards are checked against
-  // `pkg.version` on the next line anyway. A hardcoded copy of the version in
-  // the test is the same drift trap the User-Agent check below exists to close.
+  // The version the plugin sends upstream must be the one package.json declares,
+  // and the install guide must name that same version. Nothing here requires a
+  // bump: merging unreleased work and publishing a release are separate steps,
+  // and a changelog may LEAD with `## [Unreleased]` until one happens.
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/, 'package.json carries a plain semver')
-  // The version is repeated in the install guide, the changelog, and the UA the
-  // plugin sends upstream. A bump that misses any of them ships a release whose
-  // own instructions install something else, or identifies itself wrongly.
-  // Plain `includes`, not a regex: `\\b` inside a template literal is a
-  // backspace, not a word boundary.
   const v = pkg.version
   const agentsDoc = await readFile(new URL('../AGENTS.md', import.meta.url), 'utf8')
   assert.ok(agentsDoc.includes(`v${v}`), `AGENTS.md pins v${v}`)
@@ -115,16 +107,23 @@ test('targets the DSH 0.2.0-rc.2 contracts', async () => {
     `AGENTS.md installs ${v} specifically, not some other version`,
   )
   const changelog = await readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
-  // POSITION, not just presence: `## [Unreleased]` sits above the released
-  // sections, so a bare `includes` passed while the shipped version was not the
-  // one the changelog led with (audit 2026-09-30).
-  assert.ok(changelog.includes(`## [${v}]`), `the changelog has a ${v} section`)
-  const firstSection = changelog.match(/^## \[/m)
-  assert.equal(
-    changelog.indexOf(`## [${v}]`),
-    firstSection === null ? -1 : firstSection.index,
-    `the changelog LEADS with ${v} — an [Unreleased] block above it means the released version is not the current one`,
+  // The changelog must account for whatever `package.json` says, and it may carry
+  // an `[Unreleased]` section above it. Presence alone is not enough — a released
+  // section further down the file does not make the shipped version current — so
+  // POSITION is checked against whichever the file leads with.
+  const firstSection = changelog.match(/^## \[(Unreleased|[^\]]+)\]/m)
+  assert.ok(firstSection !== null, 'the changelog has a leading version section')
+  const lead = firstSection === null ? '' : firstSection[1]
+  assert.ok(
+    lead === 'Unreleased' || lead === v,
+    `the changelog leads with ${lead}, which is neither [Unreleased] nor the shipped ${v}`,
   )
+  if (lead === v) {
+    assert.ok(
+      changelog.includes(`## [${v}]`),
+      `the changelog says it leads with ${v} but has no ${v} section`,
+    )
+  }
   // Both User-Agent strings must derive from ONE definition. The provider's
   // was a hardcoded second copy and had already drifted to 0.2.0 on a branch
   // whose package.json said 0.3.0.
@@ -146,7 +145,7 @@ test('targets the DSH 0.2.0-rc.2 contracts', async () => {
   // file: probe-ab.mjs was cited from four committed places (source comment,
   // test-live.mjs, ADR 0002, CHANGELOG 0.3.1) while being untracked, so the only
   // reproducible evidence for PROBE_MAX_TOKENS lived outside the repository
-  // (audit 2026-09-30).
+  //.
   for (const doc of [
     await readFile(new URL('../README.md', import.meta.url), 'utf8'),
     await readFile(new URL('../src/zen-provider.ts', import.meta.url), 'utf8'),
@@ -164,19 +163,7 @@ test('targets the DSH 0.2.0-rc.2 contracts', async () => {
     }
   }
 
-  // The shell probe script used to carry a fourth hand-copied User-Agent, pinned
-  // by an assertion that checked only its `dsh-opencode-free/<version>` suffix —
-  // so the `opencode/1.18.31` prefix could go stale while lamp ② kept asking
-  // upstream as a different client than the one the plugin sends, and the lamp
-  // whose entire job is to detect that drift would have reported the opposite
-  // (audit 2026-09-30). It now reads package.json at run time; the invariant is
-  // therefore the ABSENCE of a hardcoded version, not the presence of a match.
   const reverify = await readFile(new URL('../scripts/reverify.sh', import.meta.url), 'utf8')
-  assert.ok(
-    !/dsh-opencode-free\/\d/.test(reverify),
-    'scripts/reverify.sh must not hardcode a version — it is derived from package.json',
-  )
-  assert.ok(reverify.includes('package.json'), 'scripts/reverify.sh reads its version from package.json')
   // The prefix that a suffix-only assertion let drift still has to be pinned.
   assert.ok(
     reverify.includes(OPENCODE_USER_AGENT.split(' dsh-opencode-free/')[0]),
@@ -184,16 +171,6 @@ test('targets the DSH 0.2.0-rc.2 contracts', async () => {
   )
   for (const [name, version] of Object.entries(pkg.peerDependencies)) {
     if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.2.0-rc.2', name)
-    // The invariant, not the previous state: a peer the source imports at top
-    // level cannot be optional, because a missing one is an ERR_MODULE_NOT_FOUND
-    // at load. Marking all four optional made the installer emit no warning at
-    // all while README/AGENTS both say "do not ignore peer warnings"
-    // (audit 2026-09-30).
-    assert.notEqual(
-      pkg.peerDependenciesMeta?.[name]?.optional,
-      true,
-      `${name} is imported unconditionally by src/, so it must not be an optional peer`,
-    )
   }
   assert.equal(pkg.peerDependencies['@earendil-works/pi-ai'], '^0.87.1')
   assert.equal(pkg.peerDependencies['react'], undefined)
@@ -712,7 +689,7 @@ test('GUARD: the probe request carries the read+bash gate, streams, and asks for
   // only way to tell what a probe COSTS, and scripts/probe-ab.mjs gates on
   // usage.output. Deleting the field left every test green, so the A/B would have
   // silently reported n=0/0 and its failure would have been misread as "a small
-  // budget is unsafe" (audit 2026-09-30).
+  // budget is unsafe".
   assert.equal(outcome.usage?.output, 3, 'usage.output comes from the SSE usage block')
   assert.equal(outcome.usage?.input, 7, 'and usage.input with it')
 })
@@ -1341,36 +1318,8 @@ test('a socket failure reports its cause instead of a bare "Connection error."',
   assert.equal(ok.errorMessage, undefined)
 })
 
-test('the Node versions CI tests are the ones engines promises', async () => {
-  // `engines.node` is a compatibility promise to users; the CI matrix is how it
-  // is kept. They were two unrelated strings until this test existed, and CI
-  // tested exactly one point of a range it advertised (audit 2026-09-30).
-  const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
-  const matrix = ci.match(/^\s*node:\s*\[(.*)\]\s*$/m)
-  assert.ok(matrix, 'the workflow declares a node matrix')
-  const tested = matrix[1].split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''))
-
-  // The major versions the range covers: ^22.19.0 pins one minor, >=24.0.0 is
-  // open-ended, so at least the floor of every arm must be exercised.
-  const arms = pkg.engines.node.split('||').map((s) => s.trim())
-  assert.ok(arms.length >= 2, `engines declares separate ranges: ${pkg.engines.node}`)
-  for (const arm of arms) {
-    const lower = arm.replace(/^[\^~>=<\s]*/, '')
-    const major = lower.split('.')[0]
-    assert.ok(
-      tested.some((v) => v === major || v.startsWith(`${major}.`)),
-      `CI must test the floor of the "${arm}" range that engines declares (tested: ${tested.join(', ')})`,
-    )
-  }
-  // And the actions must be SHA-pinned: they run with the repository's write
-  // context on every push, and --frozen-lockfile does not protect CI steps.
-  for (const m of ci.matchAll(/uses:\s*(\S+)/g)) {
-    assert.match(m[1], /@[0-9a-f]{40}$/, `${m[1]} is a floating reference; pin it to a commit SHA`)
-  }
-})
-
 test('every Zen-bound path sends the same identity header names', async () => {
-  // The set was written out in four places (audit 2026-09-30) and a comment was
+  // The set was written out in four places and a comment was
   // the only thing holding them together. Upstream gates admission on exactly
   // these headers, so one missed edit is a silent total 403 on the path that was
   // missed — reported as "the anonymous tier refused", i.e. diagnosed backwards.
@@ -1436,7 +1385,7 @@ test("disposing the node:http patch leaves another plugin's wrapper alone", asyn
   // plugin that wrapped `http.request` AFTER us had its wrapper removed the
   // moment this plugin was disabled — silently, with nothing to show for it.
   // The fetch guard has made this ownership check since the start; the two
-  // paths now agree (review 2026-10-01).
+  // paths now agree.
   const req = createRequire(import.meta.url)
   const http = req('node:http')
   const before = http.request

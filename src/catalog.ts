@@ -53,7 +53,7 @@ export const DEFAULT_TTL_MS = 86_400_000;
  * from the POST route, which has no server-side rate limit, and each round is up
  * to 34 real inference requests against a bucket shared per egress IP. Five
  * minutes is far below anything a user would notice and far above a double click
- * (audit 2026-09-30).
+ *.
  */
 export const FORCED_PROBE_MIN_INTERVAL_MS = 5 * 60_000;
 
@@ -477,7 +477,7 @@ export interface ProbeRecord {
    * is indistinguishable from a dead model without asking the other channel. So
    * when the sweep DID get an answer, that answer outranks every inference above:
    * keeping it is the difference between a probe that says "ok" and a chat that
-   * then fails on the same model (review 2026-10-01).
+   * then fails on the same model.
    *
    * Persisted with the verdict, so the routing survives a restart. Only an `ok`
    * carries one — a refusal says nothing about which channel would have worked.
@@ -522,7 +522,7 @@ export interface ProbeResult {
   /**
    * The channel that answered, on an `ok` only. The catalogue stores it and
    * routes the model by it, so a probe that succeeded on the second channel is
-   * not followed by a chat that fails on the first (review 2026-10-01).
+   * not followed by a chat that fails on the first.
    */
   readonly api?: Api;
   /** Machine-readable failure code; the panel localizes it rather than guessing. */
@@ -621,7 +621,7 @@ function readLastRound(value: unknown): CatalogCacheRecord["lastRound"] {
           // really DID remove a model came back with no flag — and
           // `isFreshRemoval` reads a missing `removed` as a fresh removal, so
           // a restart re-announced a removal for a round that finished hours
-          // ago (audit 2026-10-01).
+          // ago.
           ...(typeof entry.removed === "boolean" ? { removed: entry.removed } : {}),
           ...(typeof entry.marker === "string" && entry.marker !== "" ? { marker: entry.marker } : {}),
         };
@@ -648,7 +648,7 @@ export async function writeCacheAtomic(
 ): Promise<boolean> {
   // Unpredictable on purpose. `${path}.${process.pid}.tmp` was both the path and
   // the pid: on a shared machine another local user could pre-create that exact
-  // name as a symlink and have `writeFile` follow it (audit 2026-09-30).
+  // name as a symlink and have `writeFile` follow it.
   const temporary = join(dirname(path), `.catalog.${randomUUID()}.tmp`);
   try {
     // 0700/0600 rather than the umask default: the file records which models
@@ -678,7 +678,7 @@ export async function writeCacheAtomic(
     // But the staged file is OURS: on Windows a rename onto a target that is
     // being written concurrently fails with EPERM/EBUSY, and leaving the staged
     // copy behind means a crash loop accumulates one partial per attempt in the
-    // user's own cache directory (audit 2026-09-30, surfaced by the torn-write
+    // user's own cache directory
     // test rather than by inspection).
     await rm(temporary, { force: true }).catch(() => undefined);
     return false;
@@ -1173,7 +1173,7 @@ function adopt(
   // re-adopting it mid-round replaced a live `probeRun` (running:true) with
   // the previous one (running:false, done:2). The round then carried on
   // incrementing `done` on that swapped-in object, so the panel reported 4/2 and
-  // the wrong tally was persisted (review 2026-10-01). A refresh updates the
+  // the wrong tally was persisted. A refresh updates the
   // catalogue and the verdicts; it has nothing to say about a round in flight.
   restoreRound = false,
 ): void {
@@ -1194,7 +1194,7 @@ function adopt(
   // A channel a previous process MEASURED, re-applied. Without this the
   // measurement is on disk and ignored, so a restart silently reverted every
   // model to its inferred channel and the very failure the probe ruled out
-  // came back (review 2026-10-01).
+  // came back.
   applyMeasuredChannel(state.models, state.probes);
   if (record.lastProbeAt > state.lastProbeAt) state.lastProbeAt = record.lastProbeAt;
   // The report of a round that already finished, so a restart shows the
@@ -1252,13 +1252,13 @@ function refreshGate(state: CatalogState, deps: CatalogDeps): Promise<ReadonlySe
  * likely to be a changed shape, a wrong egress, or a different tenant than it is
  * to be a simultaneous withdrawal of every free model — and acting on it empties
  * the picker outright, which is the one outcome this decision exists to prevent.
- * Found by review 2026-09-30, after the `[]` guard shipped believing it was
+ *after the `[]` guard shipped believing it was
  * sufficient.
  *
  * This was previously written TWICE — once in `refreshGate`, once in
  * `applyZenGate` — and only the first was ever executed, so "change one, forget
  * the other" would have accumulated silently until some future host actually
- * called `refreshModels` (audit 2026-09-30). One owner, both callers.
+ * called `refreshModels`. One owner, both callers.
  */
 function admissibleGate(state: CatalogState, raw: unknown): ReadonlySet<string> | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
@@ -1303,7 +1303,7 @@ async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
         lastProbeAt: state.lastProbeAt,
         // Carried, not re-derived: a catalogue revalidation is not a probe
         // round and has nothing new to report, but DROPPING it would delete
-        // the last round's report from disk. Found by review 2026-09-30 —
+        // the last round's report from disk.—
         // the field predates the 6h window, which is what made the loss
         // frequent enough to notice (up to four syncs a day instead of one).
         lastRound: state.cache.lastRound,
@@ -1478,7 +1478,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       // verdict lands, so a model shown as working must already be routed the
       // way it worked — waiting for the last model to finish left a visibly
       // successful model still going down the channel the probe had just ruled
-      // out (review 2026-10-02). The cache write stays once per round.
+      // out. The cache write stays once per round.
       if (outcome.kind === "ok") applyMeasuredChannel(state.models, state.probes);
     }
   } finally {
@@ -1498,7 +1498,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
   // bucket, and the guard used to throw all of it away, so the next DSH restart
   // bought the same 34 again. `state.models` degrades to an empty dictionary, which
   // `readCache` accepts and `adopt` treats as "nothing to derive", leaving the
-  // offline floor in place while the verdicts survive (audit 2026-09-30).
+  // offline floor in place while the verdicts survive.
   const report: NonNullable<CatalogCacheRecord["lastRound"]> = {
     total: state.probeRun.total,
     done: state.probeRun.done,

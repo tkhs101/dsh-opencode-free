@@ -231,7 +231,7 @@ function sameOrigin(req: RouteRequest): boolean {
   // the check passes, letting a third-party page drive POST /probe and spend the
   // shared anonymous bucket. CSRF is still covered (a browser will not forge
   // Origin cross-origin); this closes the rebinding shape on top of it
-  // (audit 2026-09-30).
+  //.
   const name = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
   if (!LOCAL_HOSTS.has(name.toLowerCase())) return false;
   try {
@@ -458,7 +458,7 @@ export function apply(ctx: HostContext, config?: Config): void {
       if (route !== PROVIDER_ID) return undefined;
       // No try/catch: getConfigKey() is config-or-env-or-"public" and cannot
       // throw. The catch was unreachable and advertised an AUTH_FAILED class
-      // that could never be produced (audit 2026-09-30).
+      // that could never be produced.
       return getConfigKey() ?? "public";
     },
     resolveAttachments: () => ctx.get("attachments"),
@@ -475,7 +475,7 @@ export function apply(ctx: HostContext, config?: Config): void {
   // use) is what puts them back. Without this, disabling the plugin left
   // `globalThis.fetch` and `node:http`/`node:https` wrapped for the rest of the
   // process — affecting the host and every other plugin, with no way to tell
-  // (found by audit 2026-09-30).
+  //.
   const restoreTransport: Array<() => void> = [];
   try {
     patchCompatDirectTransport(() => undefined);

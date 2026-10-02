@@ -117,7 +117,7 @@ export function freeModels(): Model<Api>[] {
  * `zen-provider` does not import `catalog` at runtime (only its type), so
  * reading it the other way round introduces no cycle.
  */
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.2.1";
 
 /** Derived, not written out: a second hardcoded copy is a second thing to forget. */
 export const OPENCODE_USER_AGENT = `opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14 dsh-opencode-free/${PLUGIN_VERSION}`;
@@ -147,7 +147,7 @@ export const STATIC_ZEN_HEADERS: Record<string, string> = {
  * requestOptions()") as the only thing holding them together. Upstream gates
  * admission on exactly these headers, so one missed edit is a silent, total
  * 403 on the path that was missed, reported to the user as "the anonymous tier
- * refused" and therefore diagnosed in the wrong direction (audit 2026-09-30).
+ * refused" and therefore diagnosed in the wrong direction.
  *
  * Exported so `tests/compatibility.test.mjs` can assert that every call site
  * produces the same header NAMES, which is the check that was missing.
@@ -207,7 +207,7 @@ function base62FromBytes(bytes: Uint8Array, length: number): string {
  * confirm that two requests belonged to the same session. Because upstream also
  * routes on this header for sticky backends (see docs/reverse-engineering.md),
  * that linkability extends to a session's boundaries and active hours, on
- * top of the per-IP bucket the design already accepts (audit 2026-09-30).
+ * top of the per-IP bucket the design already accepts.
  *
  * A restart changing every id is the intended behaviour, not a regression:
  * upstream affinity is only useful WITHIN one DSH session, and the plugin
@@ -418,7 +418,7 @@ type TranscriptMessage = Record<string, unknown> & { role?: unknown };
  * it as the caller's own `T`, so a caller that passed a legacy `Context` and
  * then read `.systemPrompt` off the result type-checked perfectly and got
  * `undefined` at run time — a type lie on the request path's front door
- * (audit 2026-09-30).
+ *.
  */
 export type TranscriptContext = ReturnType<typeof normalizeContext>;
 
@@ -741,7 +741,7 @@ const PROBE_PROMPT = "hi";
  *
  * `tests/compatibility.test.mjs` pins this value exactly, and pins that
  * `ProbeDeps.maxTokens` still reaches the wire: an untested override made the A/B
- * compare 1024 against 1024 and report "no difference" (audit 2026-09-30).
+ * compare 1024 against 1024 and report "no difference".
  *
  * Exported so `scripts/test-live.mjs` and the test suite pin THIS number rather
  * than each carrying a literal of their own.
@@ -861,7 +861,7 @@ export type ProbeOutcome =
   | {
       kind: "ok";
       usage?: ProbeUsage;
-      /** The channel that ANSWERED, when one did (review 2026-10-01). */
+      /** The channel that ANSWERED, when one did. */
       api?: Api;
     }
   | { kind: "dead"; reason: string; code: "dead"; http: number }
@@ -1531,7 +1531,7 @@ export function patchGlobalFetchForZen(getSessionId: SessionGetter = () => undef
     // upstream answers 403 FreeTierError. A Wi-Fi blip then surfaced as "the
     // anonymous tier refused us", destroying exactly the diagnosis
     // createTransportRecorder/describeTransportCause exist to provide
-    // (found by audit 2026-09-30, reproduced: 1 call → 2 requests, 2nd auth=null).
+    //.
     let headers: Headers;
     try {
       headers = new Headers(rawInit.headers as HeadersInit | undefined);
@@ -1561,7 +1561,7 @@ export function patchGlobalFetchForZen(getSessionId: SessionGetter = () => undef
   globalThis.fetch = guarded;
   // Restore, so unloading the plugin does not leave the process permanently
   // wrapped — including for other plugins and the host itself, which share this
-  // global (found by audit 2026-09-30). Idempotent: calling it twice is a no-op.
+  // global. Idempotent: calling it twice is a no-op.
   return () => {
     if (globalThis.fetch === guarded) globalThis.fetch = original;
   };
@@ -1694,7 +1694,7 @@ export function patchNodeHttpForZen(getSessionId: SessionGetter = () => undefine
   // back. `stash` alone is not enough: it keeps the originals for idempotence
   // across reloads, but nothing ever wrote them back onto the module objects,
   // so a disabled plugin left every node:http request in the process wrapped
-  // (found by audit 2026-09-30).
+  //.
   const replaced: Array<[NodeHttpModule, string, unknown, unknown]> = [];
   for (const [modName, mod] of targets) {
     for (const fnName of ["request", "get"]) {
@@ -1816,7 +1816,7 @@ function withGuidance<T extends object>(stream: T, restoreShell = false, recorde
         // ProbeStreamer declares only `result()`. `undefined.bind` used to throw
         // a TypeError whose message named "bind" and nothing about the real
         // problem, from a property ACCESS rather than from the call
-        // (audit 2026-09-30).
+        //.
         const iter = (target as Record<symbol, unknown>)[Symbol.asyncIterator];
         if (typeof iter !== "function") return Reflect.get(target, prop, target);
         const inner = (iter as () => AsyncIterableIterator<unknown>).bind(target);
@@ -1854,7 +1854,7 @@ export function zenProvider(
   const catalog = options.catalog ?? null;
   // Unconditional: null is itself a valid value (the pre-catalogue path).
   // Leaving the previous instance's catalogue in place made freeModels()
-  // report a provider that no longer existed (audit 2026-09-30).
+  // report a provider that no longer existed.
   activeCatalog = catalog;
   // Pre-gate catalogue: the full derived set is what Zen's live list gets
   // intersected against, so a model Zen dropped can come back when it returns.

@@ -1059,7 +1059,7 @@ async function probedCatalog(dir, probe, clock = { t: 1_000_000 }) {
 // A manual round is floored: forceProbes() refuses to run again within
 // FORCED_PROBE_MIN_INTERVAL_MS, because the POST route has no server-side rate
 // limit and every round spends up to 34 requests from a bucket shared per egress
-// IP (audit 2026-09-30). Tests that want a SECOND round must therefore move the
+// IP. Tests that want a SECOND round must therefore move the
 // frozen clock — which is exactly what a real user does, by waiting.
 const PROBE_FLOOR_MS = 5 * 60_000
 function pastProbeFloor(clock) {
@@ -1167,7 +1167,7 @@ test('probeProgress tracks the round live: current, done/total and per-model res
     // "mid-round" read: on a throttled runner or a loaded container those are
     // the wrong sizes often enough to fail for no reason, and a test that fails
     // for no reason trains everyone to re-run it. Releasing a promise from
-    // inside the prober makes the ordering exact (audit 2026-09-30).
+    // inside the prober makes the ordering exact.
     let slowStarted
     const slowRunning = new Promise((resolve) => {
       slowStarted = resolve
@@ -1695,7 +1695,7 @@ test('re-confirming an old death removes nothing and is marked as such', async (
     // re-check would fall to the warm start's fire-and-forget round — which this
     // test then read whenever it happened to land. Move the clock past the
     // floor, the way every other test that wants a SECOND round does, so this
-    // one drives the round it is actually about (audit 2026-10-01).
+    // one drives the round it is actually about.
     pastProbeFloor(clock)
     const probe = recordingProber({ 'big-pickle': dead })
     const reopened = catalogWith({
@@ -1785,7 +1785,7 @@ test('a finished round report survives a restart', async () => {
     // survived only in its `false` form, so a row that DID remove a model came
     // back as "no removal claim" — and `isFreshRemoval` reads a missing
     // `removed` as a fresh removal, which is the opposite of what happened
-    // (audit 2026-10-01).
+    //.
     assert.deepEqual(
       after.results['deepseek-v4-flash-free'],
       before.results['deepseek-v4-flash-free'],
@@ -2181,7 +2181,7 @@ test('unknownFree stays empty when Zen has never answered', async () => {
 })
 
 test('GUARD: a well-formed but wholly disjoint Zen answer cannot empty the picker', async () => {
-  // Found by review 2026-09-30. A response that is perfectly valid and simply
+  //. A response that is perfectly valid and simply
   // names none of the models we hold is far likelier to be a changed shape, a
   // wrong egress or a different tenant than a simultaneous withdrawal of every
   // free model — and acting on it empties the picker, the one outcome the gate
@@ -2229,14 +2229,14 @@ test('a catalogue sync of EITHER kind keeps the last round report on disk', asyn
   // A sync is not a round and has nothing new to report — but its write replaces
   // the whole record, so omitting the field DELETES the report. With the 6h
   // window a sync can run four times a day, which is what made the loss show up.
-  // Found by review 2026-09-30.
+  //.
   //
   // This version is table-driven over BOTH sync outcomes on purpose. The original
   // drove only the 304 branch and, because it pinned no `ttlMs`, did not even
   // reach a sync: the default TTL is 24h and the clock moved 6h01m, so
   // `stale()` was false and `ensureFresh()` issued no request at all. Deleting
   // the guarded line still left 88/88 green — a vacuous assertion wearing the
-  // name of a guard (audit 2026-09-30). The full-download branch is the one that
+  // name of a guard. The full-download branch is the one that
   // actually deleted the report in the field.
   for (const kind of ['not-modified', 'ok']) {
     await withTempDir(async (dir) => {
@@ -2281,7 +2281,7 @@ test('forceProbes refuses a second manual round inside the floor', async () => {
   // 34 requests from a bucket shared per egress IP, so `forceProbes` carries its
   // own floor. Before this existed, repeated clicks spent the whole office's
   // quota — and removing the guard left every test green, which is why this test
-  // exists (audit 2026-09-30).
+  // exists.
   await withTempDir(async (dir) => {
     const probe = recordingProber()
     const clock = { t: 1_000_000 }
@@ -2306,7 +2306,7 @@ test('forceProbes refuses a second manual round inside the floor', async () => {
 // ── concurrency, atomicity and defensive parsing ───────────────────────────
 //
 // Each test below was written because deleting the corresponding line of
-// production code left every existing test green (audit 2026-09-30, mutation
+// production code left every existing test green (mutation
 // pass). The defect they cover is not hypothetical: `gateInflight` and the
 // `runSingle` guard are the only things stopping a panel poll, a picker read
 // and a probe round from each spending their own request, and the atomic write
@@ -2490,7 +2490,7 @@ test('readCache repairs a damaged probe map and round report', async () => {
 
     // `{ total: 0 }` alone does NOT pin the total check: the `done` validation
     // rejects it too, so removing `total` entirely leaves the suite green — a case
-    // that looks like coverage while covering nothing (audit 2026-09-30).
+    // that looks like coverage while covering nothing.
     // `{ total: 0, done: 1 }` is well-formed on every other axis, so only the total
     // check can reject it. `-3` is there for the same reason: `isFinite` alone is
     // not enough either.
@@ -2850,7 +2850,7 @@ test('a round waits for the warm cache read before it judges anything', async ()
   //
   // This is the seam that made it observable. The factory-level case cannot
   // pin it: whether the read lands first is local filesystem timing, and
-  // removing this wait does not make any other test fail (audit 2026-10-01).
+  // removing this wait does not make any other test fail.
   const state = initialState([])
   state.models = ['a-free'].map((id) => ({ id, name: id, api: 'openai-completions' }))
 
@@ -2898,7 +2898,7 @@ test('a catalogue refresh does not overwrite a probe round that is in flight', a
   // refresh during a round swapped the live `probeRun` (running:true) for the
   // previous round's snapshot (running:false, done:2) — and the round carried
   // on counting `done` on the object that had been swapped in, so the panel
-  // reported 4/2 and persisted the wrong tally (review 2026-10-01).
+  // reported 4/2 and persisted the wrong tally.
   //
   // The 304 path never reaches `adopt`, which is why it never showed this.
   await withTempDir(async (dir) => {
@@ -2966,7 +2966,7 @@ test('a channel the probe measured is the one the model is routed on, across res
   // The sweep exists to ask. But the sweep's answer was thrown away: the probe
   // reported `ok` on the second channel and the model went on being routed by
   // the first, so the very failure the probe had just ruled out came straight
-  // back on the next chat (review 2026-10-01).
+  // back on the next chat.
   await withTempDir(async (dir) => {
     const clock = { t: 1_000_000 }
     const cache = join(dir, 'catalog.json')
@@ -3043,7 +3043,7 @@ test('a model is routed the moment its probe answers, not when the round ends', 
   // measured channel when the round FINISHED left a visibly successful model
   // still going down the channel the probe had just ruled out — for as long as
   // the rest of the (sequential) round took, which on a slow model is the full
-  // 15 s timeout per remaining model (review 2026-10-02).
+  // 15 s timeout per remaining model.
   //
   // The cache write must stay once per round: a half-finished round must not be
   // read back as a complete set of verdicts.

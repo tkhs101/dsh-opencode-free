@@ -6,18 +6,13 @@ Use this guide when a user asks an Agent to install, update, verify, or remove
 ## Safety
 
 - Confirm the target DSH profile; use `web` only when it is the user's target.
-- Use the pinned `v0.3.0` release assets for a first install, never a moving branch.
+- Use the pinned `v0.2.1` release assets for a first install, never a moving branch.
 - Never print API keys, credential stores, or request bodies.
-  `dsh --profile <name> --dump-config` prints the profile's `cordis.patch.yml`
-  **verbatim with no redaction**, and the optional Zen key lives in its
-  `config.apiKey`. Run it only on a profile with no key configured, or skip it —
-  `dsh plugin --profile <name> list dsh-opencode-free --depth 0` is the check
-  that does not touch secrets.
 - Do not start, stop, or restart DSH without explicit permission.
 - Preserve the DSH profile, unrelated plugins, and stored credentials.
 - Do not delete any DSH profile during install, update, verification, or uninstall.
 - `scripts/reverify.sh` and `scripts/test-live.mjs` are not in the tarball; run
-  them from a clone. `reverify.sh` sends real requests against the shared
+  them from a clone. `scripts/reverify.sh` sends real requests against the shared
   anonymous bucket, so run it only when the user has asked for a live check.
 
 ## Detect the installation
@@ -44,7 +39,7 @@ When `dsh`, Node.js, and pnpm are already available, install the pinned npm
 package directly:
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.3.0
+dsh plugin --profile web add dsh-opencode-free@0.2.1
 ```
 
 Update with `dsh plugin --profile web update dsh-opencode-free`.
@@ -72,7 +67,7 @@ Then, for each target profile (`desktop`, `web`):
 
 1. `pnpm pack` the plugin into a tarball (or download the pinned release tarball).
 2. Copy the tarball into `$PROFILE_DIR`.
-3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.3.0.tgz"` to
+3. Add `"dsh-opencode-free": "file:./dsh-opencode-free-0.2.1.tgz"` to
    `$PROFILE_DIR/package.json` `dependencies` and add `dsh-opencode-free`
    to its `dsh.profile.bundles` array.
 4. Run `pnpm install` in `$PROFILE_DIR`.
@@ -92,15 +87,14 @@ For the existing CLI path, run:
 
 ```sh
 dsh plugin --profile web list dsh-opencode-free --depth 0
+dsh --profile web --dump-config
 ```
 
 Success requires:
 
 1. The requested package version appears once.
 2. `dsh --profile web --dump-config` shows `opencode-free` exactly once after
-   install or update, and absent after uninstall — **but read the Safety
-   section first**: that command prints secrets, so only run it on a profile
-   with no `config.apiKey` set.
+   install or update, and absent after uninstall.
 3. No unrelated profile or plugin changed.
 4. A running DSH process was not restarted by the operation.
 

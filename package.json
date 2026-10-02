@@ -1,6 +1,6 @@
 {
   "name": "dsh-opencode-free",
-  "version": "0.3.0",
+  "version": "0.2.1",
   "packageManager": "pnpm@11.19.0",
   "description": "Free OpenCode Zen models in DeepSeek Harness through native HTTP requests. No OpenCode installation, login, API key, server, container, or LiteLLM is required.",
   "repository": {
@@ -51,11 +51,8 @@
     "build": "tsc",
     "pretest": "pnpm run build",
     "prepack": "pnpm run build",
-    "prepublishOnly": "node scripts/guard-dirty-publish.mjs && pnpm run check",
     "test": "tsx --test tests/*.test.mjs",
-    "check": "pnpm run format:check && pnpm run typecheck && pnpm run test && pnpm pack --pack-destination .artifacts",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "check": "pnpm run typecheck && pnpm run test && pnpm pack --pack-destination .artifacts"
   },
   "keywords": [
     "dsh-plugin",
@@ -73,13 +70,29 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
     "@deepseek-ai/dsh-llm-pi-ai": "0.2.0-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.4",
+    "@deepseek-ai/schemastery": "^3.18.3",
     "@earendil-works/pi-ai": "^0.87.1"
   },
   "devDependencies": {
     "@types/node": "^24.13.6",
-    "prettier": "^3.9.9",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
   }
 }

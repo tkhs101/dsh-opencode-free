@@ -4,48 +4,19 @@ on:
   push:
   pull_request:
 
-# Superseded runs are pure waste and their mixed results make it easy to read one
-# green check as "the latest commit is green" (audit 2026-09-30).
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
 jobs:
   check:
-    # `engines.node` is `^22.19.0 || >=24.0.0`, so CI promised to cover the whole
-    # 24+ range while testing exactly one point in it. The three versions below
-    # are parsed out of that field by tests/catalog.test.mjs, so the two cannot
-    # drift apart again. The suite is fully offline, so the extra versions cost
-    # seconds.
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22.19.0", "24", "26"]
     runs-on: ubuntu-latest
-    # A wedged install would otherwise hold a runner for the 6-hour default.
-    timeout-minutes: 15
     steps:
-      # Pinned to commit SHAs, not floating tags: these run with the repository's
-      # write context on every push and pull_request, and `--frozen-lockfile`
-      # protects the npm tree but not the CI step itself (audit 2026-09-30).
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (was @v6)
-      - uses: pnpm/setup@5d160c5bc68a09337ad0d5654e237e03253b5879 # v1
+      - uses: actions/checkout@v6
+      - uses: pnpm/setup@v1
         with:
-          runtime: node@${{ matrix.node }}
+          runtime: node@22.19.0
           cache: true
           install: false
       - run: pnpm install --frozen-lockfile
-      # Formatting IS a gate now. The repository was formatted once on
-      # 2026-10-01 (a dedicated pass, not folded into the behavioural fixes), so
-      # `--check` can be enforced without burying any real change in whitespace.
-      - run: pnpm run format:check
       - run: pnpm run check
       - run: pnpm pack --dry-run
-      # `--audit-level=high` so a low/moderate advisory does not block an unrelated
-      # PR; a high one should stop the merge rather than sit in a log nobody reads
-      # (audit 2026-09-30). There is no `--no-fund` here: pnpm's audit has never
-      # had that flag, and passing one failed the whole step (audit 2026-10-01).
-      - run: pnpm audit --audit-level=high

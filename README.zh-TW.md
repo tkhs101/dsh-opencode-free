@@ -41,7 +41,6 @@ dsh --version
 
 | 插件 | DSH |
 |---|---|
-| `0.3.0` | `0.2.0-rc.2` |
 | `0.2.1` | `0.2.0-rc.2` |
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
@@ -54,7 +53,7 @@ dsh --version
 從 npm 安裝這個固定版本：
 
 ```sh
-dsh plugin --profile web add dsh-opencode-free@0.3.0
+dsh plugin --profile web add dsh-opencode-free@0.2.1
 ```
 
 範例使用 `web` profile，請換成你的目標 profile。
@@ -66,14 +65,7 @@ dsh plugin --profile web list dsh-opencode-free --depth 0
 ```
 
 套件只出現一次，就代表安裝正確。若要確認插件也進了 composed config，可以跑
-`dsh --profile web --dump-config` 並找 `opencode-free`——但請先讀下面的警告，
-那個指令會把你的機密原印出來。
-
-> [!WARNING]
-> `dsh --profile web --dump-config` 會**逐字、且不做任何遮蔽**地印出 profile 的
-> `cordis.patch.yml`，而選用的 Zen key 就寫在那裡（見〈[設定](#設定)〉）。
-> 請在沒有設定 key 的 profile 上跑它，或直接跳過、只靠
-> `dsh plugin … list` 判斷。
+`dsh --profile web --dump-config` 並找 `opencode-free`。
 
 其他 profile 和插件不會變動。
 
