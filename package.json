@@ -64,20 +64,6 @@
     "@deepseek-ai/schemastery": "^3.18.3",
     "@earendil-works/pi-ai": "^0.87.1"
   },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-llm": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-llm-pi-ai": {
-      "optional": true
-    },
-    "@deepseek-ai/schemastery": {
-      "optional": true
-    },
-    "@earendil-works/pi-ai": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "^24.13.6",
     "tsx": "^4.23.15",

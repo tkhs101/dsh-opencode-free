@@ -27,7 +27,20 @@ test('targets the DSH 0.2.0-rc.2 contracts', () => {
   assert.equal(pkg.version, '0.2.1')
   for (const [name, version] of Object.entries(pkg.peerDependencies)) {
     if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.2.0-rc.2', name)
-    assert.equal(pkg.peerDependenciesMeta[name]?.optional, true, name)
+    // The invariant, not the previous state. Every one of these is imported at
+    // the TOP LEVEL of the emitted plugin, so `optional` would promise the host
+    // something false: a missing peer is an ERR_MODULE_NOT_FOUND when the plugin
+    // loads, not a feature that degrades — and an optional peer is precisely the
+    // one an installer does not warn about. The import is checked below so this
+    // assertion cannot outlive the reason for it.
+    assert.notEqual(pkg.peerDependenciesMeta?.[name]?.optional, true, name)
+  }
+  for (const name of Object.keys(pkg.peerDependencies)) {
+    assert.match(
+      host,
+      new RegExp('from ["\']' + name.replace('/', '\/') + '(["\'/])'),
+      `${name} is declared as a peer, so the emitted plugin must actually import it`,
+    )
   }
   assert.equal(pkg.peerDependencies['@earendil-works/pi-ai'], '^0.87.1')
   assert.equal(pkg.peerDependencies['react'], undefined)

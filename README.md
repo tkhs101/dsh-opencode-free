@@ -43,7 +43,9 @@ dsh --version
 | `0.2.0` | `0.2.0-rc.1` |
 | `0.1.3` – `0.1.4` | `0.1.7-rc.2` |
 
-Do not ignore peer dependency warnings.
+The four peer dependencies are **required**, not optional: `src/` imports each of
+them at the top level, so a host missing one fails to load the plugin. Do not
+ignore peer dependency warnings.
 
 ## Install
 

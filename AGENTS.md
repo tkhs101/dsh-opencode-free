@@ -15,8 +15,13 @@ Use this guide when a user asks an Agent to install, update, verify, or remove
 ## Detect the installation
 
 This plugin release supports only DeepSeek Harness `0.2.0-rc.2`. Run
-`dsh --version` first and stop on any other version; do not upgrade DSH or
-ignore peer dependency warnings without explicit permission.
+`dsh --version` first and stop on any other version; do not upgrade DSH without
+explicit permission.
+
+The four peer dependencies are required, and a host that is missing one cannot
+load the plugin at all: `src/` imports each of them at the top level, so a
+missing one is an `ERR_MODULE_NOT_FOUND` at load rather than a degraded feature.
+Treat a peer warning as a failed install, not as noise.
 
 Check whether the plugin is already installed in the target DSH profile. When
 it is already listed, use update or uninstall instead of installing again.
