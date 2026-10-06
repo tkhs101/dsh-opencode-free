@@ -39,6 +39,7 @@ import {
   clampVerdict,
   effortVerdict,
   nextEffortQuestion,
+  fallbackLevelFor,
   reachAllowsAttempt,
   nextReachAttempt,
   UNREACHABLE_BACKOFF_MS,
@@ -548,7 +549,7 @@ test('the probe alternates its question so a baseline costs no extra request', (
   // to confirm what is settled. longcat is why the fallback exists at all: its
   // `none` is 1.578 and its lowest level is 0.800, so both must be spent.
   assert.equal(
-    nextEffortQuestion({ verdict: 'ok', at: 1, effortBaselineTokens: [14, 16, 55], effortDiscord: 1 }),
+    nextEffortQuestion({ verdict: 'ok', at: 1, effortBaselineTokens: [14, 16, 55], effortDiscord: 1 }, 'minimal'),
     'minimal',
   );
   assert.equal(
@@ -556,6 +557,21 @@ test('the probe alternates its question so a baseline costs no extra request', (
     'minimal',
     'it stays moved: a settled question is not re-opened',
   );
+});
+
+test('the fallback asks the model its OWN lowest level, not a fixed one', () => {
+  // Measured 2026-10-06. space-bunny-free publishes `low…max` and its `low`
+  // brings reasoning to 0/9/22/37 against an omitted baseline of 35 — a working
+  // Off. Asking it for `minimal` instead measures a level it never published,
+  // finds nothing, and withholds a row the model does support.
+  assert.equal(fallbackLevelFor({ reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] }] }), 'low');
+  // Declared out of order — the vocabulary's order decides, not the record's.
+  assert.equal(fallbackLevelFor({ reasoning_options: [{ type: 'effort', values: ['high', 'max', 'low'] }] }), 'low');
+  // No ladder at all: `minimal` is where big-pickle's 0/8 was measured.
+  assert.equal(fallbackLevelFor({ reasoning_options: [] }), 'minimal');
+  assert.equal(fallbackLevelFor({ reasoning_options: [{ type: 'toggle' }] }), 'minimal');
+  // And it must never be `off`, whatever the model declares.
+  assert.notEqual(fallbackLevelFor({ reasoning_options: [{ type: 'effort', values: ['none', 'high'] }] }), 'off');
 });
 
 test('INVARIANT: a candidate is judged on the MEDIAN, against the model not a number', () => {

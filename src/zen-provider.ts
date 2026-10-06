@@ -946,7 +946,7 @@ export interface ProbeDeps {
    * because the round changes what its existing request asks rather than
    * adding one.
    */
-  readonly question?: "baseline" | "none" | "minimal" | undefined;
+  readonly question?: "baseline" | "none" | (string & {}) | undefined;
   readonly now?: (() => number) | undefined;
 }
 
@@ -1156,9 +1156,11 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
         // The baseline round sends nothing at all: it is the same request the
         // liveness probe was already making, so asking for the model's own
         // default costs no extra quota.
-        if (deps.question === "baseline") return body;
+        if (deps.question === undefined || deps.question === "baseline") return body;
         const responses = (sent as { api?: string } | undefined)?.api === "openai-responses";
-        const spelling = deps.question === "minimal" ? "minimal" : "none";
+        // Whatever level the round decided to ask about. `deps.question` is
+        // `none`, a baseline marker, or a specific level name.
+        const spelling = deps.question === "none" || deps.question === "baseline" ? "none" : deps.question;
         return responses ? { ...body, reasoning: { effort: spelling } } : { ...body, reasoning_effort: spelling };
       },
       // A probe must not spend a second call confirming anything: without this
