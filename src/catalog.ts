@@ -750,8 +750,8 @@ export interface DerivedCatalog {
  *
  *   - image input      ← `modalities.input` (pi-ai knows only text/image, so
  *                        audio/video/pdf are dropped, not silently kept)
- *   - context window   ← `limit.context`
- *   - max output       ← `limit.output`
+ *   - context window   ← `limit.context`, lifted where the endpoint stated its own
+ *   - max output       ← `limit.output`, lifted where the route accepted more
  *   - thinking levels  ← `reasoning_options[].values`
  *
  * A field models.dev does not publish falls back to the template, and the
@@ -775,6 +775,8 @@ function buildModel(
     ? modalities.input.filter((entry): entry is "text" | "image" => entry === "text" || entry === "image")
     : [];
   const levels = thinkingLevelMapFor(record, api, measured);
+  const contextWindow =
+    contextWindowFor(record, measuredContext) ?? finitePositive(limit.context) ?? template.contextWindow;
   return {
     ...template,
     id,
@@ -789,9 +791,10 @@ function buildModel(
     // Free by construction here (isFree already proved it); stated explicitly
     // so a stray inherited tier cannot reintroduce a non-zero rate.
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow:
-      contextWindowFor(record, measuredContext) ?? finitePositive(limit.context) ?? template.contextWindow,
-    maxTokens: finitePositive(limit.output) ?? template.maxTokens,
+    contextWindow,
+    // The window first, because the output ceiling is bounded by it: a ceiling
+    // above the context it must fit inside is not a bigger ceiling, it is a lie.
+    maxTokens: maxTokensFor(record, id, contextWindow) ?? template.maxTokens,
     thinkingLevelMap: (levels ?? undefined) as Model<Api>["thinkingLevelMap"],
     // `compat` is transport-specific. Carrying the template's completions
     // overrides onto a responses model would misconfigure it, so a channel
@@ -1817,6 +1820,76 @@ export function seededContextFor(record: CatalogRecord, id: string): MeasuredCon
 export function clampProposalFor(declared: number): number {
   if (!Number.isFinite(declared) || declared <= 0) return 0;
   return Math.min(declared * CLAMP_RAISE_FACTOR, CLAMP_RAISE_CEILING);
+}
+
+/**
+ * Max-output ceilings this plugin has MEASURED, by the model id they were
+ * measured on — the `limit.output` counterpart of {@link SEED_CONTEXT}.
+ *
+ * `limit.output` is not decoration either, and pi-ai puts it straight on the
+ * wire: `buildBaseOptions` sends `options.maxTokens ?? model.maxTokens`, and DSH
+ * sends no `maxTokens` of its own for this provider (its `configuredMaxTokens`
+ * map is empty), so this number IS the ceiling every reply is cut at. When it is
+ * too low the reply simply stops — `finish_reason: "length"`, no error, nothing
+ * in the panel.
+ *
+ * Measured 2026-10-07 on the live set, one request per step, reading the number
+ * off the outgoing body rather than off the declaration: the prompt is one word,
+ * so the ask decides only the CEILING and each step costs ~30 output tokens.
+ * Verbatim rows in `.scratch/verify/output-ceiling2-results.txt`:
+ *
+ *   mimo-v2.6-flash-free / muse-spark-1.2 / muse-spark-1.3 / fledge-alpha-free
+ *     accepted `max_tokens` 1040384 — the largest value that fits inside their own
+ *     advertised window — against declarations of 32000 and 131072.
+ *   nemotron-3.5-lightning-free accepted 991808 against a declaration of 262144.
+ *   big-pickle accepted 128000 (1040384 → HTTP 500, which concludes nothing).
+ *   longcat-2.5-preview-free accepted 262144 and refused 393216 with the generic
+ *     `invalid_request_error`; the bisection step at 262144 answered, so the
+ *     refusal is monotone in the ask rather than incidental.
+ *
+ * `space-bunny-free` is deliberately ABSENT: it accepted 524288, which is what
+ * models.dev declares, and refused 782336 — the one live model whose declaration
+ * is right, and the reason this table is a measurement table and not a rule.
+ * `ling-3.1-flash-free` (429), `nemotron-3-ultra-free` (overloaded) and
+ * `ling-3.0-flash-fin-free` (endpoint unavailable) learned nothing and are absent
+ * too: their declarations stand, unverified, exactly as before.
+ *
+ * Each entry is the largest budget the route ACCEPTED, never a number inferred
+ * from one, and never more than the window this plugin advertises for the same
+ * model — an output ceiling larger than the context it has to fit in is a
+ * fiction. pi-ai clamps with `min(maxTokens, context − estimate − 4096)`, so the
+ * bytes can never carry more than the value recorded here: a conversation with
+ * room asks for it, and a long one automatically asks for less.
+ */
+const SEED_OUTPUT: Readonly<Record<string, { readonly declared: number; readonly measured: number }>> = {
+  "mimo-v2.6-flash-free": { declared: 32000, measured: 1040384 },
+  "big-pickle": { declared: 32000, measured: 128000 },
+  "fledge-alpha-free": { declared: 131072, measured: 1040384 },
+  "longcat-2.5-preview-free": { declared: 131072, measured: 262144 },
+  "muse-spark-1.2-contributor-free": { declared: 131072, measured: 1040384 },
+  "muse-spark-1.3-contributor-free": { declared: 131072, measured: 1040384 },
+  "nemotron-3.5-lightning-free": { declared: 262144, measured: 991808 },
+};
+
+/**
+ * The output ceiling to advertise for one model: the measured one when this exact
+ * declaration was the one measured against, the declaration otherwise.
+ *
+ * `window` is the window this plugin advertises for the same model, passed in
+ * rather than read so the two numbers cannot disagree — a ceiling above the
+ * context is unreachable by construction and would only look like a bigger one.
+ */
+export function maxTokensFor(
+  record: CatalogRecord,
+  id: string,
+  window: number | undefined,
+): number | undefined {
+  const declared = finitePositive(isPlainObject(record.limit) ? record.limit.output : undefined);
+  if (declared === undefined) return declared;
+  const seed = SEED_OUTPUT[id];
+  if (seed === undefined || seed.declared !== declared) return declared;
+  const bounded = window === undefined ? seed.measured : Math.min(seed.measured, window);
+  return bounded > declared ? bounded : declared;
 }
 
 /**

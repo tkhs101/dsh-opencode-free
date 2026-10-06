@@ -929,7 +929,9 @@ test('a derived record carries all four capabilities from models.dev', () => {
   const pickle = candidates.find((m) => m.id === 'big-pickle')
   assert.deepEqual(pickle.input, ['text'], 'text-only stays text-only')
   assert.equal(pickle.contextWindow, 200000)
-  assert.equal(pickle.maxTokens, 32000)
+  // `limit.output` says 32000 and the route accepted 128000 (measured
+  // 2026-10-07), so the declaration is not what ships — see the guard below.
+  assert.equal(pickle.maxTokens, 128000)
   // A record that publishes NOTHING falls back to the template for the identity
   // and transport fields, but NOT for capability claims. `input` and `reasoning`
   // describe what the model can do; inheriting them from another model answers
@@ -2204,6 +2206,60 @@ test('GUARD: a measured context window is used, and a changed declaration discar
     400000,
     'a CHANGED declaration discards the seed instead of keeping a number measured about something else',
   );
+})
+
+test('GUARD: a measured output ceiling is used, and it never exceeds the advertised window', async () => {
+  // `limit.output` is the other half of the same declaration, and it is not
+  // decoration: pi-ai sends `options.maxTokens ?? model.maxTokens` and DSH sends
+  // no maxTokens for this provider, so this number IS where every reply is cut.
+  // When it is too low the reply just stops — `finish_reason: "length"`, no
+  // error, no row in the panel.
+  //
+  // Measured 2026-10-07 on the live set, one request per step with a one-word
+  // prompt so the ask decides only the CEILING, reading the number off the
+  // outgoing body:
+  //
+  //   mimo-v2.6-flash-free    declared   32000   accepted 1040384
+  //   fledge-alpha-free       declared  131072   accepted 1040384
+  //   muse-spark-1.2/1.3      declared  131072   accepted 1040384
+  //   nemotron-3.5-lightning  declared  262144   accepted  991808
+  //   longcat-2.5-preview     declared  131072   accepted 262144, refused 393216
+  //   big-pickle              declared   32000   accepted  128000
+  //   space-bunny-free        declared  524288   accepted  524288  <- right
+  const section = (output) => ({
+    'mimo-v2.6-flash-free': { ...modelsDict()['space-bunny-free'], id: 'mimo-v2.6-flash-free', name: 'Mimo', limit: { context: 200000, output } },
+    'space-bunny-free': { ...modelsDict()['space-bunny-free'], id: 'space-bunny-free', name: 'Space Bunny', limit: { context: 1048576, output: 524288 } },
+    'longcat-2.5-preview-free': { ...modelsDict()['space-bunny-free'], id: 'longcat-2.5-preview-free', name: 'Longcat', limit: { context: 1000000, output: 131072 } },
+  })
+  const built = (id, output) => {
+    const dict = section(output)
+    const first = derive(dict, { template: template() }).candidates
+    return derive(dict, { template: template(), measuredContext: measuredContextFor(first, dict, {}) })
+      .candidates.find((m) => m.id === id)
+  }
+
+  const mimo = built('mimo-v2.6-flash-free', 32000)
+  assert.equal(mimo.maxTokens, 1040384, 'the measured ceiling replaces a declaration 32x too low')
+  assert.equal(mimo.contextWindow, 1048576, 'and the window it is bounded by is the measured one')
+  assert.ok(
+    mimo.maxTokens <= mimo.contextWindow,
+    'an output ceiling above the context it must fit inside is unreachable, not bigger',
+  )
+  assert.equal(
+    built('space-bunny-free', 524288).maxTokens,
+    524288,
+    'a model whose declaration measured right keeps it — the table is evidence, not a rule',
+  )
+  assert.equal(
+    built('longcat-2.5-preview-free', 131072).maxTokens,
+    262144,
+    'a measured REFUSAL bounds the raise from above: the largest budget the route accepted',
+  )
+  assert.equal(
+    built('mimo-v2.6-flash-free', 64000).maxTokens,
+    64000,
+    'a CHANGED declaration discards the seed rather than keeping a number measured about something else',
+  )
 })
 
 test('GUARD: a round counts models, and a row reports what it learned about one', async () => {

@@ -1011,6 +1011,13 @@ export interface ProbeDeps {
    */
   readonly maxTokens?: number | undefined;
   /**
+   * The prompt to send. Defaults to the cheapest thing that draws an answer,
+   * which is what liveness and every capability measurement want; a longer
+   * deterministic prompt is only for measuring a CEILING (what the model
+   * produces when asked for more than the declaration allows).
+   */
+  readonly prompt?: string | undefined;
+  /**
    * Which Off spelling to ask about. `"minimal"` is the fallback for a model
    * whose `none` never accumulates agreeing samples; it costs nothing extra
    * because the round changes what its existing request asks rather than
@@ -1249,7 +1256,7 @@ function failureKindFor(status: number, body: string, apiKey: string | undefined
 async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
   const recorder = createRecordingFetch(deps.fetchImpl ?? globalThis.fetch);
   const context = {
-    messages: [{ role: "user", content: PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() }],
+    messages: [{ role: "user", content: deps.prompt ?? PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() }],
   };
   const signal = AbortSignal.timeout(deps.timeoutMs ?? PROBE_TIMEOUT_MS);
   // Whether the request ran out of time is a property of the SIGNAL, not of

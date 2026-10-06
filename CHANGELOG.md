@@ -59,6 +59,16 @@ cost. Behaviour below is what a user can observe change.
   limit, that value is offered instead of models.dev's declaration, and a
   changed declaration discards it. A stated verdict keeps the samples behind
   it, so any verdict can be recomputed.
+- **Measured maximum output is used.** `limit.output` was never checked, and it
+  is the number every reply is cut at: a model whose route accepts far more was
+  silently stopping at the declaration, with `finish_reason: "length"` and
+  nothing in the panel to say so. Measured 2026-10-07 — Mimo V2.6 Flash was being
+  held to 32,000 while accepting 1,040,384, Muse Spark and Fledge Alpha to
+  131,072 while accepting 1,040,384, Nemotron 3.5 Lightning to 262,144 while
+  accepting 991,808, Longcat to 131,072 while accepting 262,144, Big Pickle to
+  32,000 while accepting 128,000. Space Bunny Free measured correct at 524,288
+  and is used as declared. A changed declaration discards the measurement, and a
+  ceiling is never advertised above the context window it has to fit inside.
 
 ## [0.3.1] - 2026-10-03
 

@@ -125,11 +125,11 @@ DSH passes your reasoning level through, and the ladder offered comes from
 models.dev per model (Muse Spark gets `minimal`…`xhigh`, Space Bunny gets
 `low`…`max`). A level a model does not publish is never offered.
 
-Tool calls work: the free tier admits a request only when it carries the
-`read` and `bash` tools, so a model that answered this round answered with
-them present. That is an admission requirement rather than a measurement of
-whether a model *uses* them — nothing here has asked one to call a tool and
-checked the answer.
+Tool calls work, and that is now a measurement rather than an admission
+requirement: asked to run one command, every model that answered this round
+answered with a real tool call and the right arguments — 7 of 7 on the live set
+(2026-10-07). The free tier still admits a request only when it carries `read`
+and `bash`, which is a separate requirement and is not what this sentence means.
 
 `off` is the exception: it is **measured, not assumed**. The round asks the
 model for no reasoning and for its own lowest level, compares the reasoning
@@ -139,8 +139,19 @@ otherwise the lowest level that measurably helps. A model whose reasoning the
 route never reports gets no `off` row at all, rather than a row that does
 nothing. If you choose nothing, Muse Spark uses `xhigh`.
 
-A screenshot is attached only to a model that declares image input. The context
-size and maximum output shown in the picker are that model's own.
+Vision works too: a screenshot is attached only to a model that declares image
+input, and asking each of those models to name the colour of the top half of a
+two-tone image returned the right colour on every model that answered (5 of 5,
+2026-10-07).
+
+The context size and maximum output in the picker are the model's own — and
+where models.dev turned out to publish a stale number, the measured one is used
+instead. Both fields drive real behaviour, so both were measured the same way:
+the context window is read off the endpoint's own refusal, and the maximum
+output off what the route accepts on the wire. Mimo V2.6 Flash declares a
+200,000-token window and 32,000 tokens of output; it answers 1,048,576 and
+1,040,384. Space Bunny Free's declarations measured correct and are used as they
+are.
 
 ### Availability check
 

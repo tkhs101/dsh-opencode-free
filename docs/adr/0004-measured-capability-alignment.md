@@ -1396,3 +1396,82 @@ nemotron-3-ultra-free 的基線 49、nemotron-3.5-lightning-free 的基線 30。
 - 兩個 mimo 共用同一路由，故「單一端點上限」與「兩個模型恰好同值」無法區分。
 - `structured_output`、`tool_call`、knowledge cutoff、open-weights、
   非文圖模態在三層皆無通道，為 clean negative，非本 ADR 可解。
+
+## 四十一、最大輸出：同一份宣告的另一個欄位，同樣低報（2026-10-07）
+
+前四十節處理的是通道、檔位、上下文。第三根軸是 `limit.output`，它一直未被
+量測，而它比前兩者更直接：**pi-ai 的 `buildBaseOptions` 送出
+`options.maxTokens ?? model.maxTokens`，DSH 對這個 provider 不送 `maxTokens`
+（profile 的 `configuredMaxTokens` 為空），故 `limit.output` 就是每次回答被
+截斷的那個數字。** 低報的後果與低報上下文同型，且同樣安靜：模型在
+`finish_reason: "length"` 停下，面板沒有任何一行說明。
+
+**量法（2026-10-07，線上集合 11 個模型）**：提示是一個字，所以 `max_tokens`
+只決定**上限**而不決定生成量，每一步約 30 個輸出 token；數字取自**出線的
+請求體**（`fetchImpl` 記錄 `max_tokens` / `max_completion_tokens` /
+`max_output_tokens`），不是取自宣告。拒絕只有在**單調**時才算上限證據：§七
+說明泛用 400 無法自證，故每個 400 都補一次二分（上一個 200 為陽性對照）。
+
+| 模型 | 宣告 | 鏈路上接受的最大值 | 倍數 | 現場報文 |
+|---|---|---|---|---|
+| `mimo-v2.6-flash-free` | 32000 | **1040384** | ≥32.5× | — |
+| `muse-spark-1.2-contributor-free` | 131072 | **1040384** | ≥7.9× | — |
+| `muse-spark-1.3-contributor-free` | 131072 | **1040384** | ≥7.9× | — |
+| `fledge-alpha-free` | 131072 | **1040384** | ≥7.9× | — |
+| `nemotron-3.5-lightning-free` | 262144 | **991808** | ≥3.8× | — |
+| `longcat-2.5-preview-free` | 131072 | 262144 | ≥2× | 393216 → 400，二分 262144 仍 200 |
+| `big-pickle` | 32000 | 128000 | ≥4× | 1040384 → HTTP 500（無結論） |
+| `space-bunny-free` | 524288 | 524288 | **1×** | 782336 → 400，二分後仍單調 |
+| `ling-3.1-flash-free` | 32768 | — | 無資料 | 429 `Endpoint is unavailable.` |
+| `nemotron-3-ultra-free` | 128000 | — | 無資料 | 200 內 `503 Service temporarily overloaded` |
+| `ling-3.0-flash-fin-free` | 32768 | — | 無資料 | 400 `Endpoint is unavailable.` |
+
+**`space-bunny-free` 是這張表存在的理由**：它的宣告量測為**正確**
+（524288 收、782336 拒，二分單調），所以這不是一條規則，是一份證據表——
+沒有條目的模型維持原狀。
+
+**採用值取「接受過的最大值」，絕不取外推**：`SEED_OUTPUT` 以
+`limit.output` 指紋綁定（與上下文同一個 `contextFingerprint`），宣告一改即丟棄；
+並且以同一模型所廣告的窗口為上限——**大於上下文的輸出上限不是更大的上限，是謊話**。
+pi-ai 的夾擠是 `min(maxTokens, context − est − 4096)`，故鏈路上永不超過表內數字：
+有空間的對話會要滿，長對話自動要少。**無需在 payload 邊界再加一道夾擠**——
+這正是先前把 `min` 的方向想反所差。
+
+### 四十一之一、視覺與工具：兩句一直只是「推測」的話，現在有量測
+
+README 長期宣稱「工具可用」並自我註明那是**准入條件**而非量測；徽標的視覺
+同樣只源自 models.dev 的宣告。2026-10-07 兩者都補了實測：
+
+- **工具**：給三個真實 schema（`read`/`bash`/`edit`，描述照人寫，**不用**閘門
+  那個「Unavailable in this request. Do not call.」的佔位——否則模型照做反而會
+  被讀成能力不足），要求「呼叫 `bash` 跑 `echo capability-probe`」：
+  **7/7 發出真實 toolCall 且參數正確**（mimo、space-bunny、longcat、
+  muse-spark-1.2/1.3、nemotron-3.5、big-pickle）。另外四個
+  （nemotron-ultra、ling×2、fledge）`stopReason:error`，**帶工具與不帶工具
+  的報文逐字元組相同**（Nvidia 503 / `Endpoint is unavailable.` / HTTP 500），
+  故那是上游狀況，不是能力缺失。
+- **視覺**：64×64 手寫 PNG（上半 `#FF00FF`、下半 `#00FF00`），
+  問「上半部是什麼顏色」：**5/5 答 `magenta`**。對照組（無圖）在 mimo 回答
+  「no image was attached」、在 space-bunny 回答 `blue`——**答錯**，
+  這正是圖像承載了答案的證據。`fledge-alpha-free` 無資料（上游 500）。
+
+兩個副教訓，都寫進證據本身：
+
+1. **`maxTokens: 1024` 會製造假的視覺失敗。** mimo 在 256 與 1024 下把整個
+   預算花在 thinking、一個字都沒回（pi-ai issue #3010 的形狀），在 4096 下
+   回答 `magenta`。**能力測量的預算必須足以容納思考**，否則量到的是 token
+   分配，不是能力。
+2. **「宣告支援圖片」不等於「路由接受圖片」**，這一句至今只驗到一半：
+   5 個可量測的宣告模型全數通過，但宣告本身仍非上游的第一手證據。
+
+**未量測與存疑**
+
+- 接受 ≠ 兑现：`max_tokens` 被接受只證明**請求成立**，不證明模型真能生成
+  那麼多。要證明需要一次 >32K 的真實生成（約 40K 輸出 token），本次**未做**——
+  共享 bucket 是使用者的，該請求由使用者決定。
+- `fledge-alpha-free`、`ling-3.1-flash-free`、`nemotron-3-ultra-free`、
+  `ling-3.0-flash-fin-free` 本輪無資料，維持宣告。
+- `big-pickle` 與 `longcat-2.5-preview-free` 仍只有區間。
+- 本節所有數字與 §四十 同級：一次性快照，原始 JSON 在
+  `.scratch/verify/output-ceiling2-results.txt`、`vision-results.txt`、
+  `tool-use-results.txt`，**不入庫**。
