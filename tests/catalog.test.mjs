@@ -1709,6 +1709,71 @@ test('GUARD: a round does not erase a harvested vocabulary or a measured window'
   })
 })
 
+test('GUARD: a confirmed verdict names the level the probe actually asked', async () => {
+  // The round derived the question TWICE: once to send it (with the model's own
+  // lowest published level as the fallback) and once to label the verdict (with
+  // a hardcoded `minimal`). After a disagreement those two disagree, so a
+  // measurement taken at `low` was recorded as a claim about `minimal` — a level
+  // this model does not publish, which `thinkingLevelMapFor` would then hand the
+  // user as an Off row.
+  await withTempDir(async (dir) => {
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'space-bunny-free': modelsDict()['space-bunny-free'] },
+        probes: {
+          // Three baselines and one disagreement: the next question is the
+          // fallback, which for space-bunny-free is `low` (its own lowest
+          // published level), not `minimal`.
+          'space-bunny-free': {
+            verdict: 'ok',
+            at: 1_000_000,
+            effortBaselineTokens: [35, 55, 42],
+            effortDiscord: 1,
+          },
+        },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    )
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      // Measured 2026-10-06: space-bunny-free at its lowest declared level drops
+      // reasoning to 0/9/22/37 against an omitted baseline of 36/42/55.
+      probe: async (_model, question) => {
+        asked.push(question)
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'candidate', tokens: 4 } }
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    })
+    await catalog.forceRefresh()
+    // Five rounds, not three: `working` needs three samples before it produces a
+    // verdict at all, and the verdict then needs three of those to agree.
+    for (let i = 0; i < 5; i += 1) {
+      pastProbeFloor(clock)
+      await catalog.forceProbes()
+    }
+    assert.deepEqual([...new Set(asked)], ['low'], 'every round must ask the model\'s own lowest published level');
+
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free')
+    assert.equal(record.effort?.kind, 'level-works');
+    assert.equal(record.effort?.level, 'low', 'the verdict names the level that was measured');
+    assert.ok(typeof record.effortFrozenAt === 'number', 'and it is frozen so it stops re-measuring');
+
+    // The map is derived from the evidence, so it becomes visible on the next
+    // sync or restart — which is what the picker reads.
+    await catalog.forceRefresh();
+    const model = catalog.current().models.find((m) => m.id === 'space-bunny-free');
+    assert.equal(model?.thinkingLevelMap?.off, 'low', 'and the Off row the user gets is that same level');
+  })
+})
+
 test('a round covers the whole pre-gate catalogue, in order, one at a time', async () => {
   await withTempDir(async (dir) => {
     const probe = recordingProber()

@@ -2234,15 +2234,22 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       state.probeRun.current = model.id;
       const started = deps.now();
       let outcome: ProbeResult;
+      // Declared here so the bookkeeping below reads THE question that was sent,
+      // never a second derivation of it.
+      let question: EffortQuestion = "baseline";
       try {
         const raw = rawById(model.id);
         const record0 = state.probes[model.id];
-        const settled =
-          raw !== undefined && effortVerdictFresh(record0, reasoningFingerprint(raw), deps.now());
-        outcome = await probe!(
-          model,
-          nextEffortQuestion(record0, raw === undefined ? "minimal" : fallbackLevelFor(raw), settled),
-        );
+        const settled = raw !== undefined && effortVerdictFresh(record0, reasoningFingerprint(raw), deps.now());
+        // THE question, derived once. It used to be derived twice — once to send
+        // (with this model's own lowest published level as the fallback) and
+        // once to label the verdict (with a hardcoded `minimal`) — and after a
+        // disagreement the two answers differ. The stored label then changed the
+        // question itself, so a measurement taken at `low` ended up filed, and
+        // finally frozen, as a claim about `minimal`: a level this model does not
+        // publish, measured once while the tally said three.
+        question = nextEffortQuestion(record0, raw === undefined ? "minimal" : fallbackLevelFor(raw), settled);
+        outcome = await probe!(model, question);
       } catch {
         untrusted = true;
         state.probeRun.results[model.id] = {
@@ -2282,7 +2289,6 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         continue;
       }
       const prior = state.probes[model.id];
-      const question = nextEffortQuestion(prior);
       // The Off verdict the same request observed, held back until it agrees
       // with what came before. `big-pickle` accepted `none` on six of nine
       // identical requests and 400'd the rest while its liveness stayed `ok`, so
