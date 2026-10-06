@@ -2561,6 +2561,60 @@ test('GUARD: a confirmed verdict names the level the probe actually asked', asyn
   })
 })
 
+test('GUARD: the daily round covers every model Zen serves; the manual one stays on screen', async () => {
+  // Two rounds, two jobs. The manual round spends a budget per model on the
+  // models the user has switched on — those are the answers somebody is
+  // watching for. The daily round spends ONE request each and nobody asked for
+  // it, so it may as well settle every model Zen still lists: a hidden model
+  // whose free tier has ended is exactly the one nobody discovers by looking at
+  // the picker.
+  //
+  // Before this they shared one rule, so hiding a model also stopped the daily
+  // round from ever learning whether that model still works.
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    const asked = []
+    const probe = async (model) => {
+      asked.push(model.id);
+      return { kind: 'ok' };
+    };
+    const make = () =>
+      catalogWith({
+        dir,
+        clock,
+        manualSampleBudget: 1,
+        fetchImpl: async () =>
+          fakeResponse({
+            body: apiBodyWith({
+              'big-pickle': modelsDict()['big-pickle'],
+              'space-bunny-free': modelsDict()['space-bunny-free'],
+            }),
+          }),
+        probe,
+        hidden: (id) => id === 'space-bunny-free',
+        listZenIds: async () => ['big-pickle', 'space-bunny-free'],
+      });
+    const build = async (catalog) => {
+      await catalog.forceRefresh();
+      catalog.applyZenGate(['big-pickle', 'space-bunny-free']);
+      return catalog;
+    };
+
+    const daily = await build(make());
+    asked.length = 0;
+    clock.t += 25 * 60 * 60_000;
+    await daily.runProbes();
+    assert.deepEqual(asked.slice().sort(), ['big-pickle', 'space-bunny-free'], 'the daily round asks the hidden one too');
+
+    const manual = await build(make());
+    asked.length = 0;
+    clock.t += 25 * 60 * 60_000;
+    await manual.forceProbes();
+    assert.deepEqual(asked, ['big-pickle'], 'and the manual round stays on what is switched on');
+  })
+})
+
+
 test('a round covers the whole pre-gate catalogue, in order, one at a time', async () => {
   await withTempDir(async (dir) => {
     const probe = recordingProber()

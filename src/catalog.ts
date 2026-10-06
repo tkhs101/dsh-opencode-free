@@ -1950,6 +1950,19 @@ export type ProbeStart =
   | { readonly started: false; readonly reason: "cooldown"; readonly retryAfterMs: number }
   | { readonly started: false; readonly reason: "running" | "unavailable" };
 
+/**
+ * What a round is allowed to ask about.
+ *
+ * `visible` — the models the user has switched on. A manual round spends up to
+ * `MANUAL_SAMPLE_BUDGET` requests on each of them, and the answers are the ones
+ * somebody is watching for.
+ *
+ * `served` — every model the Zen gate still lists, hidden ones included. The
+ * daily round spends ONE request each and nobody asked for it; its value is
+ * catalogue hygiene, which a hidden model needs just as much as a visible one.
+ */
+export type ProbeScope = "visible" | "served";
+
 export interface ProbeProgress {
   readonly running: boolean;
   /**
@@ -2220,8 +2233,15 @@ export function planRound(
   hidden: ((id: string) => boolean) | undefined,
   now: number,
   reach: Readonly<Record<string, ReachRecord>> = {},
+  scope: ProbeScope = "visible",
 ): { targets: Model<Api>[]; notListed: Model<Api>[] } {
-  const isShown = (id: string): boolean => hidden?.(id) !== true;
+  // `served` — the daily round — asks about every model Zen still lists, hidden
+  // or not: its job is to keep the catalogue honest, and a hidden model whose
+  // free tier has ended is exactly the thing nobody will discover by looking at
+  // the picker. `visible` — the manual round — stays on what the user has
+  // switched on, because that round spends a budget per model and the answers
+  // are ones they are actually watching for.
+  const isShown = (id: string): boolean => scope === "served" || hidden?.(id) !== true;
   return {
     targets: live.filter(
       (model) => isShown(model.id) && !isSettled(model.id, probes) && reachAllowsAttempt(reach[model.id], now),
@@ -2493,9 +2513,13 @@ function runSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
   return state.inflight;
 }
 
-function runProbeSingle(state: CatalogState, deps: CatalogDeps, samplesPerModel = 1): Promise<void> {
+function runProbeSingle(
+  state: CatalogState,
+  deps: CatalogDeps,
+  options: { samplesPerModel?: number; scope?: ProbeScope } = {},
+): Promise<void> {
   if (state.probeInflight !== null) return state.probeInflight;
-  state.probeInflight = runProbeRound(state, deps, samplesPerModel).finally(() => {
+  state.probeInflight = runProbeRound(state, deps, options).finally(() => {
     state.probeInflight = null;
   });
   return state.probeInflight;
@@ -2528,9 +2552,10 @@ function harvestSelfReport(state: CatalogState, id: string, outcome: ProbeResult
 export async function runProbeRound(
   state: CatalogState,
   deps: CatalogDeps,
-  /** Requests per model this round may spend. See {@link MANUAL_SAMPLE_BUDGET}. */
-  samplesPerModel = 1,
+  options: { samplesPerModel?: number; scope?: ProbeScope } = {},
 ): Promise<void> {
+  const samplesPerModel = options.samplesPerModel ?? 1;
+  const scope = options.scope ?? "visible";
   const { path, hidden, probe } = deps;
   // The raw models.dev record behind a derived model, so an effort measurement
   // is fingerprinted against what it is actually ABOUT. Absent before the first
@@ -2573,7 +2598,7 @@ export async function runProbeRound(
   // channel refused rather than a model that is gone — and a permanent verdict
   // on a wrong channel is how a working model goes missing for good.
   // The round's scope, decided by one pure function below.
-  const { targets, notListed } = planRound(state.models, live, servedSet, state.probes, hidden, deps.now(), state.reach);
+  const { targets, notListed } = planRound(state.models, live, servedSet, state.probes, hidden, deps.now(), state.reach, scope);
   // The panel polls this while the round runs: a progress pill ("4/10") and
   // one badge per row (ok with latency / failed / probing / waiting). It is
   // replaced wholesale at the start of every round and frozen when the round
@@ -3159,9 +3184,10 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       if (probe === undefined) return;
       if (state.probeInflight !== null) return state.probeInflight;
       if (probedToday(state.lastProbeAt, now)) return;
-      // One request per model: nobody asked for this round, and it spends the
-      // same shared bucket a manual one does.
-      return runProbeSingle(state, deps);
+      // One request per model, over every model Zen still lists: nobody asked
+      // for this round, and its job is to keep the catalogue honest rather than
+      // to answer a question someone is watching.
+      return runProbeSingle(state, deps, { samplesPerModel: 1, scope: "served" });
     },
     async forceProbes(): Promise<ProbeStart> {
       if (probe === undefined) return { started: false, reason: "unavailable" };
@@ -3178,7 +3204,10 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       // no word about why.
       const wait = FORCED_PROBE_MIN_INTERVAL_MS - (now() - state.lastProbeAt);
       if (wait > 0) return { started: false, reason: "cooldown", retryAfterMs: wait };
-      await runProbeSingle(state, deps, options.manualSampleBudget ?? MANUAL_SAMPLE_BUDGET);
+      await runProbeSingle(state, deps, {
+        samplesPerModel: options.manualSampleBudget ?? MANUAL_SAMPLE_BUDGET,
+        scope: "visible",
+      });
       return { started: true };
     },
     probeProgress(): ProbeProgress {
