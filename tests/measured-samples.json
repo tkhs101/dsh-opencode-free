@@ -144,7 +144,7 @@
   "question": "low",
   "tokens": null,
   "http": null,
-  "n": 6
+  "n": 7
  },
  {
   "model": "fledge-alpha-free",
@@ -589,7 +589,28 @@
  },
  {
   "model": "muse-spark-1.3-contributor-free",
+  "question": "high",
+  "tokens": null,
+  "http": 200,
+  "n": 2
+ },
+ {
+  "model": "muse-spark-1.3-contributor-free",
   "question": "low",
+  "tokens": null,
+  "http": 200,
+  "n": 2
+ },
+ {
+  "model": "muse-spark-1.3-contributor-free",
+  "question": "max",
+  "tokens": null,
+  "http": 200,
+  "n": 1
+ },
+ {
+  "model": "muse-spark-1.3-contributor-free",
+  "question": "medium",
   "tokens": null,
   "http": 200,
   "n": 1
@@ -599,7 +620,7 @@
   "question": "minimal",
   "tokens": null,
   "http": 200,
-  "n": 2
+  "n": 3
  },
  {
   "model": "muse-spark-1.3-contributor-free",
