@@ -1591,6 +1591,12 @@ function pastProbeFloor(clock) {
   clock.t += PROBE_FLOOR_MS + 1_000
 }
 
+/** The persisted verdict record for one model, read back off disk. */
+async function readProbeRecord(path, id) {
+  const cache = JSON.parse(await readFile(path, 'utf8'))
+  return cache.probes?.[id] ?? {}
+}
+
 const SERVED = ['big-pickle', 'ling-3.0-flash-fin-free', 'muse-spark-1.3-contributor-free']
 
 const DERIVED = [
@@ -1601,6 +1607,107 @@ const DERIVED = [
   'muse-spark-1.3-contributor-free',
   'space-bunny-free',
 ]
+
+test('GUARD: a round keeps the evidence it did not re-derive', async () => {
+  // The record was rebuilt from scratch every round, so anything this round did
+  // not re-derive disappeared: a candidate round wiped the baseline, a baseline
+  // round wiped the candidates. EFFORT_SAMPLES asks for three on EACH side, so
+  // a rule that erases half the tally on alternate rounds can never satisfy it
+  // — the axis could not converge at any number of rounds.
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    const asked = []
+    // Exactly the measured shape: 55 reasoning tokens omitted, 0 under `none`
+    // (mimo-v2.6-flash-free, 2026-10-06, tests/measured-samples.json).
+    const probe = async (model, question) => {
+      asked.push(question)
+      return {
+        kind: 'ok',
+        api: 'openai-completions',
+        effort: {
+          kind: question === 'baseline' ? 'baseline' : 'candidate',
+          tokens: question === 'baseline' ? 55 : 0,
+        },
+      }
+    }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: scriptedFetch([fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) })]),
+      probe,
+      listZenIds: async () => ['space-bunny-free'],
+    })
+    await catalog.forceRefresh()
+
+    for (let i = 0; i < 3; i += 1) {
+      pastProbeFloor(clock)
+      await catalog.forceProbes()
+    }
+    const baseline = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free')
+    assert.deepEqual(baseline.effortBaselineTokens, [55, 55, 55], 'three baseline samples must accumulate')
+    assert.equal(asked.at(-1), 'baseline', 'a third sample is not yet a median')
+
+    pastProbeFloor(clock)
+    await catalog.forceProbes()
+    assert.equal(asked.at(-1), 'none', 'three samples is enough to move to the candidate question')
+    const both = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free')
+    assert.deepEqual(both.effortTokens, [0], 'the candidate lands in the candidate bucket')
+    assert.deepEqual(both.effortBaselineTokens, [55, 55, 55], 'and the baseline it is judged against must still be there')
+  })
+})
+
+test('GUARD: a round does not erase a harvested vocabulary or a measured window', async () => {
+  // Same root cause, two pieces of evidence that cost a real request to obtain:
+  // the level vocabulary a refusal enumerated (ADR 0004 §33/§34 — only
+  // self-reporting models ever give it up) and a measured context window. Both
+  // are written by a DIFFERENT round than the one that will read them, so a
+  // rebuild that keeps only what it just derived throws away the only copy.
+  await withTempDir(async (dir) => {
+    // models.dev publishes this ladder as [minimal, low, medium, high, xhigh];
+    // the measured window is fingerprinted against `limit`, so the seed and the
+    // refresh below must publish the SAME limits or the measurement is voided by
+    // its own guard.
+    const fledge = {
+      ...modelsDict()['muse-spark-1.3-contributor-free'],
+      id: 'fledge-alpha-free',
+      name: 'Fledge Alpha Free',
+    }
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'fledge-alpha-free': fledge },
+        probes: {
+          'fledge-alpha-free': {
+            verdict: 'ok',
+            at: 1_000_000,
+            selfReported: ['low', 'high', 'max'],
+            context: { raisedTo: 1048576, fp: '1048576:131072', at: 1_000_000 },
+          },
+        },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    )
+    const clock = { t: 2_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'fledge-alpha-free': fledge }) }),
+      probe: async () => ({ kind: 'ok', api: 'openai-completions' }),
+      listZenIds: async () => ['fledge-alpha-free'],
+    })
+    await catalog.forceRefresh()
+    pastProbeFloor(clock)
+    await catalog.forceProbes()
+
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'fledge-alpha-free')
+    assert.deepEqual(record.selfReported, ['low', 'high', 'max'], 'a harvested vocabulary survives an unrelated round')
+    assert.equal(record.context?.raisedTo, 1048576, 'a measured window survives an unrelated round')
+    assert.equal(record.verdict, 'ok', 'while the verdict itself is still rewritten every round')
+  })
+})
 
 test('a round covers the whole pre-gate catalogue, in order, one at a time', async () => {
   await withTempDir(async (dir) => {

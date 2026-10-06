@@ -493,6 +493,20 @@ export function isMeasuredEffort(value: unknown): value is MeasuredEffort {
   return typeof value.level === "string" && (THINKING_LEVELS as readonly string[]).includes(value.level);
 }
 
+/**
+ * A persisted question is one this module can ask again.
+ *
+ * `none` and `baseline` are the round's own markers; anything else must be a
+ * level name pi-ai knows, because a question nobody can re-ask is a stuck model.
+ * The old reader allowed only `none` and `minimal`, so a fallback LEVEL — `low`
+ * on space-bunny-free — was dropped on restart and the model was asked `none`
+ * again, the very request its models.dev ladder refuses.
+ */
+function isEffortQuestion(value: unknown): value is EffortQuestion {
+  if (value === "none" || value === "baseline") return true;
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
+
 
 /**
  * D6: the thinking levels models.dev publishes for this model, as pi-ai's
@@ -968,9 +982,11 @@ export interface ProbeRecord {
   /** Every omitted sample seen, the reference the candidate is judged against. */
   readonly effortBaselineTokens?: readonly number[];
   /**
-   * Consecutive clamp observations seen since the last write. In-memory only,
-   * like the liveness round's counters: it is a confidence gauge, not a verdict,
-   * so losing it on restart costs one round, never correctness.
+   * Consecutive clamp observations seen since the last write. A confidence
+   * gauge, not a verdict: a round that reaches nothing else still carries it
+   * forward, so a restart resumes the count instead of restarting it — which is
+   * the conservative direction, since `clampVerdict` raises only on agreement
+   * and losing the count would only ever repeat the observation.
    */
   readonly contextHits?: number;
 }
@@ -1098,7 +1114,17 @@ export interface ProbeResult {
   readonly marker?: string | null | undefined;
 }
 
-/** Read persisted verdicts defensively: a damaged entry is dropped, not fatal. */
+/**
+ * Read persisted verdicts defensively: a damaged entry is dropped, not fatal.
+ *
+ * Every evidence field the round writes MUST be read here, and the reader is
+ * the second half of that contract. Three were missing, which made the write
+ * side a fiction: `selfReported` (a vocabulary a refusal enumerated, harvestable
+ * only on models that self-report at all), `effortFrozenAt` (the marker that
+ * stops a confirmed verdict from being re-litigated), and every `effortQuestion`
+ * other than `none`/`minimal` (a fallback LEVEL — `low` on space-bunny-free —
+ * was silently dropped, so a restart sent the model back to `none`).
+ */
 function readProbes(value: unknown): ProbeMap {
   if (!isPlainObject(value)) return {};
   const probes: ProbeMap = {};
@@ -1114,17 +1140,24 @@ function readProbes(value: unknown): ProbeMap {
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
       ...(isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
+      ...(Array.isArray(entry.selfReported)
+        ? { selfReported: entry.selfReported.filter((level): level is string => typeof level === "string") }
+        : {}),
       ...(Array.isArray(entry.effortSamples)
         ? { effortSamples: entry.effortSamples.filter((k) => typeof k === "string") as EffortSamples }
         : {}),
-      ...(entry.effortQuestion === "minimal" || entry.effortQuestion === "none"
-        ? { effortQuestion: entry.effortQuestion }
+      ...(isEffortQuestion(entry.effortQuestion) ? { effortQuestion: entry.effortQuestion } : {}),
+      ...(typeof entry.effortFrozenAt === "number" && Number.isFinite(entry.effortFrozenAt)
+        ? { effortFrozenAt: entry.effortFrozenAt }
         : {}),
       ...(typeof entry.effortDiscord === "number" && Number.isFinite(entry.effortDiscord)
         ? { effortDiscord: entry.effortDiscord }
         : {}),
       ...(typeof entry.effortBaseline === "number" && Number.isFinite(entry.effortBaseline)
         ? { effortBaseline: entry.effortBaseline }
+        : {}),
+      ...(typeof entry.contextHits === "number" && Number.isFinite(entry.contextHits)
+        ? { contextHits: entry.contextHits }
         : {}),
       ...(Array.isArray(entry.effortTokens)
         ? { effortTokens: entry.effortTokens.filter((n) => typeof n === "number" && Number.isFinite(n)) }
@@ -2284,7 +2317,20 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         tally.kind === "confirmed" &&
         isMeasuredChannel(outcome.api) &&
         rawById(model.id) !== undefined;
-      state.probes[model.id] = {
+      // The record is REBUILT every round, so it starts from the previous one:
+      // evidence this round does not re-derive — the other side of the effort
+      // tally, a vocabulary a refusal enumerated, a measured window — is the
+      // only copy that exists, and a baseline round used to erase the candidates
+      // while a candidate round erased the baseline. Alternating rounds then
+      // erase half the tally each time, which no number of rounds can satisfy.
+      //
+      // `reason` is the one field deliberately NOT carried: it describes this
+      // verdict, so a model that answers again must not keep displaying the
+      // refusal that used to retire it. Everything else survives untouched, and
+      // the fingerprints on the measurements are checked where they are applied.
+      const { reason: _staleReason, ...carried } = prior ?? {};
+      const next: ProbeRecord = {
+        ...carried,
         verdict: outcome.kind,
         at: stamp,
         ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
@@ -2337,6 +2383,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
             ? { effortDiscord: (prior?.effortDiscord ?? 0) + 1 }
             : {}),
       };
+      state.probes[model.id] = next;
       // Applied HERE, not when the round ends. A row is painted the moment its
       // verdict lands, so a model shown as working must already be routed the
       // way it worked — waiting for the last model to finish left a visibly
