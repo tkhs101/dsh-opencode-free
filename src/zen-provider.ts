@@ -1891,6 +1891,54 @@ function appendTransportDetail<T extends Record<string, unknown>>(
   return { ...record, errorMessage: `${message}｜${ZEN_TRANSPORT_GUIDANCE}（${detail}）` } as T;
 }
 
+/**
+ * The message a clamp-induced empty reply is rewritten to.
+ *
+ * DSH derives `LlmFailure.code` from this text by regex
+ * (`classifyPiAiError`), so the wording IS the retry decision. It must match none
+ * of the retryable shapes: no 4xx or 5xx literals, no "timeout", no
+ * network/connection/socket/fetch wording, no "quota". An unmatched message falls
+ * through to `PI_AI_ERROR`, which is not in `DEFAULT_RETRYABLE_CODES` — so the
+ * request is not retried and this text reaches the user verbatim.
+ *
+ * Why it matters: a wrong Off that the model silently ignores answers HTTP 200
+ * with no content, which the host classifies `EMPTY_RESPONSE` — a RETRYABLE
+ * code. A deterministic wrong value therefore burned five identical retries
+ * (500+1000+2000+4000+8000 = 15.5s of backoff, six round-trips and six draws on
+ * the shared anonymous bucket) before surfacing an error that never mentioned
+ * the effort at all.
+ */
+export const CLAMPED_REPLY_MESSAGE =
+  "上游回傳了空白內容：本回合的輸出預算被夾到下限，模型沒有可作答的空間。" +
+  "這通常表示該模型的工作區視窗宣告過小；請縮小對話或改用其他模型。";
+
+/**
+ * Whether a terminal reply is the clamp signature rather than a model that chose
+ * to say nothing.
+ *
+ * The two are distinguishable: a clamp is visible in the bytes we emitted. A
+ * model that simply declines to answer leaves `max_completion_tokens` alone, and
+ * those must keep the host's own handling — this is not our failure to explain.
+ */
+export function isClampStarved(
+  result: unknown,
+  emitted: number | undefined,
+): boolean {
+  if (emitted !== 1) return false;
+  if (!result || typeof result !== "object") return false;
+  const rec = result as Record<string, unknown>;
+  if (rec.stopReason === "error") return false;
+  const content = rec.content;
+  return !Array.isArray(content) || content.length === 0;
+}
+
+/** Rewrites a successful-but-empty reply into a named, non-retryable error. */
+export function mapClampedReplyToGuidance<T>(result: T, emitted: number | undefined): T {
+  if (!isClampStarved(result, emitted)) return result;
+  const rec = result as Record<string, unknown>;
+  return { ...rec, stopReason: "error", errorMessage: CLAMPED_REPLY_MESSAGE } as T;
+}
+
 export function mapTransportErrorToGuidance<T>(result: T, recorder?: TransportRecorder): T {
   if (!result || typeof result !== "object") return result;
   const rec = result as Record<string, unknown>;
@@ -1930,7 +1978,12 @@ function mapEventErrorToGuidance<T>(event: T, recorder?: TransportRecorder): T {
   } as T;
 }
 
-function withGuidance<T extends object>(stream: T, restoreShell = false, recorder?: TransportRecorder): T {
+function withGuidance<T extends object>(
+  stream: T,
+  restoreShell = false,
+  recorder?: TransportRecorder,
+  outcome?: RequestOutcome,
+): T {
   return new Proxy(stream, {
     get(target, prop, _receiver) {
       if (prop === "result") {
@@ -1938,7 +1991,10 @@ function withGuidance<T extends object>(stream: T, restoreShell = false, recorde
         return async () => {
           const result = await inner.call(target);
           if (restoreShell) restoreShellCalls(result);
-          return mapTransportErrorToGuidance(result, recorder);
+          // Before the transport rewrite: a clamp is not a transport failure, and
+          // it must not be left to the host's retryable EMPTY_RESPONSE path.
+          const clamped = mapClampedReplyToGuidance(result, outcome?.clampEmitted);
+          return mapTransportErrorToGuidance(clamped, recorder);
         };
       }
       if (prop === Symbol.asyncIterator) {
@@ -2070,13 +2126,18 @@ function reportClamp<S extends { result(): Promise<{ stopReason?: unknown; conte
 function requestOptions<T extends StreamOptions>(
     options: T = {} as T,
     context?: unknown,
-  ): { processed: T; recorder: TransportRecorder } {
+  ): { processed: T; recorder: TransportRecorder; outcome: RequestOutcome } {
     const recorder = createTransportRecorder(options?.fetch as FetchFunction | undefined);
-    const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder);
+    // The per-request scratch the payload hook fills and the stream wrapper
+    // reads. It has to be created here and handed down: the clamp value is only
+    // observable at the payload boundary, and the terminal stopReason only at
+    // the result, so neither is reachable from the catalogue alone.
+    const outcome: RequestOutcome = {};
+    const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder, outcome);
     debugLog(
       `${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "provider")} ${shapeSummary(context, options)}`,
     );
-    return { processed, recorder };
+    return { processed, recorder, outcome };
   }
 
   return {
@@ -2120,18 +2181,18 @@ function requestOptions<T extends StreamOptions>(
     stream(model, context, options) {
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(toTranscript(context), key), key);
-      const { processed, recorder } = requestOptions(options, gate.context);
+      const { processed, recorder, outcome } = requestOptions(options, gate.context);
       return reportClamp(
         model,
         catalog,
         processed,
-        withGuidance(provider.stream(model, gate.context, processed), gate.restoreShell, recorder),
+        withGuidance(provider.stream(model, gate.context, processed), gate.restoreShell, recorder, outcome),
       );
     },
     streamSimple(model, context, options) {
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(toTranscript(context), key), key);
-      const { processed, recorder } = requestOptions(options, gate.context);
+      const { processed, recorder, outcome } = requestOptions(options, gate.context);
       return reportClamp(
         model,
         catalog,
@@ -2143,6 +2204,7 @@ function requestOptions<T extends StreamOptions>(
           }),
           gate.restoreShell,
           recorder,
+          outcome,
         ),
       );
     },
