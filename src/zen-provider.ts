@@ -935,6 +935,12 @@ export type ProbeOutcome =
       http: number;
       /** Which anonymous-gate marker the body carried, when it carried one. */
       marker?: AnonGateMarker;
+      /**
+       * The body said the request SHAPE is not supported for this model
+       * ("… not supported for format openai"). Distinct from a refusal about the
+       * caller, and the round needs the difference to attribute the refusal.
+       */
+      formatScoped?: boolean;
     };
 
 /**
@@ -1179,6 +1185,13 @@ function usageOf(result: Record<string, unknown> | undefined): ProbeUsage | unde
  * `anon-gated` says the anonymous admission itself failed.
  */
 function failureKindFor(status: number, body: string, apiKey: string | undefined): ZenFailureKind {
+  // A body that names a FORMAT is about the request, not about who sent it.
+  // Without this, a 401 reading "not supported for format openai" is classified
+  // as a credential failure — and `isCallerScoped` then returns it immediately,
+  // discarding the other channel's answer. Measured 2026-10-06: that is how
+  // `space-bunny-free`, a model this session is running on, sat in the panel as
+  // "unmeasurable" for rounds while answering normally.
+  if (FORMAT_SCOPED_PATTERN.test(body)) return "unknown";
   const kind = classifyZenFailure(status, body);
   if (kind !== "bad-key") return kind;
   const sent = typeof apiKey === "string" ? apiKey.trim() : "";
@@ -1366,6 +1379,15 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     };
   }
   const kind = failureKindFor(status, body, deps.apiKey);
+  // "not supported for FORMAT" is a statement about the REQUEST SHAPE. It has to
+  // survive as a distinguishable fact, because the round needs it to tell two
+  // apart that look identical from the outside:
+  //   - the shape the PLUGIN injected is refused  → evidence about that spelling
+  //   - the shape the CHANNEL guessed is refused  → evidence about the channel
+  // Measured 2026-10-06: `space-bunny-free` answers the completions channel
+  // with a generic 400 on `reasoning_effort:"none"`, and the responses channel
+  // with `401 Model space-bunny-free is not supported for format openai`.
+  const formatScoped = FORMAT_SCOPED_PATTERN.test(body);
   if (status === 0) {
     return { kind: "inconclusive", reason: kind, code: kind, http: 0, marker: anonGateMarker(body) };
   }
@@ -1375,6 +1397,7 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     code: kind,
     http: status,
     marker: anonGateMarker(body),
+    ...(formatScoped ? { formatScoped: true } : {}),
     // The one piece of good news a refusal can carry: the model's own vocabulary.
     ...(selfReportedLevels(body) === undefined ? {} : { selfReported: selfReportedLevels(body) }),
   };

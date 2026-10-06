@@ -1322,6 +1322,38 @@ test('GUARD: an overload the upstream names is named, not filed as unknown', asy
   assert.equal(classifyZenFailure(503, '{"error":{"message":"upstream connect error"}}'), 'unknown');
 });
 
+test('GUARD: a 401 blaming the request shape is not read as a credential failure', async () => {
+  // Measured 2026-10-06 on `space-bunny-free` — the model this session runs on,
+  // which answers normally the whole time. Asked for `reasoning_effort:"none"` it
+  // refuses on every channel, and the responses channel says why in words:
+  //   401 Model space-bunny-free is not supported for format openai
+  //
+  // Read as a status, that is a credential failure, and `isCallerScoped` returns
+  // it immediately — discarding the other channel's answer, so the model sat in
+  // the panel as unmeasurable for rounds instead of falling back to a level that
+  // works. The body names the SHAPE, so the shape has to survive classification.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    question: 'none',
+    fetchImpl: async () =>
+      new Response('{"type":"error","error":{"message":"Model space-bunny-free is not supported for format openai"}}', {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+  });
+  assert.equal(outcome.formatScoped, true, 'the shape survives as a distinguishable fact');
+  assert.equal(
+    outcome.code,
+    'unknown',
+    'and it is not a credential failure — nothing about the key was wrong',
+  );
+  assert.notEqual(outcome.code, 'bad-key');
+  assert.notEqual(outcome.code, 'anon-gated');
+});
+
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
     () => 'probe-session',

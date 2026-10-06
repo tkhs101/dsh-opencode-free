@@ -1803,6 +1803,66 @@ test('GUARD: a spelling that reduces nothing does not become an Off row', async 
   })
 })
 
+test('GUARD: a 401 that blames the request shape is a refusal of the spelling, not of the caller', async () => {
+  // `space-bunny-free` — the model this session runs on, answering normally the
+  // whole time — sat in the panel as "unmeasurable" for rounds.
+  //
+  // It has no problem at all. Measured 2026-10-06, five probes each:
+  //   the omitted request  → 200, five out of five
+  //   `reasoning_effort:"low"` → 200, five out of five
+  //   `reasoning_effort:"none"` → refused every time, and the two channels
+  //     disagree about how: completions answers a generic 400, responses
+  //     answers `401 Model space-bunny-free is not supported for format openai`.
+  //
+  // That 401 was classified as a credential failure, `isCallerScoped` returned it
+  // immediately, and the other channel's answer was discarded — so the model
+  // looked unmeasurable and the round never reached the fallback level that
+  // works.
+  //
+  // The attribution is sound because the round only asks a spelling after three
+  // successful omitted samples on the same channel: the request that fails
+  // differs from one that worked by exactly the injected field.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async (model, question) => {
+        asked.push(question);
+        // space-bunny-free publishes low…max, so ITS lowest level is `low`.
+        if (question === 'none') {
+          return {
+            kind: 'inconclusive',
+            code: 'unknown',
+            http: 401,
+            formatScoped: true,
+            reason: 'not supported for format openai（HTTP 401）',
+          };
+        }
+        const tokens = question === 'baseline' ? 40 : 6;
+        return {
+          kind: 'ok',
+          api: 'openai-completions',
+          effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens },
+        };
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    assert.ok(asked.includes('low'), 'the round moved past the refused spelling to its own lowest level');
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free');
+    assert.equal(record.effort?.kind, 'level-works', 'and confirmed the level that actually works');
+    assert.equal(record.effort?.level, 'low');
+    assert.equal(catalog.probeProgress().results['space-bunny-free'].status, 'ok', 'so the row is not "unmeasurable"');
+  })
+})
+
 test('GUARD: three refusals of the same spelling end at no Off row, never a wrong one', async () => {
   // The terminal case: when no spelling works, ADR 0004 §31 wants `off: null` —
   // an honest absence, not a control that does nothing. The refusal has to be

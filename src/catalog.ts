@@ -1207,6 +1207,16 @@ export interface ProbeResult {
    * Carried into the round record so the panel can say which.
    */
   readonly marker?: string | null | undefined;
+  /**
+   * The body said the request SHAPE is not supported for this model
+   * ("… not supported for format openai").
+   *
+   * Distinct from a refusal about the caller, and the round needs the
+   * difference to attribute it: a shape the PLUGIN injected is evidence about
+   * that spelling, while the same sentence for a channel the plugin GUESSED is
+   * evidence about the channel.
+   */
+  readonly formatScoped?: boolean;
 }
 
 /**
@@ -1993,6 +2003,8 @@ export type ProbeProgressResult =
       readonly removed?: boolean | undefined;
       /** Which anonymous-gate marker the refusal carried, when it named one. */
       readonly marker?: string | undefined;
+      /** The body said the request SHAPE is not supported for this model. */
+      readonly formatScoped?: boolean;
     };
 
 /**
@@ -2652,7 +2664,18 @@ export async function runProbeRound(
       const spellingRefused =
         outcome !== undefined && outcome !== null && outcome.kind === "inconclusive"
         && question !== "baseline" && question !== "settled"
-        && (outcome.http === 400 || outcome.http === 422);
+        // 400/422 are the ordinary "I will not take this parameter" statuses;
+        // a FORMAT-scoped refusal says the same thing in a 401, which would
+        // otherwise be read as a credential problem and end the model up
+        // permanently unmeasurable.
+        //
+        // The attribution is safe here because the round only asks a spelling
+        // AFTER three successful omitted samples on this same channel: the
+        // request differs from one that worked by exactly the injected field.
+        // Measured 2026-10-06 on `space-bunny-free`: `low` answered 200 five
+        // times out of five, `none` was refused every time, and the model sat in
+        // the panel as "unmeasurable" instead of falling back to its own level.
+        && (outcome.http === 400 || outcome.http === 422 || outcome.formatScoped === true);
       if (outcome === undefined || outcome === null || (outcome.kind === "inconclusive" && !spellingRefused)) {
         untrusted = true;
         // A round that concluded nothing writes NO verdict: a model we could
