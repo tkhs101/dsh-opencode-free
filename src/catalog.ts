@@ -146,6 +146,13 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 export const FOREIGN_EFFORT_SPELLINGS: Record<string, string> = { none: "off" };
 
 /**
+ * `xhigh` and `max` are opt-in for pi-ai: absent from the map means NOT
+ * offered. They are left that way here so the refusal surface stays limited to
+ * levels with positive evidence.
+ */
+const OPT_IN_THINKING_LEVELS = new Set<string>(["xhigh", "max"]);
+
+/**
  * What was MEASURED about one model's Off control, on one channel.
  *
  * `"none-works"` — `reasoning_effort:"none"` reached zero reasoning tokens.
@@ -450,6 +457,8 @@ export function thinkingLevelMapFor(
   record: CatalogRecord,
   channel: Api,
   measured?: MeasuredEffort,
+  /** Levels the MODEL ITSELF named, from a refusal that enumerated them. */
+  selfReported?: readonly string[],
 ): Record<string, string | null> | undefined {
   // R0 — no reasoning claim: say nothing at all. An ABSENT `reasoning` is as
   // little a claim as `false` is, and `getSupportedThinkingLevels` already
@@ -502,11 +511,32 @@ export function thinkingLevelMapFor(
     map.off = null;
   }
 
+  // The ladder rows are NOT filtered by models.dev.
+  //
+  // Measured 2026-10-06, across eight models and both channels: NO ladder level
+  // has ever been refused — not a declared one, and not an undeclared one.
+  // `big-pickle` accepts `low` (164 reasoning tokens), `muse-spark-1.3` accepts a
+  // `max` it never published (516, the highest on that model, corroborated by
+  // its own 400 listing the allowed set), and `mimo-v2.6-flash-free` accepts
+  // `minimal` and `high`.
+  //
+  // The asymmetry with `off` is the whole reason the two are handled apart. An
+  // IGNORED ladder level is inert: the user gets the default, which is what the
+  // provider-default row also gives. An ignored `off` is the opposite of its
+  // promise — maximum thinking where the user asked for none — so `off` is
+  // gated on measurement and a ladder level is not.
+  //
+  // xhigh/max stay opt-in, as pi-ai intends: they are offered only where a
+  // measurement or the model's own self-report named them. That keeps the
+  // opt-in convention and limits the surface of a refusal to the levels where
+  // we have positive evidence.
+  const named = new Set(published);
+  for (const level of selfReported ?? []) if (typeof level === "string") named.add(level);
   for (const level of THINKING_LEVELS) {
     if (level === "off") continue;
-    // Every level we did not see published is nulled, INCLUDING xhigh/max whose
-    // absent-means-offered rule is the subtle one.
-    map[level] = published.has(level) ? level : null;
+    if (named.has(level)) map[level] = level;
+    else if (!OPT_IN_THINKING_LEVELS.has(level)) map[level] = level;
+    // else: xhigh/max absent means NOT offered, which is pi-ai's own rule.
   }
   return map;
 }
@@ -540,6 +570,8 @@ export interface DeriveOptions {
    * state so `derive()` stays pure and fixture-testable.
    */
   readonly measuredEffort?: ReadonlyMap<string, MeasuredEffort>;
+  /** Levels each model named in a refusal; the model's own vocabulary. */
+  readonly selfReported?: ReadonlyMap<string, readonly string[]>;
 }
 
 export interface DerivedCatalog {
@@ -568,6 +600,7 @@ function buildModel(
   template: Model<Api>,
   knownApis?: ReadonlyMap<string, Api>,
   measured?: MeasuredEffort,
+  selfReported?: readonly string[],
 ): Model<Api> {
   const id = typeof record.id === "string" && record.id !== "" ? record.id : "";
   const api = channelFor(record, knownApis);
@@ -576,7 +609,7 @@ function buildModel(
   const declaredInput = Array.isArray(modalities.input)
     ? modalities.input.filter((entry): entry is "text" | "image" => entry === "text" || entry === "image")
     : [];
-  const levels = thinkingLevelMapFor(record, api, measured);
+  const levels = thinkingLevelMapFor(record, api, measured, selfReported);
   return {
     ...template,
     id,
@@ -622,7 +655,9 @@ export function derive(section: CatalogRecord, options: DeriveOptions): DerivedC
     if (!isFree(record)) continue;
     // D1: `deprecated` is kept (a probe judges it); anything else is discarded.
     if (!isCatalogueStatus(record)) continue;
-    candidates.push(buildModel(record, options.template, options.knownApis, options.measuredEffort?.get(id)));
+    candidates.push(
+      buildModel(record, options.template, options.knownApis, options.measuredEffort?.get(id), options.selfReported?.get(id)),
+    );
   }
   // Sorted HERE, at the one place the list is born, so the snapshot, the
   // visible set and the picker all inherit the same order instead of each
@@ -825,6 +860,14 @@ export interface ProbeRecord {
    */
   readonly effort?: MeasuredEffort;
   /**
+   * Levels this model enumerated in a refusal.
+   *
+   * Kept even though the round recorded nothing else from that request: the
+   * refusal is worthless as a verdict and valuable as a vocabulary, and the two
+   * must not be conflated.
+   */
+  readonly selfReported?: readonly string[];
+  /**
    * What was MEASURED about this model's context window, if anything has been.
    *
    * Written only by the clamp observation, and only after repeated agreement —
@@ -931,6 +974,15 @@ export function measuredEffortMap(
   return out;
 }
 
+/** The levels each model named in a refusal, for the derivation to consult. */
+export function selfReportedMap(probes: ProbeMap): Map<string, readonly string[]> {
+  const out = new Map<string, readonly string[]>();
+  for (const [id, record] of Object.entries(probes)) {
+    if (Array.isArray(record.selfReported) && record.selfReported.length > 0) out.set(id, record.selfReported);
+  }
+  return out;
+}
+
 /**
  * What the transport layer reports for one probe. Structurally compatible with
  * `zen-provider`'s `ProbeOutcome`; declared here so this module keeps no
@@ -954,6 +1006,14 @@ export interface ProbeResult {
    * prober, decides when enough of these agree to persist.
    */
   readonly effort?: { readonly kind: "baseline" | "candidate"; readonly tokens: number };
+  /**
+   * Levels this model enumerated in a refusal.
+   *
+   * Kept even though the round recorded nothing else from that request: the
+   * refusal is worthless as a verdict and valuable as a vocabulary, and the two
+   * must not be conflated.
+   */
+  readonly selfReported?: readonly string[];
   /** HTTP status the transport saw; 0 means no response ever arrived. */
   readonly http?: number;
   /**
@@ -1772,10 +1832,16 @@ function adopt(
   // decide `off` — which is how the two authorities drifted apart before.
   const base = derive(record.models, { knownApis: deps.knownApis, template: deps.template });
   const evidence = measuredEffortMap(base.candidates, record.models, record.probes);
+  const reported = selfReportedMap(record.probes);
   const derived =
-    evidence.size === 0
+    evidence.size === 0 && reported.size === 0
       ? base
-      : derive(record.models, { knownApis: deps.knownApis, template: deps.template, measuredEffort: evidence });
+      : derive(record.models, {
+          knownApis: deps.knownApis,
+          template: deps.template,
+          measuredEffort: evidence,
+          selfReported: reported,
+        });
   // An empty state.models dictionary is NOT a catalogue — it is a fetch that failed
   // and got persisted anyway (a round writes one when the catalogue fetch
   // never succeeded, see runProbeRound). Adopting it empties the picker on
@@ -1968,6 +2034,25 @@ function runProbeSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
  * can now be driven with two plain objects, with no factory, no temp directory
  * and no network. Everything else in this file moved for the same reason.
  */
+/**
+ * Keeps the vocabulary a refusal enumerated, without keeping the refusal.
+ *
+ * A refusal is worthless as a verdict and valuable as a vocabulary: it says the
+ * model exists and what it accepts. Recording it as a verdict would be exactly
+ * the "absence read as a claim" mistake; discarding it would throw away the
+ * only evidence of a level models.dev under-declares.
+ */
+function harvestSelfReport(state: CatalogState, id: string, outcome: ProbeResult): void {
+  const reported = outcome.selfReported;
+  if (reported === undefined || reported.length === 0) return;
+  const previous = state.probes[id]?.selfReported;
+  if (previous !== undefined && previous.length === reported.length && previous.every((l, i) => l === reported[i])) return;
+  state.probes = {
+    ...state.probes,
+    [id]: { ...(state.probes[id] ?? { verdict: "ok", at: 0 }), selfReported: [...reported] },
+  };
+}
+
 export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Promise<void> {
   const { path, hidden, probe } = deps;
   // The raw models.dev record behind a derived model, so an effort measurement
@@ -2075,11 +2160,13 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // giving it one would be the same "absence read as a claim" mistake this
         // change set exists to remove. The cadence lives beside the verdicts.
         state.reach = { ...state.reach, [model.id]: nextReachAttempt(state.reach[model.id], deps.now()) };
+        harvestSelfReport(state, model.id, outcome);
         continue;
       }
       if (outcome.kind !== "ok" && outcome.kind !== "dead") {
         untrusted = true;
         state.reach = { ...state.reach, [model.id]: nextReachAttempt(state.reach[model.id], deps.now()) };
+        harvestSelfReport(state, model.id, outcome);
         continue;
       }
       const prior = state.probes[model.id];
@@ -2323,6 +2410,24 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    * rejects — leaves the model exactly as it was (D5): one gated IP must never
    * empty the picker.
    */
+
+  /**
+   * Keeps the vocabulary a refusal enumerated, without keeping the refusal.
+   *
+   * A refusal is worthless as a verdict and valuable as a vocabulary: it says the
+   * model exists and what it accepts. Recording it as a verdict would be exactly
+   * the "absence read as a claim" mistake; discarding it would throw away the
+   * only evidence of a level models.dev under-declares.
+   */
+  function harvestSelfReport(state: CatalogState, id: string, outcome: ProbeResult): void {
+    const reported = outcome.selfReported;
+    if (reported === undefined || reported.length === 0) return;
+    const previous = state.probes[id]?.selfReported;
+    if (previous !== undefined && previous.length === reported.length && previous.every((l, i) => l === reported[i])) {
+      return;
+    }
+    state.probes = { ...state.probes, [id]: { ...(state.probes[id] ?? { verdict: "ok", at: 0 }), selfReported: [...reported] } };
+  }
 
   /** Records one clamp observation and, once they agree, raises the window. */
   function observeClamp(id: string, observation: ClampObservation): void {

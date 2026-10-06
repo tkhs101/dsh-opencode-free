@@ -21,6 +21,7 @@ import {
   PROBE_MAX_TOKENS,
   patchNodeHttpForZen,
   probeModel,
+  selfReportedLevels,
   ZEN_FAILURE_GUIDANCE,
   freeModels,
   isEncryptedContentError,
@@ -1123,6 +1124,26 @@ test('GUARD: the guard mirrors the map on both channels', async () => {
   const real = await capture(honoured, { reasoning: 'low' })
   assert.equal(real.reasoning?.effort, 'low', 'a real level passes through')
 })
+
+test('a refusal that enumerates its vocabulary is harvested; a generic one is not', () => {
+  // The one piece of good news a refusal can carry. It is worthless as a verdict
+  // and valuable as a vocabulary, and a classifier that guessed from the generic
+  // form would invent a capability — which is the mistake this change set exists
+  // to remove.
+  assert.deepEqual(
+    selfReportedLevels(`{"error":{"message":"reasoning_effort 'none' is not supported for model 'f'. allowed values: ["low", "high", "max"]"}}`),
+    ['low', 'high', 'max'],
+  );
+  assert.deepEqual(
+    selfReportedLevels(`Upstream request failed: [airlock_error] invalid request: reasoning_effort 'zzz' is unsupported; allowed values: ["low","high","max"]`),
+    ['low', 'high', 'max'],
+  );
+  // Every other model returns this form, and it carries nothing.
+  assert.equal(selfReportedLevels('{"error":{"message":"Upstream request failed: [400] invalid_request_error: invalid request"}}'), undefined);
+  // The context-overflow body must not be mined for levels.
+  assert.equal(selfReportedLevels("[400] This endpoint's maximum context length is 262144 tokens."), undefined);
+  assert.equal(selfReportedLevels(''), undefined);
+});
 
 test('GUARD: a 500 records no effort sample at all', async () => {
   // Measured 2026-10-06: big-pickle returned 500 on four consecutive requests

@@ -870,6 +870,13 @@ export type ProbeOutcome =
        * the liveness verdict nothing.
        */
       effort?: { readonly kind: "baseline" | "candidate"; readonly tokens: number };
+      /**
+       * Levels the model enumerated in a refusal, when it named them.
+       *
+       * Free: it rides on a 400 the probe was already receiving, and it is the
+       * only evidence we have of a level models.dev does not publish.
+       */
+      selfReported?: readonly string[];
     }
   | { kind: "dead"; reason: string; code: "dead"; http: number }
   | {
@@ -1260,6 +1267,8 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     code: kind,
     http: status,
     marker: anonGateMarker(body),
+    // The one piece of good news a refusal can carry: the model's own vocabulary.
+    ...(selfReportedLevels(body) === undefined ? {} : { selfReported: selfReportedLevels(body) }),
   };
 }
 
@@ -1282,6 +1291,39 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
  * the wrong channel talking, and the channel that might have contradicted it was
  * never reached. Silence vetoes; it does not merely lose an argument.
  */
+/**
+ * The levels a model says it accepts, read out of a refusal that enumerated them.
+ *
+ * Measured 2026-10-06. `fledge-alpha-free`: `reasoning_effort 'none' is not
+ * supported for model 'fledge-alpha-free'. allowed values: ["low", "high",
+ * "max"]` — matching its models.dev declaration exactly. And
+ * `muse-spark-1.3-contributor-free` returned the same form listing `max`, which
+ * models.dev does NOT publish, at 516 reasoning tokens — the strongest mode that
+ * model has, confirmed twice.
+ *
+ * So models.dev under-declares ladders the same way it under-declares
+ * `limit.context`, and a model naming its own vocabulary is better evidence than
+ * a third party transcribing it.
+ *
+ * Returns undefined for the generic `invalid_request_error: invalid request`,
+ * which every other model returns and which carries nothing: a classifier that
+ * guessed from it would invent a capability, which is the mistake this change set
+ * exists to remove.
+ */
+const ALLOWED_VALUES =
+  /(?:allowed|supported|valid)(?:\s+(?:values|value|levels))?\s*[:=]\s*\[([^\]]*)\]/i;
+
+export function selfReportedLevels(body: string): string[] | undefined {
+  if (typeof body !== "string" || body === "") return undefined;
+  const match = ALLOWED_VALUES.exec(body);
+  if (match === null) return undefined;
+  const levels = (match[1] ?? "")
+    .split(",")
+    .map((part) => part.trim().replace(/^["'`]+|["'`]+$/g, ""))
+    .filter((part) => part !== "" && /^[a-z][a-z0-9-]*$/i.test(part));
+  return levels.length > 0 ? levels : undefined;
+}
+
 export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
   // Null, not a placeholder conclusion: a placeholder would tie with a real
   // inconclusive on strength and then win the "first seen wins" tie-break,
