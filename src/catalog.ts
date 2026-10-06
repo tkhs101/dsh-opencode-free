@@ -350,7 +350,43 @@ export function fallbackLevelFor(record: CatalogRecord): string {
   return "minimal";
 }
 
-export function nextEffortQuestion(record: ProbeRecord | undefined, fallback = "minimal"): EffortQuestion {
+/**
+ * How long a CONFIRMED effort verdict stands before it is re-litigated.
+ *
+ * Thirty days, and the clock only runs while nothing interesting happened. The
+ * point of a TTL here is not freshness — it is BOUNDING. A verdict that keeps
+ * absorbing samples has a median over an ever-growing set, which is a different
+ * statistic from the median of three that produced it: big-pickle's `minimal`
+ * alternates 0 and 8, and a slowly growing median can drift across the boundary
+ * and silently demote a control the model demonstrably supports.
+ */
+export const EFFORT_TTL_MS = 30 * 24 * 60 * 60_000;
+
+/** Whether a confirmed effort verdict still stands. */
+export function effortVerdictFresh(
+  record: ProbeRecord | undefined,
+  fingerprint: string,
+  now: number,
+): boolean {
+  const effort = record?.effort;
+  if (effort === undefined) return false;
+  if (effort.fp !== fingerprint) return false;
+  if (record?.effortFrozenAt === undefined) return false;
+  return now - record.effortFrozenAt < EFFORT_TTL_MS;
+}
+
+export function nextEffortQuestion(
+  record: ProbeRecord | undefined,
+  fallback = "minimal",
+  settled = false,
+): EffortQuestion {
+  // A confirmed verdict stands. The model is still probed for LIVENESS — that is
+  // unchanged and still how a `dead` verdict is earned — but no further effort
+  // sample is taken, because a verdict that keeps absorbing samples has a median
+  // over an ever-growing set. That is a different statistic from the three that
+  // produced it, and a slowly drifting median can silently demote a control the
+  // model demonstrably supports.
+  if (settled) return "settled";
   // The liveness request IS the omitted request on a no-ladder model — its
   // hardcoded `reasoning: "low"` clamps to omission there — so the baseline
   // usually arrives without a round being spent on asking for it.
@@ -895,6 +931,14 @@ export interface ProbeRecord {
    * must not be conflated.
    */
   readonly selfReported?: readonly string[];
+  /**
+   * When this model's effort verdict was last confirmed.
+   *
+   * Set only on confirmation, and it stops sample accumulation: a verdict that
+   * keeps absorbing samples has a median over a growing set, which is a different
+   * statistic from the three that produced it.
+   */
+  readonly effortFrozenAt?: number;
   /**
    * What was MEASURED about this model's context window, if anything has been.
    *
@@ -2159,9 +2203,12 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       let outcome: ProbeResult;
       try {
         const raw = rawById(model.id);
+        const record0 = state.probes[model.id];
+        const settled =
+          raw !== undefined && effortVerdictFresh(record0, reasoningFingerprint(raw), deps.now());
         outcome = await probe!(
           model,
-          nextEffortQuestion(state.probes[model.id], raw === undefined ? "minimal" : fallbackLevelFor(raw)),
+          nextEffortQuestion(record0, raw === undefined ? "minimal" : fallbackLevelFor(raw), settled),
         );
       } catch {
         untrusted = true;
@@ -2215,7 +2262,10 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       // A candidate is judged against the model's OWN omitted baseline, never
       // against an absolute count: longcat's floor of 36 sits above big-pickle's
       // baseline of 14, so any fixed number collides on the third model.
-      const tokens = observation === undefined ? undefined : [...(prior?.effortTokens ?? []), observation.tokens];
+      // A settled model contributes nothing: no sample is appended, so its
+      // verdict cannot drift while it waits for the TTL.
+      const tokens =
+        question === "settled" ? prior?.effortTokens : observation === undefined ? undefined : [...(prior?.effortTokens ?? []), observation.tokens];
       const baseTokens =
         observation?.kind === "baseline" ? [...(prior?.effortBaselineTokens ?? []), observation.tokens] : prior?.effortBaselineTokens;
       // Judged on medians, once enough of both sides exist. Per-sample
@@ -2226,7 +2276,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
           ? effortVerdictFrom(tokens, baseTokens)
           : undefined;
       const sample: MeasuredEffort["kind"] | undefined =
-        working === true ? "none-works" : working === false ? "noop" : undefined;
+        question === "settled" ? undefined : working === true ? "none-works" : working === false ? "noop" : undefined;
       const tally = sample === undefined ? undefined : effortVerdict(prior?.effortSamples, sample);
       const confirmed =
         sample !== undefined &&
@@ -2248,7 +2298,9 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // model is not wrong now, so the next round must not wait.
         // The tally is kept even when nothing was confirmed, so the next round
         // continues the count instead of restarting it.
-        ...(tally !== undefined ? { effortSamples: tally.kind === "confirmed" ? [] : tally.samples } : {}),
+        ...(tally !== undefined && question !== "settled"
+        ? { effortSamples: tally.kind === "confirmed" ? [] : tally.samples }
+        : {}),
         // The baseline is the reference every later candidate is judged against,
         // so it is kept even when nothing was concluded.
         ...(isBaseline && observation !== undefined ? { effortBaseline: observation.tokens } : {}),
@@ -2274,6 +2326,12 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
                 at: stamp,
               },
               effortDiscord: 0,
+              effortFrozenAt: stamp,
+              // Frozen: the samples that produced the verdict are kept as they
+              // were, so a later re-measurement starts from the declaration
+              // rather than from a median that has been quietly growing.
+              effortTokens: [],
+              effortBaselineTokens: baseTokens ?? [],
             }
           : tally !== undefined && tally.kind === "discord"
             ? { effortDiscord: (prior?.effortDiscord ?? 0) + 1 }

@@ -40,6 +40,8 @@ import {
   effortVerdict,
   nextEffortQuestion,
   fallbackLevelFor,
+  effortVerdictFresh,
+  EFFORT_TTL_MS,
   reachAllowsAttempt,
   nextReachAttempt,
   UNREACHABLE_BACKOFF_MS,
@@ -794,6 +796,28 @@ test('INVARIANT: the ladder is not filtered by models.dev, and `off` still is', 
   assert.equal(Object.prototype.hasOwnProperty.call(noLadder, 'max'), false);
   // A model that publishes no reasoning at all still gets nothing.
   assert.equal(thinkingLevelMapFor({ reasoning_options: [] }, 'openai-completions'), undefined);
+});
+
+test('INVARIANT: a confirmed verdict stops being re-litigated', () => {
+  // A verdict that keeps absorbing samples has a median over an ever-growing set,
+  // which is a different statistic from the three that produced it.
+  // big-pickle's `minimal` alternates 0 and 8, so a slowly growing median can
+  // drift across the boundary and silently demote a control the model supports.
+  const fp = 'yes:[]';
+  const fresh = { verdict: 'ok', at: 1, effort: { kind: 'none-works', fp, api: 'openai-completions', at: 1 }, effortFrozenAt: 1_000, effortBaselineTokens: [16, 16, 16] };
+  assert.equal(effortVerdictFresh(fresh, fp, 1_000 + EFFORT_TTL_MS - 1), true, 'fresh inside the TTL');
+  assert.equal(effortVerdictFresh(fresh, fp, 1_000 + EFFORT_TTL_MS), false, 'stale at the TTL');
+  // A revised declaration voids it immediately, whatever the clock says.
+  assert.equal(effortVerdictFresh(fresh, 'yes:[{"type":"toggle"}]', 1_001), false);
+  // And no verdict is never fresh.
+  assert.equal(effortVerdictFresh(undefined, fp, 1_001), false);
+  assert.equal(effectlessNeverFrozen({ verdict: 'ok', at: 1, effort: { kind: 'none-works', fp, api: 'openai-completions', at: 1 } }), false);
+  function effectlessNeverFrozen(record) {
+    return effortVerdictFresh(record, fp, 1_001);
+  }
+  // A settled model asks nothing, so the round cannot grow its sample set.
+  assert.equal(nextEffortQuestion(fresh, 'minimal', true), 'settled');
+  assert.equal(nextEffortQuestion(fresh, 'minimal', false), 'none', 'unsettled it keeps measuring');
 });
 
 test('a level the model NAMES is offered even when models.dev omits it', () => {
