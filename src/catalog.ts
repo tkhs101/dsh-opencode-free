@@ -1710,6 +1710,20 @@ export interface MeasuredContext {
   /** Fingerprint of `limit`, so a revised declaration voids the measurement. */
   readonly fp: string;
   readonly at: number;
+  /**
+   * How the number was obtained, which decides how far it may be trusted.
+   *
+   * `measured` — the endpoint stated this limit about itself, in its own refusal
+   * body ("This endpoint's maximum context length is 1048576 tokens") or by
+   * accepting a request of that size. First-party, so it is bounded only by the
+   * absolute ceiling.
+   *
+   * `inferred` — derived from the clamp signature, i.e. from observing that a
+   * conversation hit the floor. That signal also fires on a HEALTHY model whose
+   * context is genuinely full, so it stays behind the `declared x 4` valve.
+   * Absent (older records) reads as `inferred`, the conservative side.
+   */
+  readonly source?: "measured" | "inferred";
 }
 
 /** Stable fingerprint of the limits a context measurement is about. */
@@ -1793,7 +1807,10 @@ export function seededContextFor(record: CatalogRecord, id: string): MeasuredCon
   if (seed === undefined) return undefined;
   const declared = finitePositive(isPlainObject(record.limit) ? record.limit.context : undefined);
   if (declared !== seed.declared) return undefined;
-  return { raisedTo: seed.measured, fp: contextFingerprint(record), at: 0 };
+  // The endpoint stated this about itself, or accepted a request of this size —
+  // see SEED_CONTEXT. It is first-party evidence, so it is not held to the
+  // inferred-raise valve.
+  return { raisedTo: seed.measured, fp: contextFingerprint(record), at: 0, source: "measured" };
 }
 
 /** The window a confirmed clamp would raise a model to. */
@@ -1817,7 +1834,16 @@ export function contextWindowFor(record: CatalogRecord, measured?: MeasuredConte
   const declared = finitePositive(limit.context);
   if (measured === undefined || declared === undefined) return declared;
   if (measured.fp !== contextFingerprint(record)) return declared;
-  const cap = Math.min(declared * CLAMP_RAISE_FACTOR, CLAMP_RAISE_CEILING);
+  // The two evidence strengths get two different ceilings. The x4 valve exists
+  // to stop an INFERRED raise from retiring capability on a healthy model; it has
+  // no business clipping a number the endpoint stated about itself. Measured
+  // 2026-10-07: the endpoint's own sentence says 1048576 for
+  // `mimo-v2.6-flash-free`, and the plugin was advertising 800000 — 248K of
+  // real context withheld by a valve built for a different kind of evidence.
+  const cap =
+    measured.source === "measured"
+      ? CLAMP_RAISE_CEILING
+      : Math.min(declared * CLAMP_RAISE_FACTOR, CLAMP_RAISE_CEILING);
   const bounded = Math.min(measured.raisedTo, cap);
   return bounded > declared ? bounded : declared;
 }
@@ -3127,6 +3153,9 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       raisedTo: verdict.raisedTo,
       fp: record0 === undefined ? "" : contextFingerprint(record0),
       at: now(),
+      // Derived from the clamp signature, never from the endpoint's own words —
+      // so it stays behind the `declared x 4` valve.
+      source: "inferred",
     };
     state.probes = {
       ...state.probes,

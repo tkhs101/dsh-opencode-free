@@ -2192,9 +2192,12 @@ test('GUARD: a measured context window is used, and a changed declaration discar
       .candidates.find((m) => m.id === id).contextWindow;
   };
 
-  // Capped at declared x 4 — the clamp's own safety valve — which is already 4x
-  // the declaration and lands below the upstream's own statement.
-  assert.equal(window('mimo-v2.6-flash-free', 200000), 800000, 'the measured window replaces the stale declaration');
+  // The endpoint STATED this limit about itself, so it is bounded only by the
+  // absolute ceiling — not by the `declared x 4` valve, which exists to stop an
+  // INFERRED raise from retiring capability on a healthy model. Measured
+  // 2026-10-07: the plugin was advertising 800000 where the endpoint says
+  // 1048576, withholding 248K of real context.
+  assert.equal(window('mimo-v2.6-flash-free', 200000), 1048576, 'the stated window replaces the stale declaration');
   assert.equal(window('ling-3.1-flash-free', 262144), 262144, 'a model with no measurement keeps its declaration');
   assert.equal(
     window('mimo-v2.6-flash-free', 400000),
@@ -2258,6 +2261,33 @@ test('GUARD: a round counts models, and a row reports what it learned about one'
     assert.equal(row.status, 'failed');
     assert.equal(row.code, 'quota-exhausted', 'a red row still carries why');
   })
+})
+
+test('GUARD: an inferred raise is still held to declared x 4, a stated one is not', async () => {
+  // Two evidence strengths, two ceilings. The clamp signature also fires on a
+  // HEALTHY model whose context is genuinely full, so an inferred raise must stay
+  // behind a valve; a number the endpoint stated about itself must not be clipped
+  // by a valve built for a different kind of evidence.
+  const withLimits = (context) => ({
+    id: 'x',
+    reasoning: true,
+    cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+    limit: { context, output: 32000 },
+  });
+  const measured = (raisedTo, source) => ({
+    raisedTo,
+    fp: contextFingerprint(withLimits(200000)),
+    at: 0,
+    ...(source === undefined ? {} : { source }),
+  });
+  assert.equal(contextWindowFor(withLimits(200000), measured(1048576, 'measured')), 1048576, 'stated: only the ceiling bounds it');
+  assert.equal(contextWindowFor(withLimits(200000), measured(1048576, 'inferred')), 800000, 'inferred: declared x 4 still applies');
+  assert.equal(contextWindowFor(withLimits(200000), measured(1048576)), 800000, 'a record with no source reads as inferred');
+  assert.equal(
+    contextWindowFor(withLimits(200000), measured(9_000_000, 'measured')),
+    1048576,
+    'even a stated value cannot exceed the absolute ceiling',
+  );
 })
 
 test('GUARD: a verdict is visible in the same round that confirms it', async () => {
