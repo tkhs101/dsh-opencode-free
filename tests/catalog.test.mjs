@@ -43,6 +43,9 @@ import {
   effortVerdictFresh,
   EFFORT_READING,
   EFFORT_TTL_MS,
+  EFFORT_SAMPLES,
+  EFFORT_CANDIDATE_SAMPLES,
+  MANUAL_SAMPLE_BUDGET,
   reachAllowsAttempt,
   nextReachAttempt,
   UNREACHABLE_BACKOFF_MS,
@@ -1298,6 +1301,11 @@ function catalogWith({
   probe,
   listZenIds,
   hidden,
+  // Pinned to one: most of what is under test here is the round's SAMPLING
+  // (a verdict costs several samples, a refusal moves the question, a dead
+  // verdict is final), and a budget-sized probe bill per click would drown it.
+  // The budget itself is exercised by its own test.
+  manualSampleBudget = 1,
 } = {}) {
   return createCatalog({
     template: template(),
@@ -1310,6 +1318,7 @@ function catalogWith({
     ...(probe === undefined ? {} : { probe }),
     ...(listZenIds === undefined ? {} : { listZenIds }),
     ...(hidden === undefined ? {} : { hidden }),
+    manualSampleBudget,
   })
 }
 
@@ -1597,6 +1606,11 @@ function pastProbeFloor(clock) {
   clock.t += PROBE_FLOOR_MS + 1_000
 }
 
+/** A free model whose record matches the shape of mimo-v2.6-flash-free. */
+function mimoRecord() {
+  return { ...modelsDict()['space-bunny-free'], id: 'mimo-v2.6-flash-free', name: 'Mimo V2.6 Flash Free' }
+}
+
 /** The persisted verdict record for one model, read back off disk. */
 async function readProbeRecord(path, id) {
   const cache = JSON.parse(await readFile(path, 'utf8'))
@@ -1872,6 +1886,97 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
     await catalog.forceRefresh();
     const model = catalog.current().models.find((m) => m.id === 'mimo-v2.6-flash-free');
     assert.equal(model?.thinkingLevelMap?.off, 'none', 'so it gets the Off row the measurement always supported');
+  })
+})
+
+test('GUARD: one manual click can finish a measurement, not just start one', async () => {
+  // A round used to spend exactly one request per model. A verdict needs three
+  // baseline samples plus five candidate ones (median first, then three agreeing
+  // judgements), so a click could never change a capability row — the user saw a
+  // completed round and an unchanged picker, with no way to tell progress from
+  // failure. Measured 2026-10-06 on the live deployment: one round left every
+  // model holding a single baseline sample.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'mimo-v2.6-flash-free': mimoRecord() }) }),
+      // Measured 2026-10-06: mimo-v2.6-flash-free reasons 37 when omitted, 0 under
+      // `none` — an exact off.
+      probe: async (_model, question) => {
+        asked.push(question);
+        return {
+          kind: 'ok',
+          api: 'openai-completions',
+          effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens: question === 'baseline' ? 37 : 0 },
+        };
+      },
+      listZenIds: async () => ['mimo-v2.6-flash-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    assert.equal(asked.filter((q) => q === 'baseline').length, EFFORT_SAMPLES, 'the baseline is sampled to a median');
+    assert.equal(
+      asked.filter((q) => q === 'none').length,
+      EFFORT_CANDIDATE_SAMPLES,
+      'and the candidate to the first three agreeing judgements',
+    );
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'mimo-v2.6-flash-free');
+    assert.equal(record.effort?.kind, 'none-works');
+    assert.ok(typeof record.effortFrozenAt === 'number', 'confirmed and frozen inside the one click');
+    assert.ok(asked.length <= MANUAL_SAMPLE_BUDGET, 'and the budget was never exceeded');
+
+    // A second click must not re-measure a model that already has its answer.
+    asked.length = 0;
+    clock.t += 25 * 60 * 60_000;
+    await catalog.forceProbes();
+    assert.deepEqual(
+      [...new Set(asked)],
+      ['settled'],
+      'a settled model is asked for liveness only — no further sample of that axis',
+    );
+  })
+
+  // The budget is a CEILING, not a bill: a model whose `none` is refused falls
+  // back to its own lowest level and stops as soon as that level is confirmed.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async (_model, question) => {
+        asked.push(question);
+        if (question === 'none') {
+          return { kind: 'inconclusive', code: 'unknown', http: 400, reason: 'invalid request（HTTP 400）' };
+        }
+        const tokens = question === 'baseline' ? 40 : 6;
+        return {
+          kind: 'ok',
+          api: 'openai-completions',
+          effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens },
+        };
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free')
+    assert.equal(record.effort?.kind, 'level-works');
+    assert.equal(record.effort?.level, 'low', 'the fallback level, not the one that was refused');
+    // The refusal detour is exactly what the extra `EFFORT_FALLBACK_AFTER` in the
+    // budget pays for; the first block above is the other side of the same
+    // contract — a model that answers early is not billed the ceiling.
+    assert.ok(asked.length <= MANUAL_SAMPLE_BUDGET, `the budget is a ceiling (asked ${asked.length})`);
   })
 })
 

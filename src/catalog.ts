@@ -57,6 +57,7 @@ export const DEFAULT_TTL_MS = 86_400_000;
  */
 export const FORCED_PROBE_MIN_INTERVAL_MS = 5 * 60_000;
 
+
 export const CATALOG_TTL_ACTIVE_MS = 6 * 60 * 60_000;
 /**
  * How long a Zen availability answer is trusted before it is re-asked.
@@ -284,6 +285,7 @@ export function nextReachAttempt(record: ReachRecord | undefined, now: number): 
 
 export const EFFORT_CONCORDANCE = 3;
 
+
 /** The recent samples a verdict is judged against, oldest first. */
 export type EffortSamples = readonly MeasuredEffort["kind"][];
 
@@ -335,6 +337,34 @@ export const EFFORT_FALLBACK_AFTER = 1;
 
 /** Samples per side before a verdict is drawn. A median needs more than one. */
 export const EFFORT_SAMPLES = 3;
+/**
+ * How many candidate samples a verdict costs before it can be persisted.
+ *
+ * Not `EFFORT_CONCORDANCE`: a candidate verdict only exists once
+ * `EFFORT_SAMPLES` samples have been judged against the model's own baseline
+ * (the median, not a per-sample test), and then `EFFORT_CONCORDANCE` of those
+ * verdicts must agree. Replay 2026-10-06: five candidate samples are consumed
+ * before a model confirms — samples 1 and 2 cannot be judged at all, and 3, 4
+ * and 5 are the first three verdicts.
+ */
+export const EFFORT_CANDIDATE_SAMPLES = EFFORT_SAMPLES + EFFORT_CONCORDANCE - 1;
+/**
+ * Requests one model may cost inside a single MANUAL round.
+ *
+ * The daily round keeps one request per model: nobody asked for it, and it spends
+ * the same bucket. A manual round is the user saying "measure these now", and one
+ * request left every model one sample short of a median — a completed round, an
+ * unchanged picker, and no way to tell progress from failure.
+ *
+ * Sized from the evidence thresholds rather than guessed: three baseline samples
+ * (a median needs more than one), one refusal (`EFFORT_FALLBACK_AFTER` is what
+ * moves a model off `none` onto its own lowest level), and five candidate ones at
+ * that level (the first two cannot be judged, and three judged verdicts must
+ * agree). `effortMeasurementPending` stops the loop the moment a model has its
+ * answer, so this is a CEILING, not a bill — a model whose `none` is the answer
+ * spends eight, and one whose `none` is refused spends the ninth on the fallback.
+ */
+export const MANUAL_SAMPLE_BUDGET = EFFORT_SAMPLES + EFFORT_FALLBACK_AFTER + EFFORT_CANDIDATE_SAMPLES;
 
 /**
  * Which spelling to ask about next.
@@ -393,6 +423,30 @@ export function effortVerdictFresh(
   if (effort.fp !== fingerprint) return false;
   if (record?.effortFrozenAt === undefined) return false;
   return now - record.effortFrozenAt < EFFORT_TTL_MS;
+}
+
+/**
+ * Whether one more request would still teach this round something.
+ *
+ * The round asks a model the same question until the axis has an answer, not
+ * until a round ends: a round that spent one request per model left every model
+ * one sample short of a median, so a manual click could not change a capability
+ * row at all — the user saw a completed round and an unchanged picker.
+ *
+ * This is the loop condition, and it is derived from the evidence thresholds
+ * rather than a hard-coded count, so it stays correct when those move.
+ */
+export function effortMeasurementPending(
+  model: Model<Api>,
+  record: ProbeRecord | undefined,
+  question: EffortQuestion,
+): boolean {
+  // No Off axis to measure: a non-reasoning model has no map, so no sample of
+  // its effort could ever change what the user is offered.
+  if (!model.reasoning || model.thinkingLevelMap === undefined) return false;
+  if (question === "settled") return false;
+  if (question === "baseline") return (record?.effortBaselineTokens?.length ?? 0) < EFFORT_SAMPLES;
+  return (record?.effortTokens?.length ?? 0) < EFFORT_CANDIDATE_SAMPLES;
 }
 
 export function nextEffortQuestion(
@@ -1450,6 +1504,14 @@ export interface CreateCatalogOptions {
    */
   readonly listZenIds?: (() => Promise<readonly string[] | null>) | undefined;
   /**
+   * Requests one model may cost inside a MANUAL round.
+   *
+   * A knob rather than a constant so tests can pin it to one and exercise the
+   * round's sampling logic without a budget-sized probe bill per click; the
+   * shipped default is {@link MANUAL_SAMPLE_BUDGET}. Nothing in the host sets it.
+   */
+  readonly manualSampleBudget?: number | undefined;
+  /**
    * Is this model switched OFF in the picker? A round asks only about the
    * models the user has on: a probe costs a request from a bucket shared by
    * everything behind this egress, so spending one on a model that is hidden
@@ -1673,6 +1735,14 @@ export interface Catalog {
   runProbes(): Promise<void>;
   /** Ignores the daily gate; used by the panel button (D8). */
   forceProbes(): Promise<ProbeStart>;
+  /**
+   * Requests one model may cost inside a MANUAL round.
+   *
+   * A knob rather than a constant so tests can pin it to one and exercise the
+   * round's sampling logic without spending a budget per click; the shipped
+   * default is {@link MANUAL_SAMPLE_BUDGET}. Nothing in the host sets it.
+   */
+  readonly manualSampleBudget?: number | undefined;
   /** `null` means Zen failed: keep the current gate rather than narrowing. */
   applyZenGate(ids: readonly string[] | null): void;
   /**
@@ -2178,9 +2248,9 @@ function runSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
   return state.inflight;
 }
 
-function runProbeSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
+function runProbeSingle(state: CatalogState, deps: CatalogDeps, samplesPerModel = 1): Promise<void> {
   if (state.probeInflight !== null) return state.probeInflight;
-  state.probeInflight = runProbeRound(state, deps).finally(() => {
+  state.probeInflight = runProbeRound(state, deps, samplesPerModel).finally(() => {
     state.probeInflight = null;
   });
   return state.probeInflight;
@@ -2210,7 +2280,12 @@ function harvestSelfReport(state: CatalogState, id: string, outcome: ProbeResult
   };
 }
 
-export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Promise<void> {
+export async function runProbeRound(
+  state: CatalogState,
+  deps: CatalogDeps,
+  /** Requests per model this round may spend. See {@link MANUAL_SAMPLE_BUDGET}. */
+  samplesPerModel = 1,
+): Promise<void> {
   const { path, hidden, probe } = deps;
   // The raw models.dev record behind a derived model, so an effort measurement
   // is fingerprinted against what it is actually ABOUT. Absent before the first
@@ -2283,6 +2358,12 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
   }
   try {
     for (const model of targets) {
+      // A model is asked until this axis has an answer, not until the round
+      // ends. Every `continue` below leaves the SHOT loop, which is what it has
+      // always meant: this model is done for this round. The budget is the only
+      // hard stop, and `effortMeasurementPending` is what stops it early — so the
+      // cost follows the evidence rather than the calendar.
+      for (let shot = 1; shot <= samplesPerModel; shot += 1) {
       state.probeRun.current = model.id;
       const started = deps.now();
       let outcome: ProbeResult;
@@ -2311,7 +2392,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
           http: 0,
         };
         state.probeRun.done += 1;
-        continue;
+        break;
       }
       // The row badge reports whether the model ANSWERED, not what the
       // verdict was: `dead` removes the model from the list, but from this
@@ -2350,13 +2431,13 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // change set exists to remove. The cadence lives beside the verdicts.
         state.reach = { ...state.reach, [model.id]: nextReachAttempt(state.reach[model.id], deps.now()) };
         harvestSelfReport(state, model.id, outcome);
-        continue;
+        break;
       }
       if (outcome.kind !== "ok" && outcome.kind !== "dead" && !spellingRefused) {
         untrusted = true;
         state.reach = { ...state.reach, [model.id]: nextReachAttempt(state.reach[model.id], deps.now()) };
         harvestSelfReport(state, model.id, outcome);
-        continue;
+        break;
       }
       const prior = state.probes[model.id];
       // A refusal carries no usage and no channel of its own, but it was still
@@ -2512,6 +2593,16 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
           : {}),
       };
       state.probes[model.id] = next;
+      // Another shot only while this axis still has no answer. A round that
+      // concluded nothing at all left the shot loop above, so this cannot turn a
+      // failing model into a quota drain.
+      const raw = rawById(model.id);
+      const pending = effortMeasurementPending(
+        model,
+        next,
+        nextEffortQuestion(next, raw === undefined ? "minimal" : fallbackLevelFor({ ...raw, id: model.id })),
+      );
+      if (!pending) break;
       // Applied HERE, not when the round ends. A row is painted the moment its
       // verdict lands, so a model shown as working must already be routed the
       // way it worked — waiting for the last model to finish left a visibly
@@ -2534,6 +2625,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
           state.reach = rest;
         }
       }
+      } // shot loop
     }
   } finally {
     state.probeRun.running = false;
@@ -2788,6 +2880,8 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       if (probe === undefined) return;
       if (state.probeInflight !== null) return state.probeInflight;
       if (probedToday(state.lastProbeAt, now)) return;
+      // One request per model: nobody asked for this round, and it spends the
+      // same shared bucket a manual one does.
       return runProbeSingle(state, deps);
     },
     async forceProbes(): Promise<ProbeStart> {
@@ -2805,7 +2899,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       // no word about why.
       const wait = FORCED_PROBE_MIN_INTERVAL_MS - (now() - state.lastProbeAt);
       if (wait > 0) return { started: false, reason: "cooldown", retryAfterMs: wait };
-      await runProbeSingle(state, deps);
+      await runProbeSingle(state, deps, options.manualSampleBudget ?? MANUAL_SAMPLE_BUDGET);
       return { started: true };
     },
     probeProgress(): ProbeProgress {
