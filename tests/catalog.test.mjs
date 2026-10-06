@@ -1890,6 +1890,44 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
   })
 })
 
+test('GUARD: a route that reports no reasoning stops being asked, not asked for ever', async () => {
+  // `fledge-alpha-free` sends no `completion_tokens_details` (ADR 0004 §33), so
+  // its baseline reads 0 — and the ratio test is `candidate < 0.43 × baseline`,
+  // where nothing is below 0.43 × 0. The axis is structurally undecidable: no
+  // verdict is reachable, so every round spent its whole budget on a question
+  // that cannot land. Live 2026-10-06: base [0,0,0], cand [0,0,0,0,0], nothing.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const fledge = { ...modelsDict()['muse-spark-1.3-contributor-free'], id: 'fledge-alpha-free', name: 'Fledge Alpha Free' }
+    let asked = 0
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'fledge-alpha-free': fledge }) }),
+      probe: async () => {
+        asked += 1;
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };
+      },
+      listZenIds: async () => ['fledge-alpha-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    assert.ok(asked <= EFFORT_SAMPLES, `the baseline is sampled, then the axis is given up on (asked ${asked})`);
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'fledge-alpha-free');
+    assert.deepEqual(record.effortBaselineTokens, [0, 0, 0]);
+    assert.equal(record.effort, undefined, 'nothing is claimed about a model we cannot measure');
+
+    // And a second click does not spend the budget again on the same question.
+    asked = 0;
+    clock.t += 25 * 60 * 60_000;
+    await catalog.runProbes();
+    assert.equal(asked, 1, 'later rounds pay one liveness request, not a budget');
+  })
+})
+
 test('GUARD: a measured context window is used, and a changed declaration discards it', async () => {
   // models.dev under-reports `limit.context` and says nothing about it.
   // Measured 2026-10-06: mimo-v2.6-flash-free and mimo-v2.5-free both declare

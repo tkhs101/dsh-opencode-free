@@ -446,6 +446,14 @@ export function effortMeasurementPending(
   if (!model.reasoning || model.thinkingLevelMap === undefined) return false;
   if (question === "settled") return false;
   if (question === "baseline") return (record?.effortBaselineTokens?.length ?? 0) < EFFORT_SAMPLES;
+  // A baseline of zero makes the whole axis STRUCTURALLY undecidable: the ratio
+  // test is `candidate < 0.43 × baseline`, and nothing is below 0.43 × 0. So no
+  // verdict is reachable — not "works", not "noop" — and without this guard every
+  // round spent its whole budget asking a question whose answer cannot land.
+  //
+  // Measured 2026-10-06: `fledge-alpha-free` sends no `completion_tokens_details`
+  // at all (ADR 0004 §33), so its baseline reads 0 and stayed 0 forever.
+  if (median(record?.effortBaselineTokens ?? []) === 0) return false;
   return (record?.effortTokens?.length ?? 0) < EFFORT_CANDIDATE_SAMPLES;
 }
 
