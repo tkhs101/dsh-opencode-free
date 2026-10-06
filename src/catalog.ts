@@ -2438,7 +2438,23 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       // way it worked — waiting for the last model to finish left a visibly
       // successful model still going down the channel the probe had just ruled
       // out. The cache write stays once per round.
-      if (outcome.kind === "ok") applyMeasuredChannel(state.models, state.probes);
+      if (outcome.kind === "ok") {
+        applyMeasuredChannel(state.models, state.probes);
+        // An answer clears the cadence: whatever was wrong with reaching this
+        // model is not wrong now, so the next round must not wait. The comment
+        // above used to make exactly this promise with no code behind it — the
+        // tally was kept, the cadence never was.
+        //
+        // The cost of that gap is a counter that only climbs. `nextReachAttempt`
+        // reads the miss count to pick its step, so one bad stretch early in a
+        // process ratcheted a model into the seven-day step permanently: after
+        // two misses and one success, the very NEXT failure cost a week instead
+        // of six hours, and nothing about the model had changed to justify it.
+        if (state.reach[model.id] !== undefined) {
+          const { [model.id]: _answered, ...rest } = state.reach;
+          state.reach = rest;
+        }
+      }
     }
   } finally {
     state.probeRun.running = false;

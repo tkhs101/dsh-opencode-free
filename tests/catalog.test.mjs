@@ -1808,6 +1808,47 @@ test('GUARD: three refusals of the same spelling end at no Off row, never a wron
   })
 })
 
+test('GUARD: an answer resets the ask-again cadence', async () => {
+  // `UNREACHABLE_BACKOFF_MS` is indexed by the miss count, so a counter that only
+  // climbs is a one-way ratchet: two failures and one recovery used to leave the
+  // model in the seven-day step, so its NEXT failure cost a week rather than six
+  // hours, with nothing about the model having changed to justify it. The comment
+  // in the round promised the opposite ("An answer clears the cadence") and no
+  // code did it.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const HOUR = 60 * 60_000
+    // 429, 429, ok, 429 — then six hours later the model must be asked again.
+    const answers = [429, 429, 200, 429]
+    let call = 0
+    const rounds = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async () => {
+        const status = answers[call++] ?? 429;
+        rounds.push(status);
+        return status === 429
+          ? { kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' }
+          : { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 40 } };
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    })
+    await catalog.forceRefresh()
+    const asked = []
+    // t0 (429) -> +6h (429) -> +24h (ok) -> +6min (429) -> +6h (must be asked).
+    for (const step of [0, 6 * HOUR, 24 * HOUR, 6 * 60_000, 6 * HOUR]) {
+      clock.t += step;
+      pastProbeFloor(clock);
+      rounds.length = 0;
+      await catalog.forceProbes();
+      asked.push(rounds.length);
+    }
+    assert.deepEqual(asked, [1, 1, 1, 1, 1], 'every round asks the model, including the last one after it recovered');
+  })
+})
+
 test('GUARD: a confirmed verdict names the level the probe actually asked', async () => {
   // The round derived the question TWICE: once to send it (with the model's own
   // lowest published level as the fallback) and once to label the verdict (with
