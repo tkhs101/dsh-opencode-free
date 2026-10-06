@@ -30,6 +30,9 @@ import {
   modelCapability,
   readCache,
   thinkingLevelMapFor,
+  measuredEffortMap,
+  reasoningFingerprint,
+  isMeasuredEffort,
   topThinkingLevel,
   unknownFree,
   writeCacheAtomic,
@@ -62,6 +65,7 @@ const modelsDict = () => ({
   'ling-3.0-flash-fin-free': {
     id: 'ling-3.0-flash-fin-free',
     name: 'Ling 3.0 Flash Fin Free',
+    reasoning: true,
     reasoning_options: [{ type: 'toggle' }],
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
   },
@@ -69,7 +73,9 @@ const modelsDict = () => ({
   'muse-spark-1.3-contributor-free': {
     id: 'muse-spark-1.3-contributor-free',
     name: 'Muse Spark 1.3 Free',
+    reasoning: true,
     reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }],
+    modalities: { input: ['text', 'image', 'video', 'pdf', 'audio'], output: ['text'] },
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
     limit: { context: 1048576, output: 32768 },
   },
@@ -77,13 +83,16 @@ const modelsDict = () => ({
   'muse-spark-1.2-contributor-free': {
     id: 'muse-spark-1.2-contributor-free',
     name: 'Muse Spark 1.2 Free',
+    reasoning: true,
     status: 'deprecated',
     reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }],
+    modalities: { input: ['text', 'image', 'video', 'pdf', 'audio'], output: ['text'] },
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
   },
   'deepseek-v4-flash-free': {
     id: 'deepseek-v4-flash-free',
     name: 'DeepSeek V4 Flash Free',
+    reasoning: true,
     status: 'deprecated',
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
     limit: { context: 200000, output: 128000 },
@@ -303,15 +312,18 @@ test('channelFor defaults to completions (opencode is openai-compatible)', () =>
 const { getSupportedThinkingLevels, clampThinkingLevel } = await import('@earendil-works/pi-ai')
 
 test('thinkingLevelMapFor maps the published effort levels and nulls the rest', () => {
-  // space-bunny-free, real record 2026-09-29. `off` stays absent (offered):
-  // the placeholder effort that would otherwise reach the wire is stripped by
-  // the plugin's onPayload guard instead (see the GUARD test in
-  // compatibility.test.mjs).
+  // space-bunny-free, real record 2026-09-29. `off` is NULL for an unmeasured
+  // declared ladder: measured 2026-10-06, `reasoning_effort:"none"` answers
+  // HTTP 400 there, and an empty effort list is what the host renders as its
+  // provider-default row — which already means "send nothing". Offering `off`
+  // anyway produced a row that lied about stopping a model nothing could stop.
   assert.deepEqual(
-    thinkingLevelMapFor({
-      reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] }],
-    }),
+    thinkingLevelMapFor(
+      { reasoning: true, reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] }] },
+      'openai-completions',
+    ),
     {
+      off: null,
       minimal: null,
       low: 'low',
       medium: 'medium',
@@ -322,88 +334,249 @@ test('thinkingLevelMapFor maps the published effort levels and nulls the rest', 
   )
   // muse-spark, real record: no `max`, so it must not be offered.
   assert.deepEqual(
-    thinkingLevelMapFor({
-      reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }],
-    }),
+    thinkingLevelMapFor(
+      { reasoning: true, reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }] },
+      'openai-responses',
+    ),
     {
+      off: null,
       minimal: 'minimal',
       low: 'low',
       medium: 'medium',
       high: 'high',
       xhigh: 'xhigh',
+      max: null,
     },
   )
-  // Off is never claimed either way: it means "send no reasoning parameter".
+  // `off` is always PRESENT as a key now, and null for an unmeasured ladder.
+  // "Not measured" and "measured to work" are different answers, and conflating
+  // them is what made an absent key read as permission.
   assert.equal(
-    Object.prototype.hasOwnProperty.call(
-      thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['low'] }] }),
-      'off',
-    ),
-    false,
+    thinkingLevelMapFor({ reasoning: true, reasoning_options: [{ type: 'effort', values: ['low'] }] }, 'openai-completions').off,
+    null,
   )
 })
 
-test('thinkingLevelMapFor claims nothing when models.dev publishes no levels', () => {
-  // A `toggle` model is reasoning on/off and pi-ai has no name for bare "on";
-  // guessing would offer levels upstream rejects, which the host reports as
-  // UNSUPPORTED_REASONING_EFFORT rather than clamping.
-  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'toggle' }] }), undefined)
-  assert.equal(thinkingLevelMapFor({ reasoning_options: [] }), undefined)
-  assert.equal(thinkingLevelMapFor({ reasoning_options: undefined }), undefined)
-  assert.equal(thinkingLevelMapFor({ reasoning_options: 'nonsense' }), undefined)
-  // An effort option with no usable level names is not a level list.
-  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort' }] }), undefined)
-  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: [] }] }), undefined)
-  assert.equal(
-    thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['turbo', 7, null] }] }),
-    undefined,
+test('thinkingLevelMapFor always returns a map for a reasoning model', () => {
+  // The original regression: `undefined` is NOT "no claim" — pi-ai reads an
+  // absent map as "offer everything". Measured 2026-10-06, that had seven of the
+  // ten live models offering four levels models.dev publishes nothing for.
+  for (const record of [
+    { reasoning: true, reasoning_options: [{ type: 'toggle' }] },
+    { reasoning: true, reasoning_options: [] },
+    { reasoning: true, reasoning_options: undefined },
+    { reasoning: true, reasoning_options: 'nonsense' },
+    { reasoning: true, reasoning_options: [{ type: 'effort' }] },
+    { reasoning: true, reasoning_options: [{ type: 'effort', values: [] }] },
+    { reasoning: true, reasoning_options: [{ type: 'effort', values: ['turbo', 7, null] }] },
+    { reasoning: true, reasoning_options: [{ type: 'effort', values: ['turbo'] }] },
+  ]) {
+    const map = thinkingLevelMapFor(record, 'openai-completions')
+    assert.equal(typeof map, 'object', `expected a map for ${JSON.stringify(record)}`)
+    assert.notEqual(map, null)
+    // Nothing unmeasured may claim an off the model was never shown to accept.
+    assert.equal(map.off, null, 'an unmeasured record claims no off value')
+  }
+  // A non-reasoning model is the ONE case that produces no map at all:
+  // `getSupportedThinkingLevels` already answers ["off"] on its own.
+  assert.equal(thinkingLevelMapFor({ reasoning: false, reasoning_options: [] }, 'openai-completions'), undefined)
+})
+
+test('INVARIANT: no string outside {published, "none"} lands in a map', () => {
+  // The "off"-is-a-400 guard. A string value is exactly what makes pi-ai emit
+  // `reasoning_effort`, and "off" is not in Zen's validated set
+  // (minimal|low|medium|high|xhigh|max|none).
+  const known = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  const records = [
+    { reasoning: true, reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] }] },
+    { reasoning: true, reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }] },
+    { reasoning: true, reasoning_options: [{ type: 'effort', values: ['none', 'high'] }] },
+    { reasoning: true, reasoning_options: [{ type: 'toggle' }] },
+    { reasoning: true, reasoning_options: [] },
+  ]
+  for (const record of records) {
+    const map = thinkingLevelMapFor(record, 'openai-completions')
+    for (const value of Object.values(map)) {
+      if (typeof value !== 'string') continue
+      assert.ok(value === 'none' || known.has(value), `unexpected map value ${value}`)
+    }
+  }
+  // A measured level-works value IS a known level name, by construction.
+  const measured = thinkingLevelMapFor(
+    { reasoning: true, reasoning_options: [{ type: 'toggle' }] },
+    'openai-completions',
+    { kind: 'level-works', level: 'minimal', fp: 'x', api: 'openai-completions', at: 0 },
   )
-  // Levels pi-ai does not know cannot be expressed, so a list of only those
-  // makes no claim rather than producing an empty map.
-  assert.equal(thinkingLevelMapFor({ reasoning_options: [{ type: 'effort', values: ['turbo'] }] }), undefined)
+  assert.equal(measured.off, 'minimal')
 })
 
 test('the levels a host offers follow models.dev, per model', () => {
-  // The map the record produces, read back through pi-ai's own filter.
-  // `off` is absent from every produced map, which is what keeps it offered —
-  // the wire shape it would otherwise produce is guarded in zen-provider.ts.
-  const of = (id) =>
+  // The map the record produces, read back through pi-ai's own filter. An
+  // unmeasured model offers no `off`: measured 2026-10-06, offering it produced
+  // a row that either sent nothing (model kept reasoning) or was refused with a
+  // 400 — never what the label said.
+  const of = (id, measured) =>
     getSupportedThinkingLevels({
       id,
       reasoning: true,
-      thinkingLevelMap: thinkingLevelMapFor(modelsDict()[id]),
+      thinkingLevelMap: thinkingLevelMapFor(modelsDict()[id], 'openai-completions', measured),
     })
-  assert.deepEqual(of('space-bunny-free'), ['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(of('space-bunny-free'), ['low', 'medium', 'high', 'xhigh', 'max'])
   assert.deepEqual(of('muse-spark-1.3-contributor-free'), [
-    'off',
     'minimal',
     'low',
     'medium',
     'high',
     'xhigh',
   ])
-  // No published list: pi-ai's default set, unchanged from before this work.
-  assert.deepEqual(of('big-pickle'), ['off', 'minimal', 'low', 'medium', 'high'])
-  assert.deepEqual(of('ling-3.0-flash-fin-free'), ['off', 'minimal', 'low', 'medium', 'high'])
+  // No published list and no measurement: nothing is claimed, so the host
+  // renders its provider-default row alone.
+  assert.deepEqual(of('big-pickle'), [])
+  assert.deepEqual(of('ling-3.0-flash-fin-free'), [])
   // The derived records themselves carry the same maps.
   const derived = derive(modelsDict(), { template: template(), knownApis: new Map() })
   const spark = derived.candidates.find((m) => m.id === 'muse-spark-1.3-contributor-free')
-  assert.deepEqual(getSupportedThinkingLevels(spark), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+  assert.deepEqual(getSupportedThinkingLevels(spark), ['minimal', 'low', 'medium', 'high', 'xhigh'])
 })
 
-test('GUARD: "off" is offered but never reaches the wire', () => {
-  // pi-ai's responses transport renders an unoffered default as
-  // `reasoning: { effort: "none" }` and an explicit "off" as `effort: "off"` —
-  // two values neither pi-ai's own builtin records nor OpenCode ever send.
-  // Keeping "off" offered is only safe because the plugin's onPayload guard
-  // strips exactly those placeholders (see compatibility.test.mjs); this pins
-  // the precondition that makes the guard necessary.
-  const spark = derive(modelsDict(), { template: template(), knownApis: new Map() }).candidates.find(
-    (m) => m.id === 'muse-spark-1.3-contributor-free',
-  )
-  assert.equal(getSupportedThinkingLevels(spark).includes('off'), true, 'off is offered')
-  assert.equal(Object.prototype.hasOwnProperty.call(spark.thinkingLevelMap ?? {}, 'off'), false)
+test('a measurement is applied only when its fingerprint and channel still match', () => {
+  // An effort measurement is OF a claim. If models.dev revised `reasoning_options`
+  // the answer is about a question no longer being asked, and applying it would
+  // widen what is offered on the strength of a stale vote.
+  const section = {
+    'q-free': {
+      id: 'q-free',
+      name: 'Q',
+      reasoning: true,
+      reasoning_options: [{ type: 'toggle' }],
+      cost: { input: 0, output: 0 },
+    },
+  }
+  const tpl = template()
+  const fp = reasoningFingerprint(section['q-free'])
+  const [model] = derive(section, { template: tpl, knownApis: new Map() }).candidates
+  const probes = {
+    'q-free': { verdict: 'ok', at: 1, effort: { kind: 'none-works', fp, api: 'openai-completions', at: 1 } },
+  }
+  // Matching: the measurement is adopted.
+  const map = measuredEffortMap([model], section, probes)
+  assert.equal(map.get('q-free')?.kind, 'none-works')
+
+  // Stale fingerprint: dropped, leaving the map unmeasured — which offers no off.
+  const revised = { 'q-free': { ...section['q-free'], reasoning_options: [{ type: 'effort', values: ['low'] }] } }
+  assert.equal(measuredEffortMap([model], revised, probes).size, 0)
+
+  // Wrong channel: dropped. Off is `reasoning_effort` on completions and
+  // `reasoning.effort` on responses, so a measurement of one is evidence about
+  // the other only by coincidence.
+  const responsesProbes = {
+    'q-free': { verdict: 'ok', at: 1, effort: { kind: 'none-works', fp, api: 'openai-responses', at: 1 } },
+  }
+  assert.equal(measuredEffortMap([model], section, responsesProbes).size, 0)
+
+  // Absent evidence is not a claim either way.
+  assert.equal(measuredEffortMap([model], section, {}).size, 0)
 })
+
+test('reasoningFingerprint moves only for its own axis', () => {
+  const base = { reasoning: true, reasoning_options: [{ type: 'effort', values: ['low'] }], limit: { context: 1, output: 1 } }
+  const original = reasoningFingerprint(base)
+  assert.equal(reasoningFingerprint({ ...base, limit: { context: 999, output: 5 } }), original, 'limits do not move it')
+  assert.notEqual(reasoningFingerprint({ ...base, reasoning_options: [{ type: 'effort', values: ['low', 'high'] }] }), original)
+  assert.notEqual(reasoningFingerprint({ ...base, reasoning: false }), original)
+  // A record that publishes no options at all is distinguishable from one that
+  // published an empty list — "described and found nothing" vs "said nothing".
+  assert.notEqual(reasoningFingerprint({ ...base, reasoning_options: [] }), original)
+})
+
+test('a malformed persisted measurement is dropped, not trusted', () => {
+  assert.equal(isMeasuredEffort({ kind: 'none-works', fp: 'f', api: 'openai-completions', at: 1 }), true)
+  assert.equal(
+    isMeasuredEffort({ kind: 'level-works', level: 'minimal', fp: 'f', api: 'openai-responses', at: 1 }),
+    true,
+  )
+  for (const bad of [
+    undefined,
+    null,
+    'none-works',
+    { kind: 'works', fp: 'f', api: 'openai-completions', at: 1 },
+    { kind: 'none-works', fp: 'f', api: 'nonsense-channel', at: 1 },
+    { kind: 'none-works', api: 'openai-completions', at: 1 },
+    { kind: 'level-works', fp: 'f', api: 'openai-completions', at: 1 },
+    { kind: 'level-works', level: 'turbo', fp: 'f', api: 'openai-completions', at: 1 },
+  ]) {
+    assert.equal(isMeasuredEffort(bad), false, `expected ${JSON.stringify(bad)} to be rejected`)
+  }
+})
+
+test('the same fixture shape yields opposite maps from opposite measurements', () => {
+  // The whole reason shape cannot drive this rule. Measured 2026-10-06:
+  // ling-3.1-flash-free (`[toggle]`) took `none` from 32 reasoning tokens to 0,
+  // while longcat-2.5-preview-free (`[toggle]`, the SAME declared shape) stayed
+  // at 71-80 with HTTP 200. Identical metadata, opposite behaviour.
+  const toggle = { reasoning: true, reasoning_options: [{ type: 'toggle' }] }
+  const noneWorks = { kind: 'none-works', fp: 'f', api: 'openai-completions', at: 0 }
+  const noop = { kind: 'noop', fp: 'f', api: 'openai-completions', at: 0 }
+  assert.equal(thinkingLevelMapFor(toggle, 'openai-completions', noneWorks).off, 'none')
+  assert.equal(thinkingLevelMapFor(toggle, 'openai-completions', noop).off, null)
+  // An empty ladder is no more predictive: three of four `[]` models honoured
+  // `none`, big-pickle refused it with a 400.
+  const empty = { reasoning: true, reasoning_options: [] }
+  assert.equal(thinkingLevelMapFor(empty, 'openai-completions', noneWorks).off, 'none')
+  assert.equal(thinkingLevelMapFor(empty, 'openai-completions', { ...noop, kind: 'rejected' }).off, null)
+})
+
+test('CHANNEL GATE: "none" is never applied across channels', () => {
+  // Off is `reasoning_effort` on completions and `reasoning.effort` on responses,
+  // and `none` is REJECTED on the second: measured 2026-10-06,
+  // muse-spark-1.3-contributor-free answers
+  // `reasoning_effort 'none' is not supported ... allowed values: [minimal, low,
+  // medium, high, xhigh, max]`. A measurement of one channel is evidence about
+  // the other only by coincidence, so the mismatch voids it.
+  const record = { reasoning: true, reasoning_options: [{ type: 'toggle' }] }
+  const onCompletions = { kind: 'none-works', fp: 'f', api: 'openai-completions', at: 0 }
+  assert.equal(thinkingLevelMapFor(record, 'openai-completions', onCompletions).off, 'none')
+  assert.equal(thinkingLevelMapFor(record, 'openai-responses', onCompletions).off, null)
+})
+
+test('R1 honours a published off member instead of discarding it as foreign', () => {
+  // north-mini-code-free publishes ["none","high"]. The old membership test
+  // dropped "none" as "not a level", which removed the model's only off member.
+  assert.equal(
+    thinkingLevelMapFor({ reasoning: true, reasoning_options: [{ type: 'effort', values: ['none', 'high'] }] }, 'openai-completions')
+      .off,
+    'none',
+  )
+  // A ladder WITHOUT an off member claims nothing, whatever the channel.
+  assert.equal(
+    thinkingLevelMapFor({ reasoning: true, reasoning_options: [{ type: 'effort', values: ['low', 'high'] }] }, 'openai-responses').off,
+    null,
+  )
+})
+
+test('GUARD: the map, not the guard, decides what Off puts on the wire', () => {
+  // The premise this replaces was "off is always offered and reaching the wire
+  // is always wrong", disproven twice: `none` is measured to stop reasoning on
+  // nemotron-3-ultra-free (49 -> 0) and refused outright on space-bunny-free.
+  // The map is now the single authority; this pins that the two agree.
+  const noneWorks = (record, channel) =>
+    thinkingLevelMapFor(record, channel, { kind: 'none-works', fp: 'f', api: channel, at: 0 })
+  // Where the map says "none", the guard must let it through — see the mirror
+  // test in compatibility.test.mjs for the wire side.
+  assert.equal(noneWorks({ reasoning: true, reasoning_options: [] }, 'openai-completions').off, 'none')
+  // Where it says null, there is no off row at all.
+  const rejected = thinkingLevelMapFor(
+    { reasoning: true, reasoning_options: [{ type: 'toggle' }] },
+    'openai-completions',
+    { kind: 'rejected', fp: 'f', api: 'openai-completions', at: 0 },
+  )
+  assert.equal(rejected.off, null)
+  assert.equal(
+    getSupportedThinkingLevels({ id: 'x', reasoning: true, thinkingLevelMap: rejected }).includes('off'),
+    false,
+  )
+})
+
 
 test('GUARD: the muse-spark xhigh default is no longer silently clamped away', async () => {
   // The plugin asks for `xhigh` on muse-spark (zen-provider streamSimple). With
@@ -436,14 +609,19 @@ test('a derived record carries all four capabilities from models.dev', () => {
   assert.deepEqual(pickle.input, ['text'], 'text-only stays text-only')
   assert.equal(pickle.contextWindow, 200000)
   assert.equal(pickle.maxTokens, 32000)
-  // A record that publishes nothing falls back to the template per field.
+  // A record that publishes NOTHING falls back to the template for the identity
+  // and transport fields, but NOT for capability claims. `input` and `reasoning`
+  // describe what the model can do; inheriting them from another model answers
+  // "models.dev did not say" with "assume the most capable thing we know".
   const bare = derive(
     { 'bare-free': { id: 'bare-free', cost: { input: 0, output: 0 } } },
     { template: template() },
   ).candidates[0]
   assert.equal(bare.contextWindow, template().contextWindow)
   assert.equal(bare.maxTokens, template().maxTokens)
-  assert.deepEqual(bare.input, template().input)
+  assert.deepEqual(bare.input, ['text'], 'an unstated modality claim is not a capability')
+  assert.equal(bare.reasoning, false, 'an unstated reasoning claim is not a capability')
+  assert.notDeepEqual(template().input, bare.input, 'the template would have leaked its own capabilities')
   // The template's level map is never inherited: it belongs to another model.
   assert.equal(bare.thinkingLevelMap, undefined)
 })
@@ -474,13 +652,15 @@ test('modelCapability projects image and top level per record', () => {
     thinking: 'xhigh',
   })
   // Toggle-only and level-less records get no thinking badge. `ling` publishes
-  // neither image input nor levels, so it inherits the template's text+image
-  // input — the fallback pinned by the modalities test above. A badge rendered
-  // from that record is faithful to the record; the record itself is a guess
-  // for undeclared fields, which is what the template is for.
+  // `modalities.input: ["text"]` and `attachment: false`, so it is text-only —
+  // it does NOT inherit the template's text+image. The old fallback answered
+  // "models.dev did not say" with "inherit the most capable thing we know", and
+  // it was not cosmetic: DSH throws UNSUPPORTED_CONTENT on an image for a model
+  // without it, so the inherited claim converts a silent omission into a hard
+  // failure the user cannot act on.
   assert.deepEqual(card('ling-3.0-flash-fin-free'), {
     id: 'ling-3.0-flash-fin-free',
-    image: true,
+    image: false,
     thinking: null,
   })
   assert.deepEqual(card('big-pickle'), { id: 'big-pickle', image: false, thinking: null })
@@ -559,12 +739,19 @@ test('derive maps published limits and falls back per missing field', () => {
   assert.equal(ling.name, 'Ling 3.0 Flash Fin Free')
 })
 
-test('derive keeps only text/image modalities and falls back when none survive', () => {
+test('derive keeps text/image modalities and does NOT inherit the template when none survive', () => {
   const { candidates } = derive(modelsDict(), { template: template() })
   const bunny = candidates.find((m) => m.id === 'space-bunny-free')
   assert.deepEqual(bunny.input, ['text', 'image'], 'audio/video are not pi-ai input kinds')
   const ling = candidates.find((m) => m.id === 'ling-3.0-flash-fin-free')
-  assert.deepEqual(ling.input, ['text', 'image'], 'no modalities -> template input')
+  // The fixture records no `modalities`, so the honest answer is text-only. The
+  // template resolves to mimo-v2.6-flash-free (text+image), and inheriting it
+  // answered "models.dev did not say" with "inherit the most capable thing we
+  // know" — the same error as an undefined level map, one field over.
+  assert.deepEqual(ling.input, ['text'], 'an unstated modality claim is not a capability')
+  // And it is not a cosmetic one: DSH throws UNSUPPORTED_CONTENT on an image for
+  // a model without it, so an inherited claim turns a silent omission into a
+  // hard failure the user cannot act on.
 })
 
 test('derive inherits identity and zeroes cost on every candidate', () => {

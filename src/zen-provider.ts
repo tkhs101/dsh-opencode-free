@@ -1308,19 +1308,33 @@ function compatRequestOptions<T extends StreamOptions>(
     timeoutMs: options?.timeoutMs ?? 180_000,
     maxRetries: options?.maxRetries ?? 2,
     fetch: withEncryptedContentFallback(options?.fetch as FetchFunction | undefined, recorder) as T["fetch"],
-    // "off" is offered as an explicit level (the user asked to keep it), but
-    // pi-ai renders it as `reasoning: { effort: "none" }` by default and as
-    // `effort: "off"` when explicitly chosen on the responses channel — two
-    // values neither pi-ai's own records nor OpenCode ever send. This strips
-    // exactly those placeholders back to "no reasoning object", which is what
-    // OpenCode's "Default" sends. Real levels pass through untouched, and a
-    // caller-provided onPayload runs first so its edits are what get checked.
-    onPayload: (async (payload: unknown, model: never) => {
+    // The map is the single authority on what Off puts on the wire; this mirrors
+    // it rather than deciding alongside it. Two authorities is how the previous
+    // split arose, and the split is what let a silent lie ship: with the old
+    // guard, selecting Off on muse-spark-1.3-contributor-free removed the
+    // reasoning object, upstream accepted the request, and the model reasoned
+    // 360 tokens — the MAXIMUM — with nothing reporting a problem anywhere.
+    // Measured 2026-10-06, `reasoning_effort 'none'` is refused there outright
+    // ("allowed values: [minimal, low, medium, high, xhigh, max]"), so the old
+    // guard was converting a loud refusal into silence.
+    //
+    // `onPayload` receives the model on BOTH channels
+    // (openai-completions.js:188, openai-responses.js:113), so the map is
+    // readable here without a host change.
+    //
+    // The literal "off" remains the only thing stripped: it is pi-ai's
+    // placeholder for an explicitly-chosen Off (openai-responses.js:262) and is
+    // not in Zen's validated set.
+    onPayload: (async (payload: unknown, model: unknown) => {
       let next = payload as Record<string, unknown>;
       if (typeof incomingPayload === "function") {
-        const out = await (incomingPayload as (p: never, m: never) => unknown)(payload as never, model);
+        const out = await (incomingPayload as (p: never, m: never) => unknown)(payload as never, model as never);
         if (out !== undefined) next = out as Record<string, unknown>;
       }
+      const map = (model as { thinkingLevelMap?: Record<string, string | null> } | undefined)?.thinkingLevelMap;
+      // `"none"` is a REAL wire value wherever a measurement said it stops
+      // reasoning; it must survive. Everywhere else it is pi-ai's placeholder.
+      if (map?.off === "none") return next === payload ? undefined : next;
       const reasoning = next?.reasoning;
       if (reasoning !== null && typeof reasoning === "object") {
         const effort = (reasoning as { effort?: unknown }).effort;
