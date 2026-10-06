@@ -101,6 +101,7 @@ window.__ModuleLoader__.load({
 			"reason.anongated": "匿名层被拒",
 			"reason.quota": "额度用尽",
 			"reason.badkey": "key 无效",
+			"reason.endpoint": "上游端点不可达",
 			"reason.overloaded": "上游过载（稍后重试）",
 			"reason.unknown": "无响应",
 			"reason.error": "探测异常",
@@ -160,6 +161,7 @@ window.__ModuleLoader__.load({
 			"reason.anongated": "Anon tier refused",
 			"reason.quota": "Quota used up",
 			"reason.badkey": "Bad key",
+			"reason.endpoint": "Upstream endpoint unreachable",
 			"reason.overloaded": "Upstream overloaded (retry later)",
 			"reason.unknown": "No response",
 			"reason.error": "Probe error",
@@ -673,6 +675,7 @@ window.__ModuleLoader__.load({
 			"quota-exhausted": "reason.quota",
 			"bad-key": "reason.badkey",
 			"upstream-overloaded": "reason.overloaded",
+			"endpoint-unavailable": "reason.endpoint",
 			"unknown": "reason.unknown",
 			"error": "reason.error"
 		};
@@ -694,7 +697,7 @@ window.__ModuleLoader__.load({
 		   is shown INLINE rather than only on hover — three different conditions all
 		   render as "未测到", and a reader who cannot tell them apart cannot tell
 		   whether to wait, reconfigure, or give up. */
-		var CALLER_CODES = { "anon-gated": true, "quota-exhausted": true, "bad-key": true, "upstream-overloaded": true };
+		var CALLER_CODES = { "anon-gated": true, "quota-exhausted": true, "bad-key": true, "upstream-overloaded": true, "endpoint-unavailable": true };
 
 		function failureText(t, result) {
 			var key = typeof result.code === "string" && hasOwnKey(FAILURE_WORDS, result.code)

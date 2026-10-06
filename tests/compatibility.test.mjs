@@ -1378,6 +1378,71 @@ test('GUARD: an overload costs one request, not one per channel', async () => {
   assert.equal(calls, 1, 'the other channel is not asked for the same upstream answer');
 });
 
+test('GUARD: a model the upstream deprecates in words is removed, not retried', async () => {
+  // Measured 2026-10-07: `mimo-v2.5-free` answers
+  //   410 {"type":"ModelDeprecated","message":"… Model mimo-v2.5-free has been
+  //        deprecated. Use mimo-v2.6-flash-free instead."}
+  // on the completions channel, and a bare `Internal server error` 500 on the
+  // other. The 410 was already `dead` — but a SILENT sibling buried it (the
+  // veto is correct for a bare status, which is what a wrong channel produces),
+  // so a model the upstream had explicitly retired sat in the picker as a red
+  // "failure" for ever.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  let calls = 0;
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(
+            '{"type":"error","error":{"type":"ModelDeprecated","message":"Error from provider (Console): Model mimo-v2.5-free has been deprecated. Use mimo-v2.6-flash-free instead."}}',
+            { status: 410, headers: { 'Content-Type': 'application/json' } },
+          )
+        : new Response('{"type":"error","error":{"message":"Internal server error"}}', {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+    },
+  });
+  assert.equal(outcome.kind, 'dead', 'the upstream said it retired the model, in words');
+  assert.equal(outcome.named, true, 'and said so in the body, not only in the status');
+  assert.equal(calls, 2, 'both channels were still asked');
+});
+
+test('GUARD: an unreachable endpoint is a route problem, not a model failure', async () => {
+  // Measured 2026-10-07 on `ling-3.0-flash-fin-free`: HTTP 400,
+  // "Upstream request failed: Endpoint is unavailable." — and then a bare 500 on
+  // the other channel. The panel painted it a red model FAILURE for rounds,
+  // because a 400 says nothing and the sibling's 500 is silence.
+  //
+  // The route being down is not the model's fault, and the other channel will
+  // fail the same way, so asking it again spends a request to learn nothing.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  let calls = 0;
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(
+            '{"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Endpoint is unavailable."}}',
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          )
+        : new Response('{"type":"error","error":{"message":"Internal server error"}}', {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+    },
+  });
+  assert.equal(outcome.code, 'endpoint-unavailable', 'named for what it says');
+  assert.notEqual(outcome.kind, 'dead', 'and it is not evidence about the model');
+  assert.equal(calls, 1, 'the other channel is not asked; the endpoint is down for it too');
+});
+
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
     () => 'probe-session',

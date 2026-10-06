@@ -585,7 +585,13 @@ function restoreShellCalls(value: unknown): void {
 export const ZEN_API_KEY_ENV = "OPENCODE_API_KEY";
 
 /** Upstream failure classes with actionable guidance (see spec v0.2). */
-export type ZenFailureKind = "anon-gated" | "quota-exhausted" | "bad-key" | "upstream-overloaded" | "unknown";
+export type ZenFailureKind =
+  | "anon-gated"
+  | "quota-exhausted"
+  | "bad-key"
+  | "upstream-overloaded"
+  | "endpoint-unavailable"
+  | "unknown";
 
 export const ZEN_FAILURE_GUIDANCE: Record<ZenFailureKind, string> = {
   "anon-gated":
@@ -597,6 +603,8 @@ export const ZEN_FAILURE_GUIDANCE: Record<ZenFailureKind, string> = {
   "bad-key": "Zen key 無效。檢查 key 是否正確、過期或被撤銷；匿名用量不受影響。",
   "upstream-overloaded":
     "上游暫時過載（503）。這是上游的容量問題，與插件、key、模型是否可用都無關；稍後再試即可。",
+  "endpoint-unavailable":
+    "上游端點暫時不可達（Upstream request failed: Endpoint is unavailable）。這是路由的問題，與模型是否可用無關；稍後再試。",
   unknown: "未知的上游錯誤。跑 scripts/reverify.sh 看當下閘門狀態，仍異常則回報狀態碼與報文。",
 };
 
@@ -792,6 +800,13 @@ const MODEL_GONE_PATTERNS: readonly RegExp[] = [
   /\bmodels?\b.{0,60}?\bnot\s+supported\b/i,
   // "model not found" / "does not exist" / "unrecognized model"
   /\bmodels?\b.{0,24}?\b(?:not\s+found|does\s+not\s+exist|unrecognized)\b/i,
+  // "Model mimo-v2.5-free has been deprecated. Use mimo-v2.6-flash-free instead."
+  // — measured 2026-10-07. It arrives as HTTP 410, already in
+  // `MODEL_GONE_STATUSES`, so the verdict was `dead`; what was missing is that the
+  // BODY says it — which is what lets it survive a sibling channel that answered
+  // nothing. Model-scoped on purpose: a bare "deprecated" also describes request
+  // fields and endpoints, and those are not the model.
+  /\bmodels?\b.{0,80}?\bdeprecat(?:ed|ion)\b/i,
   /\bno\s+longer\s+(?:available|served|supported|provided|offered)\b/i,
   /\b(?:retired|sunset|discontinued|decommissioned)\b/i,
 ];
@@ -1140,7 +1155,8 @@ function isCallerScoped(outcome: ProbeOutcome): boolean {
     outcome.code === "anon-gated" ||
     outcome.code === "quota-exhausted" ||
     outcome.code === "bad-key" ||
-    outcome.code === "upstream-overloaded"
+    outcome.code === "upstream-overloaded" ||
+    outcome.code === "endpoint-unavailable"
   )
     return true;
   // 403/429 only when it is NOT a "this model is gone" verdict: that sentence
@@ -1201,6 +1217,11 @@ function failureKindFor(status: number, body: string, apiKey: string | undefined
   // `space-bunny-free`, a model this session is running on, sat in the panel as
   // "unmeasurable" for rounds while answering normally.
   if (FORMAT_SCOPED_PATTERN.test(body)) return "unknown";
+  // "Upstream request failed: Endpoint is unavailable." says the ROUTE cannot
+  // serve, not that the model is gone and certainly not that the credential is
+  // wrong. Measured 2026-10-07 on `ling-3.0-flash-fin-free`, which had been
+  // painted a red model failure for rounds while the endpoint was simply down.
+  if (ENDPOINT_FAILURE_PATTERN.test(body)) return "endpoint-unavailable";
   const kind = classifyZenFailure(status, body);
   if (kind !== "bad-key") return kind;
   const sent = typeof apiKey === "string" ? apiKey.trim() : "";
