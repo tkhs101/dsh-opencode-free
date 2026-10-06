@@ -1078,17 +1078,28 @@ function isCallerScoped(outcome: ProbeOutcome): boolean {
  * of the stream, and a field that moves is a measurement problem, not a reason
  * to fail a probe that already has its answer. Anything unrecognised comes back
  * undefined rather than a guess.
+ *
+ * `reasoning` is the one field the round cannot do without. pi-ai normalises
+ * both channels into `Usage.reasoning` — `completion_tokens_details
+ * .reasoning_tokens` on completions, `output_tokens_details.reasoning_tokens` on
+ * responses — and dropping it here made every observation zero, which is not a
+ * measurement but a constant. Measured 2026-10-06: the route reports it
+ * (mimo-v2.6-flash-free 37 omitted, 0 under `none`).
  */
 function usageOf(result: Record<string, unknown> | undefined): ProbeUsage | undefined {
   const raw = (result as { usage?: unknown } | undefined)?.usage;
   if (raw === null || typeof raw !== "object") return undefined;
   const count = (value: unknown): number | undefined =>
     typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const reasoning = count((raw as { reasoning?: unknown }).reasoning);
   const usage = {
     input: count((raw as { input?: unknown }).input),
     output: count((raw as { output?: unknown }).output),
+    ...(reasoning === undefined ? {} : { reasoning }),
   };
-  return usage.input === undefined && usage.output === undefined ? undefined : usage;
+  return usage.input === undefined && usage.output === undefined && reasoning === undefined
+    ? undefined
+    : usage;
 }
 
 /**

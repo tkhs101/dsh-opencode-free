@@ -636,6 +636,25 @@ const okSse = [
 
 const sseReply = () => new Response(okSse, { headers: { 'Content-Type': 'text/event-stream' } })
 
+/**
+ * The same reply WITH a reasoning breakdown — the shape the route really sends.
+ *
+ * `okSse` above carries no `completion_tokens_details`, so it cannot tell a
+ * working measurement instrument from one that reports zero for everything; a
+ * fixture that only ever omits the field hides exactly the defect this exists
+ * to catch.
+ */
+const sseWithReasoning = (reasoningTokens) =>
+  new Response(
+    [
+      'data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}',
+      `data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":129,"completion_tokens":98,"total_tokens":227,"completion_tokens_details":{"reasoning_tokens":${reasoningTokens}}}}`,
+      'data: [DONE]',
+      '',
+    ].join('\n\n'),
+    { headers: { 'Content-Type': 'text/event-stream' } },
+  )
+
 test('GUARD: the probe request carries the read+bash gate, streams, and asks for enough tokens', async () => {
   // A tool-less probe 403s on EVERY model at the anonymous tier (measured
   // 2026-09-27), so a probe that skipped the tools would report the whole
@@ -1168,6 +1187,37 @@ test('GUARD: a 500 records no effort sample at all', async () => {
     assert.equal(outcome.effort, undefined, `${label} must carry no effort sample`);
   }
 })
+
+test('GUARD: the probe records the reasoning count upstream actually reported', async () => {
+  // The instrument read `usage.reasoning` off the plugin's OWN narrowed copy of
+  // the usage object, and that copy never carried the field. So every
+  // observation read 0, the baseline could never exceed zero, and
+  // `effortVerdictFrom` refused to conclude anything — no Off row could ever be
+  // written, however many rounds the user spent.
+  //
+  // The number IS on the wire: pi-ai parses
+  // `completion_tokens_details.reasoning_tokens` into `usage.reasoning`, and the
+  // route reports it (measured 2026-10-06: mimo-v2.6-flash-free omitted → 37,
+  // `none` → 0). Asserting the NON-ZERO case is the whole point: a fixture
+  // without a breakdown, or an assertion of `kind` alone, passes on a probe
+  // that measures nothing.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  const measure = async (question, reasoningTokens) =>
+    await probeModel(model, {
+      provider: p,
+      apiKey: 'public',
+      question,
+      fetchImpl: async () => sseWithReasoning(reasoningTokens),
+    });
+
+  const baseline = await measure('baseline', 55);
+  assert.equal(baseline.kind, 'ok');
+  assert.deepEqual(baseline.usage?.reasoning, 55, 'the reported count must survive into the usage the round reads');
+
+  const candidate = await measure('none', 0);
+  assert.deepEqual(candidate.usage?.reasoning, 0, 'an exact zero must be told apart from "not reported"');
+});
 
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
