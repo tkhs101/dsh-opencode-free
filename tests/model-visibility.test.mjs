@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROVIDER_ID, builtinFreeModels } from '../src/zen-provider.ts'
+import { probeStartResponse } from '../src/index.ts'
 
 const plugin = await import('../src/index.ts')
 
@@ -478,6 +479,20 @@ test('the probe POST answers while the round is still running', async () => {
     host.dispose()
   }
 })
+
+test('a throttled manual round is refused loudly, not answered like a started one', () => {
+  // 202 means "accepted, not finished". It was also the answer to a click the
+  // floor had already refused, which is the whole complaint: the card waited out
+  // its grace period with nothing to show. 429 carries the remaining time, and
+  // the card words it.
+  assert.equal(probeStartResponse(undefined), null, 'a round that started is still 202');
+  assert.equal(probeStartResponse({ started: true }), null);
+  assert.equal(probeStartResponse({ started: false, reason: 'running' }), null, 'a round already in flight is not a refusal to wait for');
+  assert.deepEqual(probeStartResponse({ started: false, reason: 'cooldown', retryAfterMs: 243_000 }), {
+    status: 429,
+    body: { error: 'cooldown', retryAfterMs: 243_000 },
+  });
+});
 
 test('a same-origin POST must still name this machine (DNS rebinding)', async () => {
   // Origin and Host agreeing is not enough: under DNS rebinding an attacker's

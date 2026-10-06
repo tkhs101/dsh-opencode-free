@@ -1194,6 +1194,45 @@ test('the manual round closes on the poll, not on the POST that started it', asy
   }
 })
 
+test('a throttled click says so, with the number, instead of spinning', async () => {
+  // The route used to answer 202 to a click that never started a round, so the
+  // card waited out AWAIT_GRACE_MS (30s) with nothing on screen — the exact
+  // "I clicked probe and nothing happened" report. 429 is a real answer with a
+  // real number in it, and the card must show that number rather than a spinner.
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'POST') {
+        return { ok: false, status: 429, json: async () => ({ error: 'cooldown', retryAfterMs: 243_000 }) }
+      }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    mounted.findButton('立即探测').props.onClick()
+    await mounted.fireTimers()
+    const texts = collect(mounted.rerender()).texts
+    assert.ok(
+      texts.some((t) => t.includes('分钟')),
+      'the card names the remaining wait, rounded up to whole minutes',
+    )
+    assert.equal(
+      texts.some((t) => t.includes('探测中')),
+      false,
+      'and it does NOT sit in the probing state for a round that never started',
+    )
+    assert.equal(
+      [...walk(mounted.rerender())].some(
+        (n) => n.tag === 'button' && [...walk(n)].some((d) => d.text === '立即探测'),
+      ),
+      true,
+      'the button is released immediately',
+    )
+  } finally {
+    mounted.dispose()
+  }
+})
+
 test('every palette colour meets WCAG AA against the card', async () => {
   // Audit 2026-09-30: all 26 text colours were measured with the WCAG 2.1
   // relative-luminance formula and NONE reached 4.5:1 — including the probe

@@ -74,6 +74,7 @@ window.__ModuleLoader__.load({
 			"probe": "立即探测",
 			"probing": "探测中…",
 			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
+			"probeCooldown": "刚跑过一轮探测，约 {minutes} 分钟内不会重复请求（每轮都要花共享额度）。",
 			"probeUntrusted": "本轮有模型没能测到（上游限流、匿名层被拒或网络异常），这些模型的显示保持不变。",
 			"probedAt": "上次探测",
 			"unknownFree": "另有模型 Zen 正在免费层供应、models.dev 却没有它们的资料：",
@@ -130,6 +131,7 @@ window.__ModuleLoader__.load({
 			"probe": "Probe now",
 			"probing": "Probing…",
 			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
+			"probeCooldown": "A round just ran; it will not run again for about {minutes} minutes — each round spends the shared quota.",
 			"probeUntrusted": "Some models could not be measured this round (upstream throttling, the anonymous tier refusing, or a network error); those models keep their current visibility.",
 			"probedAt": "Last probe",
 			"unknownFree": "Models Zen serves on the free tier that models.dev carries no metadata for:",
@@ -197,14 +199,22 @@ window.__ModuleLoader__.load({
 			return active;
 		}
 
+		/** `{name}` placeholders, replaced once, from a caller-supplied map. */
+		function interpolate(text, params) {
+			if (!params) return text;
+			return text.replace(/\{([a-zA-Z0-9_]+)\}/g, function (match, name) {
+				return hasOwnKey(params, name) ? String(params[name]) : match;
+			});
+		}
+
 		function translatorOf(ctx) {
 			var cachedTag = null;
 			var cachedDict = null;
-			return function (key) {
+			return function (key, params) {
 				var tag = activeLocaleOf(ctx);
 				if (tag !== cachedTag) { cachedTag = tag; cachedDict = dictionaryFor(tag); }
-				if (hasOwnKey(cachedDict, key)) return cachedDict[key];
-				return hasOwnKey(en, key) ? en[key] : key;
+				var text = hasOwnKey(cachedDict, key) ? cachedDict[key] : hasOwnKey(en, key) ? en[key] : key;
+				return interpolate(text, params);
 			};
 		}
 
@@ -572,9 +582,21 @@ window.__ModuleLoader__.load({
 		function probeCatalog() {
 			if (typeof fetch !== "function") return Promise.resolve(null);
 			try {
+				/* A 429 is not a failure: it is the floor between manual rounds, and
+				   it carries how much of it is left. The route used to answer 202 to
+				   a click that never started a round, so the card spun out its grace
+				   period with nothing to show and no word about why. Resolves
+				   { cooldownMs } for that case, a snapshot when the round started, and
+				   null for every other non-answer. */
 				return Promise.resolve(getJSON(PROBE_URL, { method: "POST", headers: { accept: "application/json" } }))
-					.then(function (response) { return response && response.ok ? response.json() : null; })
-					.then(readSnapshot)
+					.then(function (response) {
+						if (response && response.status === 429) {
+							return response.json().then(function (body) {
+								return { cooldownMs: typeof body.retryAfterMs === "number" ? body.retryAfterMs : 0 };
+							}).catch(function () { return { cooldownMs: 0 }; });
+						}
+						return response && response.ok ? response.json().then(readSnapshot) : null;
+					})
 					.catch(function (error) {
 						console.warn(TAG + " probe failed:", error && error.message ? error.message : error);
 						return null;
@@ -731,7 +753,10 @@ window.__ModuleLoader__.load({
 		 * can select.
 		 */
 		function ModelsCard(props) {
-			var t = typeof props.t === "function" ? props.t : function (key) { return key; };
+			/* The host supplies `t`; the fallback keeps the raw key but honours the
+			   same params argument, so a message with a placeholder degrades to a
+			   visible key rather than silently dropping the number. */
+			var t = typeof props.t === "function" ? props.t : function (key, params) { return interpolate(key, params); };
 			var scope = props.scope;
 
 			var tickState = useState(0);
@@ -980,6 +1005,16 @@ window.__ModuleLoader__.load({
 				   and freeze the progress area mid-round, which is the exact bug
 				   the note above `pollActive` records. */
 				probeCatalog().then(function (snapshot) {
+					if (snapshot !== null && typeof snapshot.cooldownMs === "number") {
+						/* The round was refused, not started. Say so with the number,
+						   and leave the panel exactly as it was. */
+						pollRef.current.awaiting = false;
+						pollRef.current.active = false;
+						stopPolling();
+						setProbeError(t("probeCooldown", { minutes: Math.max(1, Math.ceil(snapshot.cooldownMs / 60000)) }));
+						setProbing(false);
+						return;
+					}
 					if (snapshot !== null) setCatalog(snapshot);
 					else {
 						/* The round may still be running, so the poll is left alone

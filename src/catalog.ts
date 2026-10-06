@@ -1637,7 +1637,7 @@ export interface Catalog {
   /** One ordered probe round; at most one per local day (D2). */
   runProbes(): Promise<void>;
   /** Ignores the daily gate; used by the panel button (D8). */
-  forceProbes(): Promise<void>;
+  forceProbes(): Promise<ProbeStart>;
   /** `null` means Zen failed: keep the current gate rather than narrowing. */
   applyZenGate(ids: readonly string[] | null): void;
   /**
@@ -1670,6 +1670,20 @@ export interface Catalog {
  * `http` (0 when no status ever arrived). A red badge that only says "failed"
  * is the thing this type exists to prevent.
  */
+/**
+ * What a manual round actually did.
+ *
+ * The floor between two manual rounds is a quota decision, but it used to be an
+ * invisible one: `forceProbes()` returned nothing and the route answered 202
+ * either way, so a refused click looked exactly like a started one and the panel
+ * waited out its grace period in silence. The caller needs the difference, and
+ * the user needs the number.
+ */
+export type ProbeStart =
+  | { readonly started: true }
+  | { readonly started: false; readonly reason: "cooldown"; readonly retryAfterMs: number }
+  | { readonly started: false; readonly reason: "running" | "unavailable" };
+
 export interface ProbeProgress {
   readonly running: boolean;
   readonly total: number;
@@ -2714,15 +2728,23 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       if (probedToday(state.lastProbeAt, now)) return;
       return runProbeSingle(state, deps);
     },
-    async forceProbes(): Promise<void> {
-      if (probe === undefined) return;
+    async forceProbes(): Promise<ProbeStart> {
+      if (probe === undefined) return { started: false, reason: "unavailable" };
+      if (state.probeInflight !== null) return { started: false, reason: "running" };
       // A manual round still costs one request per model from a bucket shared
       // per egress IP, and the POST route has no rate limit of its own — so
       // repeated clicks spent the whole office's quota. A short floor keeps the
       // button honest without making it useless: the user asked for a fresh
       // answer, not a second one five seconds later.
-      if (now() - state.lastProbeAt < FORCED_PROBE_MIN_INTERVAL_MS) return;
-      return runProbeSingle(state, deps);
+      //
+      // The floor is REPORTED rather than swallowed. Returning nothing made a
+      // refused click indistinguishable from a started one: the route answered
+      // 202 either way, and the panel spun until its grace period expired with
+      // no word about why.
+      const wait = FORCED_PROBE_MIN_INTERVAL_MS - (now() - state.lastProbeAt);
+      if (wait > 0) return { started: false, reason: "cooldown", retryAfterMs: wait };
+      await runProbeSingle(state, deps);
+      return { started: true };
     },
     probeProgress(): ProbeProgress {
       // A copy: the round mutates `state.probeRun` while the panel reads this.

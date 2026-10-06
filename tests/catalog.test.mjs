@@ -1808,6 +1808,43 @@ test('GUARD: three refusals of the same spelling end at no Off row, never a wron
   })
 })
 
+test('GUARD: a manual round inside the floor says why it refused', async () => {
+  // `forceProbes()` used to return nothing, so the route answered 202 whether or
+  // not a round had started: a refused click was indistinguishable from a
+  // started one, and the card spun out its grace period in silence. The refusal
+  // carries the number the user needs.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    let calls = 0;
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async () => {
+        calls += 1;
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 40 } };
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    })
+    await catalog.forceRefresh()
+
+    const first = await catalog.forceProbes();
+    assert.deepEqual(first, { started: true }, 'the first click starts a round');
+    assert.equal(calls, 1);
+
+    clock.t += 60_000;
+    const refused = await catalog.forceProbes();
+    assert.equal(refused.started, false, 'a click inside the floor starts nothing');
+    assert.equal(refused.reason, 'cooldown');
+    assert.equal(refused.retryAfterMs, PROBE_FLOOR_MS - 60_000, 'and says how much of the floor is left');
+    assert.equal(calls, 1, 'no second round was spent');
+
+    clock.t += PROBE_FLOOR_MS;
+    assert.deepEqual(await catalog.forceProbes(), { started: true }, 'and the floor really does expire');
+    assert.equal(calls, 2);
+  })
+})
+
 test('GUARD: the ask-again cadence survives a write and a restart', async () => {
   // The read side knew how to restore `reach` (`readReach`, `adopt`) and
   // `writeCacheAtomic` knew how to write it — but no call site passed it, so

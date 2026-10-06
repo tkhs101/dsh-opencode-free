@@ -25,7 +25,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { Buffer } from "node:buffer";
 import { cachePath, createCatalog } from "./catalog.js";
-import type { Catalog, FetchLike, FetchLikeResponse } from "./catalog.js";
+import type { Catalog, FetchLike, FetchLikeResponse, ProbeStart } from "./catalog.js";
 import {
   PROVIDER_ID,
   ZEN_API_KEY_ENV,
@@ -241,6 +241,22 @@ function sameOrigin(req: RouteRequest): boolean {
   }
 }
 
+/**
+ * What a manual-probe start answers with, or `null` when the round started.
+ *
+ * A refused round must not answer like a started one. The floor between two
+ * manual rounds exists because each spends the shared anonymous bucket, so the
+ * refusal is a real answer with a real number in it — and the card needs both.
+ */
+export function probeStartResponse(
+  start: ProbeStart | undefined,
+): { status: number; body: Record<string, unknown> } | null {
+  if (start !== undefined && start.started === false && start.reason === "cooldown") {
+    return { status: 429, body: { error: "cooldown", retryAfterMs: start.retryAfterMs } };
+  }
+  return null;
+}
+
 function registerCatalogRoutes(ctx: HostContext, catalog: Catalog): void {
   try {
     ctx.inject(["webServer"], (child: never) => {
@@ -316,8 +332,23 @@ function registerCatalogRoutes(ctx: HostContext, catalog: Catalog): void {
           // Failures are swallowed, as before: the round is designed to conclude
           // nothing without that being an error (D5), and it must never reject
           // into a 5xx or an unhandled rejection now that nothing awaits it.
-          void catalog.forceProbes().catch(() => undefined);
-          sendJson(res, 202, catalogPayload(catalog));
+          //
+          // A REFUSED round is a different thing and is answered differently.
+          // The floor between two manual rounds exists because each one spends
+          // the shared bucket, and answering 202 to a click that never started
+          // one left the card spinning until its grace period expired with no
+          // word about why. 429 carries the number the user needs to see.
+          void catalog
+            .forceProbes()
+            .catch(() => undefined)
+            .then((start) => {
+              const refused = probeStartResponse(start);
+              if (refused !== null) {
+                sendJson(res, refused.status, refused.body);
+                return;
+              }
+              sendJson(res, 202, catalogPayload(catalog));
+            });
         };
         const disposers = [
           wctx.webServer.register({ kind: "prefix", path: CATALOG_ROUTE, handler: readHandler }),
