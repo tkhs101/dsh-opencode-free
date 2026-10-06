@@ -2460,7 +2460,11 @@ export async function runProbeRound(
       // The probe reports an OBSERVATION; what it means is decided here, because
       // the baseline arrives on a different round and only the round holds both.
       const observation = outcome.kind === "ok" ? outcome.effort : undefined;
-      const isBaseline = observation?.kind === "baseline";
+      // A SETTLED model is asked for liveness only. Its reading is real but it
+      // answers a question nobody asked, so filing it as a baseline grew that
+      // array on every round for ever — and a median over a silently growing set
+      // is the drift ADR 0004 §38 warns about, one array further down.
+      const isBaseline = question !== "settled" && observation?.kind === "baseline";
       // A candidate is judged against the model's OWN omitted baseline, never
       // against an absolute count: longcat's floor of 36 sits above big-pickle's
       // baseline of 14, so any fixed number collides on the third model.

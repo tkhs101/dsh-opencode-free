@@ -1938,12 +1938,15 @@ test('GUARD: one manual click can finish a measurement, not just start one', asy
       fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'mimo-v2.6-flash-free': mimoRecord() }) }),
       // Measured 2026-10-06: mimo-v2.6-flash-free reasons 37 when omitted, 0 under
       // `none` — an exact off.
+      // Mirrors the real probe: a question it actually asked about produces a
+      // candidate reading, anything else (baseline, settled) a baseline one.
       probe: async (_model, question) => {
         asked.push(question);
+        const asked_ = question === 'none' || question === 'low';
         return {
           kind: 'ok',
           api: 'openai-completions',
-          effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens: question === 'baseline' ? 37 : 0 },
+          effort: { kind: asked_ ? 'candidate' : 'baseline', tokens: asked_ ? 0 : 37 },
         };
       },
       listZenIds: async () => ['mimo-v2.6-flash-free'],
@@ -1971,6 +1974,12 @@ test('GUARD: one manual click can finish a measurement, not just start one', asy
       [...new Set(asked)],
       ['settled'],
       'a settled model is asked for liveness only — no further sample of that axis',
+    );
+    const settled = await readProbeRecord(join(dir, 'catalog.json'), 'mimo-v2.6-flash-free');
+    assert.deepEqual(
+      settled.effortBaselineTokens,
+      [37, 37, 37],
+      'and its frozen baseline does not grow for ever on liveness rounds',
     );
   })
 
