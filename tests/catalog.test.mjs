@@ -31,6 +31,7 @@ import {
   readCache,
   thinkingLevelMapFor,
   measuredEffortMap,
+  measuredContextFor,
   reasoningFingerprint,
   isMeasuredEffort,
   isMeasuredContext,
@@ -1887,6 +1888,36 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
     const model = catalog.current().models.find((m) => m.id === 'mimo-v2.6-flash-free');
     assert.equal(model?.thinkingLevelMap?.off, 'none', 'so it gets the Off row the measurement always supported');
   })
+})
+
+test('GUARD: a measured context window is used, and a changed declaration discards it', async () => {
+  // models.dev under-reports `limit.context` and says nothing about it.
+  // Measured 2026-10-06: mimo-v2.6-flash-free and mimo-v2.5-free both declare
+  // 200000 and both answer `[400] This endpoint's maximum context length is
+  // 1048576 tokens`; nemotron-3.5-lightning-free declares 262144 and says
+  // 1000000 — while ling-3.1-flash-free declares the SAME 262144 and is exactly
+  // right. Silent and fatal: an under-reported window is never refused, it just
+  // clamps `max_tokens` to 1 and returns HTTP 200 with no characters.
+  const section = (context) => ({
+    'mimo-v2.6-flash-free': { ...modelsDict()['space-bunny-free'], id: 'mimo-v2.6-flash-free', name: 'Mimo', limit: { context, output: 32000 } },
+    'ling-3.1-flash-free': { id: 'ling-3.1-flash-free', name: 'Ling', reasoning: true, reasoning_options: [{ type: 'toggle' }], cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, limit: { context: 262144, output: 32768 } },
+  })
+  const window = (id, ctx) => {
+    const dict = section(ctx);
+    const models = derive(dict, { template: template() }).candidates;
+    return derive(dict, { template: template(), measuredContext: measuredContextFor(models, dict, {}) })
+      .candidates.find((m) => m.id === id).contextWindow;
+  };
+
+  // Capped at declared x 4 — the clamp's own safety valve — which is already 4x
+  // the declaration and lands below the upstream's own statement.
+  assert.equal(window('mimo-v2.6-flash-free', 200000), 800000, 'the measured window replaces the stale declaration');
+  assert.equal(window('ling-3.1-flash-free', 262144), 262144, 'a model with no measurement keeps its declaration');
+  assert.equal(
+    window('mimo-v2.6-flash-free', 400000),
+    400000,
+    'a CHANGED declaration discards the seed instead of keeping a number measured about something else',
+  );
 })
 
 test('GUARD: a round counts models, and a row reports what it learned about one', async () => {

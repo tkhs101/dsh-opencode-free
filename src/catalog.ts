@@ -724,6 +724,11 @@ export interface DeriveOptions {
   readonly measuredEffort?: ReadonlyMap<string, MeasuredEffort>;
   /** Levels each model named in a refusal; the model's own vocabulary. */
   readonly selfReported?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Measured context windows, keyed by id. Supplied rather than read from state
+   * so `derive()` stays pure and fixture-testable, exactly like `measuredEffort`.
+   */
+  readonly measuredContext?: ReadonlyMap<string, MeasuredContext>;
 }
 
 export interface DerivedCatalog {
@@ -753,6 +758,7 @@ function buildModel(
   knownApis?: ReadonlyMap<string, Api>,
   measured?: MeasuredEffort,
   selfReported?: readonly string[],
+  measuredContext?: MeasuredContext,
 ): Model<Api> {
   const id = typeof record.id === "string" && record.id !== "" ? record.id : "";
   const api = channelFor(record, knownApis);
@@ -776,7 +782,8 @@ function buildModel(
     // Free by construction here (isFree already proved it); stated explicitly
     // so a stray inherited tier cannot reintroduce a non-zero rate.
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: finitePositive(limit.context) ?? template.contextWindow,
+    contextWindow:
+      contextWindowFor(record, measuredContext) ?? finitePositive(limit.context) ?? template.contextWindow,
     maxTokens: finitePositive(limit.output) ?? template.maxTokens,
     thinkingLevelMap: (levels ?? undefined) as Model<Api>["thinkingLevelMap"],
     // `compat` is transport-specific. Carrying the template's completions
@@ -808,7 +815,14 @@ export function derive(section: CatalogRecord, options: DeriveOptions): DerivedC
     // D1: `deprecated` is kept (a probe judges it); anything else is discarded.
     if (!isCatalogueStatus(record)) continue;
     candidates.push(
-      buildModel(record, options.template, options.knownApis, options.measuredEffort?.get(id), options.selfReported?.get(id)),
+      buildModel(
+        record,
+        options.template,
+        options.knownApis,
+        options.measuredEffort?.get(id),
+        options.selfReported?.get(id),
+        options.measuredContext?.get(id),
+      ),
     );
   }
   // Sorted HERE, at the one place the list is born, so the snapshot, the
@@ -1650,6 +1664,58 @@ export const CLAMP_HITS_REQUIRED = 2;
 export const CLAMP_RAISE_FACTOR = 4;
 export const CLAMP_RAISE_CEILING = 1_048_576;
 
+/**
+ * Context windows this plugin has MEASURED, by the model id they were measured
+ * on. Not a band, not a heuristic — a value the upstream stated about itself.
+ *
+ * Measured 2026-10-06 by over-sending one request per model and reading the
+ * endpoint's own answer; the verbatim bodies are in
+ * `.scratch/probe/context-results-sweep.json` and ADR 0004 §四:
+ *
+ *   mimo-v2.6-flash-free / mimo-v2.5-free
+ *     `[400] This endpoint's maximum context length is 1048576 tokens. However,
+ *      you requested about 1048659 tokens (1048516 of text input, 79 of tool
+ *      input, 64 in the output).`
+ *     (byte-identical on both, so it is the DECLARATION that is stale, not one
+ *     model that moved)
+ *
+ *   nemotron-3.5-lightning-free
+ *     the same sentence with 1000000 — while `ling-3.1-flash-free`, declaring the
+ *     SAME 262144, really has 262144. Same declaration, different truth, which
+ *     is why the decimal-vs-binary heuristic was thrown out and the table is
+ *     keyed by id.
+ *
+ *   big-pickle — 1048576 accepted, 1572864 and 2097152 refused, all with a
+ *     generic `invalid_request_error` that names nothing. Only a lower bound
+ *     exists, so its entry is the C4 cap, which is deliberately under the truth.
+ *
+ * `clampProposalFor` caps every entry, so a stale table can never advertise more
+ * than four times what models.dev claims; a raised window that is too large
+ * produces a VISIBLE upstream 400, while the un-raised state is silent death
+ * (max_tokens collapses to 1, HTTP 200, zero characters — measured, ADR §九).
+ * That asymmetry is the whole reason this table exists.
+ *
+ * Every entry is fingerprinted against `limit`, so a changed declaration
+ * discards it rather than keeping a number that was measured about something
+ * else — the same rule the live measurements obey.
+ */
+const SEED_CONTEXT: Readonly<Record<string, { readonly declared: number; readonly measured: number }>> = {
+  "mimo-v2.6-flash-free": { declared: 200000, measured: 1048576 },
+  "mimo-v2.5-free": { declared: 200000, measured: 1048576 },
+  "nemotron-3.5-lightning-free": { declared: 262144, measured: 1000000 },
+  // Only a lower bound was ever observed; the cap is the honest value.
+  "big-pickle": { declared: 200000, measured: 1048576 },
+};
+
+/** The seed for one model, or undefined when it declares something else now. */
+export function seededContextFor(record: CatalogRecord, id: string): MeasuredContext | undefined {
+  const seed = SEED_CONTEXT[id];
+  if (seed === undefined) return undefined;
+  const declared = finitePositive(isPlainObject(record.limit) ? record.limit.context : undefined);
+  if (declared !== seed.declared) return undefined;
+  return { raisedTo: seed.measured, fp: contextFingerprint(record), at: 0 };
+}
+
 /** The window a confirmed clamp would raise a model to. */
 export function clampProposalFor(declared: number): number {
   if (!Number.isFinite(declared) || declared <= 0) return 0;
@@ -2068,9 +2134,43 @@ function deriveWithEvidence(state: CatalogState, deps: CatalogDeps, section: Cat
   const base = derive(section, { knownApis: deps.knownApis, template: deps.template });
   const evidence = measuredEffortMap(base.candidates, section, state.probes);
   const reported = selfReportedMap(state.probes);
-  return evidence.size === 0 && reported.size === 0
+  // A live measurement outranks the recorded one: it is newer and it was taken
+  // against this very record. The seed fills in only what nobody has measured.
+  const windows = measuredContextFor(base.candidates, section, state.probes);
+  return evidence.size === 0 && reported.size === 0 && windows.size === 0
     ? base
-    : derive(section, { knownApis: deps.knownApis, template: deps.template, measuredEffort: evidence, selfReported: reported });
+    : derive(section, {
+        knownApis: deps.knownApis,
+        template: deps.template,
+        measuredEffort: evidence,
+        selfReported: reported,
+        measuredContext: windows,
+      });
+}
+
+/**
+ * Measured windows for the candidates: the live measurement where there is one,
+ * the recorded one otherwise.
+ *
+ * Mirrors {@link measuredEffortMap} so both axes read the same way — a live
+ * verdict outranks a recorded one, and both are checked against the record they
+ * are about before they are applied.
+ */
+export function measuredContextFor(
+  models: readonly Model<Api>[],
+  section: CatalogRecord,
+  probes: ProbeMap,
+): Map<string, MeasuredContext> {
+  const out = new Map<string, MeasuredContext>();
+  for (const model of models) {
+    const raw = section[model.id];
+    if (!isPlainObject(raw)) continue;
+    const record = { ...raw, id: model.id } as CatalogRecord;
+    const live = probes[model.id]?.context;
+    out.set(model.id, live !== undefined && live.fp === contextFingerprint(record) ? live : (seededContextFor(record, model.id) ?? { raisedTo: 0, fp: "", at: 0 }));
+  }
+  for (const [id, entry] of out) if (entry.raisedTo === 0) out.delete(id);
+  return out;
 }
 
 // Warm start: a valid state.cache restores the catalogue without any network.
