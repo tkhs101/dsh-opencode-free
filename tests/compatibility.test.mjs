@@ -1257,29 +1257,30 @@ test('GUARD: a probe that injects a spelling files the sample as a CANDIDATE', a
   assert.equal(level.effort?.kind, 'candidate', 'a fallback level is a candidate sample');
 });
 
-test('GUARD: a 401 with no key configured is the free tier refusing, not a bad key', async () => {
-  // There is no key on an anonymous deployment: the plugin sends the literal
-  // `public`. Live 2026-10-06 a 401 reached the panel as "key 无效" — advice to
-  // check something the user never configured. The two kinds also lead
-  // somewhere different: one invites a configuration change, the other says the
-  // anonymous admission failed.
+test('GUARD: an overload the upstream names is named, not filed as unknown', async () => {
+  // Measured 2026-10-06, one live request: `nemotron-3-ultra-free` answered
+  // HTTP 200 whose only SSE frame was
+  //   Streaming response failed: [503] Upstream error from Nvidia: Service
+  //   temporarily overloaded
+  // The status says nothing; the body says everything. Filed as `unknown`, a
+  // capacity problem reads as a mystery — and it is the one condition in this
+  // list the reader can simply wait out.
+  const body = JSON.stringify({
+    error: { type: 'server_error', message: 'Streaming response failed: [503] Upstream error from Nvidia: Service temporarily overloaded' },
+  });
   const p = plugin.zenProvider(() => 's', () => undefined);
   const model = p.getModels().find((m) => m.api === 'openai-completions');
-  const probeWith = (apiKey) =>
-    probeModel(model, {
-      provider: p,
-      apiKey,
-      fetchImpl: async () => new Response('{"error":{"message":"invalid api key"}}', { status: 401 }),
-    });
-
-  assert.equal((await probeWith('public')).code, 'anon-gated', 'the anonymous credential cannot be a bad key');
-  assert.equal((await probeWith(undefined)).code, 'anon-gated', 'and neither can an absent one');
-  assert.equal(
-    (await probeWith('zen_live_a_real_key')).code,
-    'bad-key',
-    'a 401 with a real key really is about that key',
-  );
-})
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => new Response('data: ' + body + String.fromCharCode(10, 10), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
+  });
+  assert.equal(outcome.kind, 'inconclusive', 'an error frame inside a 200 is still no answer');
+  assert.equal(outcome.code, 'upstream-overloaded');
+  assert.equal(outcome.http, 200, 'and the status travels with it, so the row can show both');
+  // A 503 that is not an overload keeps its own meaning.
+  assert.equal(classifyZenFailure(503, '{"error":{"message":"upstream connect error"}}'), 'unknown');
+});
 
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(

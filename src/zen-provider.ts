@@ -585,7 +585,7 @@ function restoreShellCalls(value: unknown): void {
 export const ZEN_API_KEY_ENV = "OPENCODE_API_KEY";
 
 /** Upstream failure classes with actionable guidance (see spec v0.2). */
-export type ZenFailureKind = "anon-gated" | "quota-exhausted" | "bad-key" | "unknown";
+export type ZenFailureKind = "anon-gated" | "quota-exhausted" | "bad-key" | "upstream-overloaded" | "unknown";
 
 export const ZEN_FAILURE_GUIDANCE: Record<ZenFailureKind, string> = {
   "anon-gated":
@@ -595,10 +595,14 @@ export const ZEN_FAILURE_GUIDANCE: Record<ZenFailureKind, string> = {
   "quota-exhausted":
     "免費額度用完。等視窗重置，或掛 Zen key（插件 config.apiKey 或 " + ZEN_API_KEY_ENV + "）繼續用。",
   "bad-key": "Zen key 無效。檢查 key 是否正確、過期或被撤銷；匿名用量不受影響。",
+  "upstream-overloaded":
+    "上游暫時過載（503）。這是上游的容量問題，與插件、key、模型是否可用都無關；稍後再試即可。",
   unknown: "未知的上游錯誤。跑 scripts/reverify.sh 看當下閘門狀態，仍異常則回報狀態碼與報文。",
 };
 
 const ANON_GATED_PATTERN = /FreeTierError|MissingSessionID|only be used .*OpenCode/i;
+/** Self-described capacity trouble, whatever status it arrives under. */
+const OVERLOADED_PATTERN = /temporarily overloaded|service unavailable|overloaded|capacity/i;
 /**
  * Re-assert the anonymous admission tools on the FINAL payload.
  *
@@ -676,6 +680,13 @@ export function classifyZenFailure(status: number, bodyText: string): ZenFailure
   if (ANON_GATED_PATTERN.test(body)) return "anon-gated";
   if (status === 429 || QUOTA_PATTERN.test(body)) return "quota-exhausted";
   if (status === 401 || BAD_KEY_PATTERN.test(body)) return "bad-key";
+  // The upstream says so in words, and the status does not: measured
+  // 2026-10-06, `nemotron-3-ultra-free` answered HTTP 200 whose only SSE frame
+  // was `Streaming response failed: [503] Upstream error from Nvidia: Service
+  // temporarily overloaded`. A row that says only "unknown" makes a capacity
+  // problem look like a mystery, and it is the one condition here the reader can
+  // simply wait out.
+  if (OVERLOADED_PATTERN.test(body)) return "upstream-overloaded";
   return "unknown";
 }
 
@@ -957,6 +968,9 @@ export interface ProbeDeps {
  * failure into a generic `stopReason: "error"` and the recorder is the only
  * place the cause is still intact.
  */
+/** How much of a probe reply the recorder keeps for diagnosis. */
+const MAX_RECORDED_BODY = 8 * 1024;
+
 function createRecordingFetch(base: typeof fetch): {
   fetch: typeof fetch;
   read: () => { status: number; body: string; cause: string | undefined };
@@ -969,7 +983,18 @@ function createRecordingFetch(base: typeof fetch): {
       const response = await (base as (u: never, i?: never) => Promise<Response>)(input, init);
       try {
         status = response.status;
-        if (!response.ok) body = await response.clone().text();
+        // Captured for EVERY response, not only for failures. An upstream can
+        // answer 200 whose only SSE frame is an error — measured 2026-10-06,
+        // `nemotron-3-ultra-free`: `Streaming response failed: [503] Upstream
+        // error from Nvidia: Service temporarily overloaded`. Under
+        // `if (!response.ok)` that body was thrown away before anyone read it,
+        // so the probe could only ever answer "unknown (HTTP 200)": the one
+        // place the upstream NAMES its own condition was the one place the
+        // plugin discarded it.
+        //
+        // Bounded, and probe-only: this recorder wraps probe requests alone, and
+        // the slice keeps a pathological reply from being buffered whole.
+        body = (await response.clone().text()).slice(0, MAX_RECORDED_BODY);
       } catch {
         // An unreadable error body is not a conclusion; the status still stands.
       }

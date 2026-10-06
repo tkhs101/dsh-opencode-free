@@ -100,6 +100,7 @@ window.__ModuleLoader__.load({
 			"reason.anongated": "匿名层被拒",
 			"reason.quota": "额度用尽",
 			"reason.badkey": "key 无效",
+			"reason.overloaded": "上游过载（稍后重试）",
 			"reason.unknown": "无响应",
 			"reason.error": "探测异常",
 			"advice.anongated": "上游当时拒绝了匿名层请求；挂 key 只能提高额度，不保证解除拒绝",
@@ -157,6 +158,7 @@ window.__ModuleLoader__.load({
 			"reason.anongated": "Anon tier refused",
 			"reason.quota": "Quota used up",
 			"reason.badkey": "Bad key",
+			"reason.overloaded": "Upstream overloaded (retry later)",
 			"reason.unknown": "No response",
 			"reason.error": "Probe error",
 			"advice.anongated": "the upstream refused the anonymous request at the time; a key raises the quota but is not guaranteed to lift the refusal",
@@ -666,6 +668,7 @@ window.__ModuleLoader__.load({
 			"anon-gated": "reason.anongated",
 			"quota-exhausted": "reason.quota",
 			"bad-key": "reason.badkey",
+			"upstream-overloaded": "reason.overloaded",
 			"unknown": "reason.unknown",
 			"error": "reason.error"
 		};
