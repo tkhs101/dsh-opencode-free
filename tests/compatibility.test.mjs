@@ -1005,11 +1005,14 @@ test('GUARD: dead is only concluded when every channel that was asked finished',
   // wrong-channel 404 into a permanent removal.
   //
   // Silence vetoes; it does not merely lose an argument.
-  const GONE = () =>
-    new Response(JSON.stringify({ error: { message: 'Model does not exist' } }), {
-      status: 404,
-      headers: { 'Content-Type': 'application/json' },
-    })
+  // A BARE 404, which is what this test is actually about: the status alone,
+  // no sentence naming the model. The wrong channel produces exactly this shape
+  // (ADR 0004 §22 measured the format-scoped variant, which
+  // `isModelUnavailableFailure` excludes separately).
+  //
+  // It used to say "Model does not exist" — a NAMED unavailability, which is a
+  // stronger and different case, now covered by its own test below.
+  const GONE = () => new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })
   const TRANSPORT = () => {
     const e = new TypeError('fetch failed')
     e.cause = Object.assign(new Error('socket disconnected'), { code: 'ECONNRESET' })
@@ -1060,6 +1063,43 @@ test('GUARD: dead is only concluded when every channel that was asked finished',
     }
   }
 })
+
+test('GUARD: a NAMED unavailability survives a silent sibling channel', async () => {
+  // Measured 2026-10-06: `deepseek-v4-flash-free` answers
+  // `Upstream request failed: Model is unavailable.` (HTTP 400) on completions and
+  // a bare `Internal server error` (HTTP 500) on responses. Under the old
+  // ranking the 500 — which says nothing about the model — vetoed the named
+  // sentence, and a model whose free tier is over stayed in the picker for
+  // weeks, re-asked every round.
+  //
+  // The veto is not removed; it is narrowed to the signal it exists for. A bare
+  // 404/410 is what a WRONG channel produces and still needs a sibling to
+  // disagree; a body that names this model as unavailable is not something a
+  // wrong channel invents, and `FORMAT_SCOPED_PATTERN` already excludes the one
+  // sentence a wrong channel does produce.
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  let calls = 0;
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(JSON.stringify({ error: { message: 'Error from provider (Console): Upstream request failed: Model is unavailable.' } }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        : new Response('{"type":"error","error":{"message":"Internal server error"}}', {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+    },
+  });
+  assert.equal(outcome.kind, 'dead', 'the named sentence decides, and the generic 500 does not bury it');
+  assert.equal(outcome.named, true);
+  assert.equal(calls, 2, 'both channels were still asked');
+});
 
 test('GUARD: every channel saying dead still removes the model', async () => {
   // The other half of the veto. Silence blocking a conclusion must not become a

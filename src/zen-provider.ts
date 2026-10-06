@@ -821,6 +821,32 @@ const ENDPOINT_FAILURE_PATTERN =
 const MODEL_GONE_STATUSES = new Set([404, 410]);
 
 /**
+ * Whether the upstream NAMED this model's unavailability, as opposed to the
+ * status alone carrying it.
+ *
+ * The two are not interchangeable. A bare 404/410 is exactly what a WRONG
+ * channel answers — ADR 0004 §22 measured a healthy model replying "not
+ * supported for format …" when sent down the wrong one — so a sibling channel
+ * staying silent must veto it. A body that says "Model is unavailable." is not
+ * something a wrong channel invents; the format-scoped reading is already
+ * excluded by {@link FORMAT_SCOPED_PATTERN}.
+ *
+ * Measured 2026-10-06: `deepseek-v4-flash-free` answers exactly that sentence on
+ * the completions channel, and a bare `Internal server error` 500 on the
+ * responses channel. Ranking the 500 above the named sentence kept a withdrawn
+ * model in the picker for weeks.
+ */
+export function isNamedModelUnavailable(status: number, bodyText: string): boolean {
+  const body = typeof bodyText === "string" ? bodyText : "";
+  if (ANON_GATED_PATTERN.test(body)) return false;
+  if (QUOTA_PATTERN.test(body)) return false;
+  if (BAD_KEY_PATTERN.test(body)) return false;
+  if (ENDPOINT_FAILURE_PATTERN.test(body)) return false;
+  if (FORMAT_SCOPED_PATTERN.test(body)) return false;
+  return MODEL_GONE_PATTERNS.some((pattern) => pattern.test(body));
+}
+
+/**
  * Whether an upstream failure *positively* identifies this model as gone.
  *
  * `dead` is the only probe verdict that removes a model from the picker, so
@@ -889,7 +915,19 @@ export type ProbeOutcome =
        */
       selfReported?: readonly string[];
     }
-  | { kind: "dead"; reason: string; code: "dead"; http: number }
+  | {
+      kind: "dead";
+      reason: string;
+      code: "dead";
+      http: number;
+      /**
+       * The upstream NAMED this model's unavailability, rather than the status
+       * alone carrying it. See {@link isNamedModelUnavailable}: the two are not
+       * interchangeable, and only the named one survives a silent sibling
+       * channel.
+       */
+      named?: boolean;
+    }
   | {
       kind: "inconclusive";
       reason: string;
@@ -1318,11 +1356,13 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     };
   }
   if (isModelUnavailableFailure(status, body)) {
+    const named = isNamedModelUnavailable(status, body);
     return {
       kind: "dead",
       reason: `上游回報此模型不可用（HTTP ${status}）`,
       code: "dead",
       http: status,
+      ...(named ? { named: true } : {}),
     };
   }
   const kind = failureKindFor(status, body, deps.apiKey);
@@ -1397,6 +1437,7 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
   // inconclusive on strength and then win the "first seen wins" tie-break,
   // replacing a transport failure with "no channel answered".
   let last: ProbeOutcome | null = null;
+  let namedDead: Extract<ProbeOutcome, { kind: "dead" }> | undefined;
   // The first channel that failed to answer, kept for its reason and status —
   // the row has to say WHY it could not tell, not just that it could not.
   let silent: ProbeOutcome | null = null;
@@ -1411,11 +1452,21 @@ export async function probeModel(model: Model<Api>, deps: ProbeDeps): Promise<Pr
     if (outcome.kind === "ok") return { ...outcome, api: variant.api };
     if (isCallerScoped(outcome)) return outcome;
     if (outcome.kind === "dead") {
+      // A NAMED unavailability outranks a silent sibling. A bare 404/410 is
+      // exactly what a wrong channel produces, so the sweep must still be able
+      // to veto it (ADR 0004 §22); a body that says "Model is unavailable." is
+      // not something a wrong channel invents, and letting a generic 500 from
+      // the other channel bury it kept a withdrawn model in the picker for weeks.
+      if (outcome.named === true) {
+        namedDead ??= outcome;
+        continue;
+      }
       last = outcome;
       continue;
     }
     if (silent === null) silent = outcome;
   }
+  if (namedDead !== undefined) return namedDead;
   if (silent !== null) return silent;
   return (
     last ?? {
