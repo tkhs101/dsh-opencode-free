@@ -52,6 +52,19 @@ test('the corpus is the provider’s own answers, not hand-picked ones', () => {
   assert.ok(samplesFor('longcat-2.5-preview-free', 'minimal')?.length >= 3, "longcat's inert minimal samples are the point")
 })
 
+test('a liveness row on a no-ladder model IS a baseline sample', () => {
+  // The probe's liveness request hardcodes `reasoning: "low"`, which clamps to
+  // OMISSION on a model that publishes no ladder — so that request is the model's
+  // own baseline and costs nothing extra. Losing those rows would make the corpus
+  // look like it had no baselines at all, and every verdict would read as "no
+  // claim" for want of evidence rather than for want of a working control.
+  const models = [...byModel.keys()].filter((id) => {
+    const questions = byModel.get(id);
+    return questions.get('none') !== undefined && questions.get('baseline') === undefined;
+  });
+  assert.ok(models.length > 0, 'expected at least one model whose baseline only exists as a liveness row');
+});
+
 test('a model that honours none is classified as such', () => {
   // Four independent models: reasoning_tokens 0 against a baseline in the tens.
   for (const [model, question] of [
