@@ -277,7 +277,7 @@ export type EffortSamples = readonly MeasuredEffort["kind"][];
  * provides (0 reasoning tokens across six samples). One request per round either
  * way; only the question changes.
  */
-export type EffortQuestion = "baseline" | "none" | "minimal";
+export type EffortQuestion = "baseline" | "none" | (string & {});
 
 /**
  * A candidate counts as a working Off below this fraction of the same model's
@@ -324,13 +324,41 @@ export const EFFORT_SAMPLES = 3;
  * round alternates the question inside the one request it was already making,
  * so the per-round cost is unchanged and the pairing is consecutive.
  */
-export function nextEffortQuestion(record: ProbeRecord | undefined): EffortQuestion {
+/**
+ * The level to fall back on for a model whose `none` is unusable.
+ *
+ * The model's OWN lowest published level, not a fixed one. Measured 2026-10-06:
+ * space-bunny-free publishes `low…max` and its `low` brings reasoning to
+ * 0/9/22/37 against an omitted baseline of 35 — a working Off. Asking it for
+ * `minimal` instead measures a level it never published and finds nothing, so
+ * the row is withheld from a model that has one. A model publishing no ladder at
+ * all falls back to `minimal`, which is where big-pickle's 0/8 was measured.
+ */
+export function fallbackLevelFor(record: CatalogRecord): string {
+  const published: string[] = [];
+  for (const option of Array.isArray(record.reasoning_options) ? record.reasoning_options : []) {
+    if (!isPlainObject(option) || option.type !== "effort") continue;
+    for (const value of Array.isArray(option.values) ? option.values : []) {
+      if (typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value)) published.push(value);
+    }
+  }
+  // Lowest by the vocabulary's own order, not by declaration order.
+  for (const level of THINKING_LEVELS) {
+    if (level === "off") continue;
+    if (published.includes(level)) return level;
+  }
+  return "minimal";
+}
+
+export function nextEffortQuestion(record: ProbeRecord | undefined, fallback = "minimal"): EffortQuestion {
   // The liveness request IS the omitted request on a no-ladder model — its
   // hardcoded `reasoning: "low"` clamps to omission there — so the baseline
   // usually arrives without a round being spent on asking for it.
   if ((record?.effortBaselineTokens?.length ?? 0) < EFFORT_SAMPLES) return "baseline";
-  if (record?.effortQuestion === "minimal") return "minimal";
-  return (record?.effortDiscord ?? 0) >= EFFORT_FALLBACK_AFTER ? "minimal" : "none";
+  if (typeof record?.effortQuestion === "string" && record.effortQuestion !== "none" && record.effortQuestion !== "baseline") {
+    return record.effortQuestion;
+  }
+  return (record?.effortDiscord ?? 0) >= EFFORT_FALLBACK_AFTER ? fallback : "none";
 }
 
 /**
@@ -2130,7 +2158,11 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       const started = deps.now();
       let outcome: ProbeResult;
       try {
-        outcome = await probe!(model, nextEffortQuestion(state.probes[model.id]));
+        const raw = rawById(model.id);
+        outcome = await probe!(
+          model,
+          nextEffortQuestion(state.probes[model.id], raw === undefined ? "minimal" : fallbackLevelFor(raw)),
+        );
       } catch {
         untrusted = true;
         state.probeRun.results[model.id] = {
@@ -2235,8 +2267,8 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
                 // The fallback question's answer is a claim about the level it
                 // named, so it is recorded in those words rather than as a
                 // claim about `none`.
-                kind: question === "minimal" ? "level-works" : "none-works",
-                ...(question === "minimal" ? { level: "minimal" } : {}),
+                kind: question === "none" ? "none-works" : "level-works",
+                ...(question === "none" ? {} : { level: question }),
                 fp: reasoningFingerprint({ ...rawById(model.id)!, id: model.id }),
                 api: outcome.api,
                 at: stamp,
