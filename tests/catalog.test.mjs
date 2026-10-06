@@ -48,9 +48,6 @@ import {
   EFFORT_WORKING_RATIO,
   EFFORT_CANDIDATE_SAMPLES,
   MANUAL_SAMPLE_BUDGET,
-  reachAllowsAttempt,
-  nextReachAttempt,
-  UNREACHABLE_BACKOFF_MS,
   effortVerdictFrom,
   topThinkingLevel,
   unknownFree,
@@ -664,49 +661,6 @@ test('effort samples persist so a restart does not restart the count', async () 
   // so they are all zero — and one stored zero keeps the median at zero for
   // ever. `absent-free` stands for both cases.
   assert.equal(read.probes['absent-free'].effortSamples, undefined);
-  await rm(dir, { recursive: true, force: true });
-})
-
-test('a model that cannot be reached is asked less, not concluded about', () => {
-  // Measured 2026-10-06: ling-3.1-flash-free returned `Endpoint is unavailable`
-  // on seven attempts across hours. One draw a day was being spent every day to
-  // learn nothing, against a bucket shared per egress IP.
-  //
-  // The cadence lives BESIDE the verdicts, never inside them: a model we never
-  // reached has no verdict, and giving it one would be the "absence read as a
-  // claim" mistake this change set exists to remove.
-  const now = 1_000_000;
-  assert.equal(reachAllowsAttempt(undefined, now), true, 'an unseen model is due now');
-  let record = nextReachAttempt(undefined, now);
-  assert.equal(reachAllowsAttempt(record, now), false, 'not immediately after a miss');
-  assert.equal(reachAllowsAttempt(record, now + 6 * 60 * 60_000), true, 'six hours later it is due again');
-  record = nextReachAttempt(record, now);
-  record = nextReachAttempt(record, now);
-  // Bounded, not abandoned: a week is the ceiling, because the upstream fixing
-  // the outage is exactly what makes the re-ask worth making.
-  assert.equal(UNREACHABLE_BACKOFF_MS[UNREACHABLE_BACKOFF_MS.length - 1], 7 * 24 * 60 * 60_000);
-})
-
-test('the reach cadence round-trips and never becomes a verdict', async () => {
-  // A round that concluded nothing must leave `probes` byte-identical — that
-  // invariant is what stops one gated IP from emptying the picker, and a cadence
-  // smuggled in as a ProbeRecord would quietly break it.
-  const dir = await mkdtemp(join(tmpdir(), 'reach-'));
-  const file = join(dir, 'catalog.json');
-  await writeFile(
-    file,
-    JSON.stringify({
-      version: 1, etag: undefined, fetchedAt: 1, models: {},
-      probes: { 'ok-free': { verdict: 'ok', at: 1 } },
-      reach: { 'down-free': { misses: 2, nextAt: 999 }, 'bad-free': { misses: 'x' } },
-      lastProbeAt: 0,
-    }),
-  );
-  const read = await readCache(file);
-  assert.deepEqual(read.probes['ok-free'], { verdict: 'ok', at: 1 }, 'an answered model has no cadence');
-  assert.deepEqual(read.reach['down-free'], { misses: 2, nextAt: 999 });
-  // Damaged entries are dropped rather than trusted.
-  assert.equal(read.reach['bad-free'], undefined);
   await rm(dir, { recursive: true, force: true });
 })
 
@@ -1968,92 +1922,6 @@ test('GUARD: a verdict whose samples were deleted reads as no verdict', async ()
   })
 })
 
-test('GUARD: dropping a verdict makes the model due again, not in six hours', async () => {
-  // 0.3.1's verdicts are unsupported, so the reader drops them — and that is a
-  // decision we do not know something. Live 2026-10-06: ling-3.1-flash-free lost
-  // its Off row at boot and then sat in a backoff until 01:35, because its
-  // cadence entry survived the drop. A capability the user can see disappear and
-  // then wait hours to get back is worse than never having claimed it.
-  await withTempDir(async (dir) => {
-    const ling = { ...modelsDict()['space-bunny-free'], id: 'ling-3.1-flash-free', name: 'Ling 3.1 Flash Free' }
-    const fp = reasoningFingerprint(ling)
-    // The backoff is expressed against the SAME clock the catalogue runs on, or
-    // the test would silently be testing nothing.
-    const clock = { t: 1_000_000 }
-    const future = clock.t + 6 * 60 * 60_000;
-    await writeFile(
-      join(dir, 'catalog.json'),
-      JSON.stringify({
-        version: CACHE_VERSION,
-        fetchedAt: 1_000_000,
-        models: { 'ling-3.1-flash-free': ling },
-        probes: {
-          'ling-3.1-flash-free': {
-            verdict: 'ok',
-            at: 1_000_000,
-            effortReading: EFFORT_READING,
-            effort: { kind: 'none-works', fp, api: 'openai-completions', at: 1_000_000 },
-            effortFrozenAt: 1_000_000,
-            effortTokens: [],
-            effortBaselineTokens: [22, 47, 31],
-          },
-        },
-        reach: { 'ling-3.1-flash-free': { misses: 1, nextAt: future } },
-        lastProbeAt: 1_000_000,
-      }),
-      'utf8',
-    )
-    const asked = []
-    const catalog = catalogWith({
-      dir,
-      clock,
-      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'ling-3.1-flash-free': ling }) }),
-      probe: async (_model, question) => {
-        asked.push(question);
-        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 30 } };
-      },
-      listZenIds: async () => ['ling-3.1-flash-free'],
-    });
-    await catalog.forceProbes();
-    assert.ok(
-      asked.length > 0,
-      'the model is asked now, not at the end of its backoff — we just decided we do not know',
-    );
-  })
-
-  // A model that is merely unreachable keeps its cadence: this exception is for
-  // the drop, not for every entry in the map.
-  await withTempDir(async (dir) => {
-    const clock = { t: 1_000_000 }
-    const future = clock.t + 6 * 60 * 60_000;
-    await writeFile(
-      join(dir, 'catalog.json'),
-      JSON.stringify({
-        version: CACHE_VERSION,
-        fetchedAt: 1_000_000,
-        models: { 'space-bunny-free': modelsDict()['space-bunny-free'] },
-        probes: { 'space-bunny-free': { verdict: 'ok', at: 1_000_000 } },
-        reach: { 'space-bunny-free': { misses: 1, nextAt: future } },
-        lastProbeAt: 1_000_000,
-      }),
-      'utf8',
-    )
-    let asked = 0;
-    const catalog = catalogWith({
-      dir,
-      clock,
-      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
-      probe: async () => {
-        asked += 1;
-        return { kind: 'ok', api: 'openai-completions' };
-      },
-      listZenIds: async () => ['space-bunny-free'],
-    });
-    await catalog.forceProbes();
-    assert.equal(asked, 0, 'a model inside its backoff is still left alone');
-  })
-})
-
 test('GUARD: a confirmed verdict keeps the samples it rests on', async () => {
   // The samples were cleared on confirmation while the comment beside them said
   // they were kept. That is not a tidiness question: they are the only evidence a
@@ -2403,98 +2271,6 @@ test('GUARD: a manual round inside the floor says why it refused', async () => {
   })
 })
 
-test('GUARD: the ask-again cadence survives a write and a restart', async () => {
-  // The read side knew how to restore `reach` (`readReach`, `adopt`) and
-  // `writeCacheAtomic` knew how to write it — but no call site passed it, so
-  // every write erased the schedule and the next boot started the backoff from
-  // zero. Measured 2026-10-06: ling-3.1-flash-free answered 429 seven times
-  // across hours, and the schedule that exists precisely to stop the eighth
-  // request died with the process that made it.
-  await withTempDir(async (dir) => {
-    const clock = { t: 2_000_000 }
-    const path = join(dir, 'catalog.json')
-    const catalog = catalogWith({
-      dir,
-      clock,
-      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
-      probe: async () => ({ kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' }),
-      listZenIds: async () => ['space-bunny-free'],
-    })
-    await catalog.forceRefresh()
-    pastProbeFloor(clock);
-    await catalog.forceProbes();
-
-    const afterRound = JSON.parse(await readFile(path, 'utf8'));
-    assert.equal(afterRound.reach?.['space-bunny-free']?.misses, 1, 'a round persists the cadence it just set');
-
-    // A sync is not a round, but its write replaces the whole record: omitting
-    // the field here deleted the report for the same reason.
-    clock.t += 1_000;
-    await catalog.forceRefresh();
-    const afterSync = JSON.parse(await readFile(path, 'utf8'));
-    assert.equal(afterSync.reach?.['space-bunny-free']?.misses, 1, 'a catalogue sync carries it rather than erasing it');
-
-    // And a fresh process over the same file honours it: the next attempt is
-    // still six hours out, so a restart does not spend the shared bucket again.
-    let asked = 0;
-    const second = catalogWith({
-      dir,
-      clock,
-      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
-      probe: async () => {
-        asked += 1;
-        return { kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' };
-      },
-      listZenIds: async () => ['space-bunny-free'],
-    });
-    await second.forceRefresh();
-    pastProbeFloor(clock);
-    await second.forceProbes();
-    assert.equal(asked, 0, 'a restarted process does not re-ask a model inside its backoff window');
-  })
-})
-
-test('GUARD: an answer resets the ask-again cadence', async () => {
-  // `UNREACHABLE_BACKOFF_MS` is indexed by the miss count, so a counter that only
-  // climbs is a one-way ratchet: two failures and one recovery used to leave the
-  // model in the seven-day step, so its NEXT failure cost a week rather than six
-  // hours, with nothing about the model having changed to justify it. The comment
-  // in the round promised the opposite ("An answer clears the cadence") and no
-  // code did it.
-  await withTempDir(async (dir) => {
-    const clock = { t: 2_000_000 }
-    const HOUR = 60 * 60_000
-    // 429, 429, ok, 429 — then six hours later the model must be asked again.
-    const answers = [429, 429, 200, 429]
-    let call = 0
-    const rounds = []
-    const catalog = catalogWith({
-      dir,
-      clock,
-      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
-      probe: async () => {
-        const status = answers[call++] ?? 429;
-        rounds.push(status);
-        return status === 429
-          ? { kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' }
-          : { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 40 } };
-      },
-      listZenIds: async () => ['space-bunny-free'],
-    })
-    await catalog.forceRefresh()
-    const asked = []
-    // t0 (429) -> +6h (429) -> +24h (ok) -> +6min (429) -> +6h (must be asked).
-    for (const step of [0, 6 * HOUR, 24 * HOUR, 6 * 60_000, 6 * HOUR]) {
-      clock.t += step;
-      pastProbeFloor(clock);
-      rounds.length = 0;
-      await catalog.forceProbes();
-      asked.push(rounds.length);
-    }
-    assert.deepEqual(asked, [1, 1, 1, 1, 1], 'every round asks the model, including the last one after it recovered');
-  })
-})
-
 test('GUARD: a confirmed verdict names the level the probe actually asked', async () => {
   // The round derived the question TWICE: once to send it (with the model's own
   // lowest published level as the fallback) and once to label the verdict (with
@@ -2614,6 +2390,57 @@ test('GUARD: the daily round covers every model Zen serves; the manual one stays
   })
 })
 
+
+test('GUARD: there is no ask-again cadence — every served model is asked every round', async () => {
+  // The backoff (0 → 6h → 24h → 7d, keyed on consecutive misses) is gone by
+  // decision: a round asks every model the Zen gate still lists, every time.
+  //
+  // It used to protect the shared anonymous bucket from models that were being
+  // rate-limited — measured, `ling-3.1-flash-free` answered 429 seven times
+  // across hours on 2026-10-06. That is a real cost, and the round's own shape
+  // bounds it anyway: a model that fails a shot LEAVES the shot loop, so an
+  // unreachable model costs exactly one request per round, not the budget.
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () =>
+        fakeResponse({
+          body: apiBodyWith({
+            'big-pickle': modelsDict()['big-pickle'],
+            'deepseek-v4-flash-free': modelsDict()['deepseek-v4-flash-free'],
+          }),
+        }),
+      // The failing model is the one that would have been backed off.
+      probe: async (model) => {
+        asked.push(model.id);
+        if (model.id === 'deepseek-v4-flash-free') return { kind: 'inconclusive', code: 'quota-exhausted', http: 429 };
+        return { kind: 'ok' };
+      },
+      listZenIds: async () => ['big-pickle', 'deepseek-v4-flash-free'],
+    });
+    await catalog.forceRefresh();
+    catalog.applyZenGate(['big-pickle', 'deepseek-v4-flash-free']);
+
+    for (let round = 1; round <= 3; round += 1) {
+      asked.length = 0;
+      clock.t += 60_000;
+      pastProbeFloor(clock);
+      await catalog.forceProbes();
+      assert.deepEqual(
+        // Distinct ids: a model that answers is asked several times inside one
+        // round (that is the sampling budget); the question here is only whether
+        // the FAILING model is asked again next round.
+        [...new Set(asked)].sort(),
+        ['big-pickle', 'deepseek-v4-flash-free'],
+        `round ${round}: a model that failed the last one is asked again`,
+      );
+    }
+  })
+})
 
 test('a round covers the whole pre-gate catalogue, in order, one at a time', async () => {
   await withTempDir(async (dir) => {

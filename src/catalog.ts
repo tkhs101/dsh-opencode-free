@@ -242,47 +242,6 @@ export const EFFORT_READING = 2;
  * Three is the smallest count that turns an intermittent failure into a
  * negligible one without making the round unconverge.
  */
-/**
- * How long a model that could not be measured at all is left alone.
- *
- * This is the cost that actually accrues, and it is not the ambiguous-ratio
- * case. A model whose verdict is `ok` or `dead` has been CHARACTERISED and stops
- * costing; a model whose every round is inconclusive has not been, and today it
- * is re-asked on every round forever. Measured: ling-3.1-flash-free returned
- * `Endpoint is unavailable` on seven attempts across hours, so one draw a day is
- * spent every day to learn nothing — against a bucket shared per egress IP.
- *
- * The backoff is on the OBSERVED SYMPTOM, not on the model: a model that cannot
- * be reached is not evidence about any model, so the right response is to ask
- * less often, not to conclude anything.
- */
-export const UNREACHABLE_BACKOFF_MS = [0, 6 * 60 * 60_000, 24 * 60 * 60_000, 7 * 24 * 60 * 60_000];
-
-/** Consecutive rounds that produced no conclusion for one model. */
-export interface ReachRecord {
-  readonly misses: number;
-  /** When the next attempt is due; 0 means "now". */
-  readonly nextAt: number;
-}
-
-/** Whether a model is due another attempt. */
-export function reachAllowsAttempt(record: ReachRecord | undefined, now: number): boolean {
-  return record === undefined || now >= record.nextAt;
-}
-
-/**
- * The next attempt time after one more fruitless round.
- *
- * Capped rather than unbounded: a model unreachable for a week should still be
- * re-asked weekly, because the upstream fixing it is exactly what makes it
- * worth re-asking.
- */
-export function nextReachAttempt(record: ReachRecord | undefined, now: number): ReachRecord {
-  const misses = (record?.misses ?? 0) + 1;
-  const step = UNREACHABLE_BACKOFF_MS[Math.min(misses, UNREACHABLE_BACKOFF_MS.length - 1)]!;
-  return { misses, nextAt: now + step };
-}
-
 export const EFFORT_CONCORDANCE = 3;
 
 
@@ -474,8 +433,7 @@ function effortAxisUndecidable(record: ProbeRecord | undefined): boolean {
  *
  * The panel needs to say "these still need measuring" rather than make the user
  * infer it from a missing row, and it must be the SAME predicate the loop uses —
- * an id whose axis is undecidable or settled is not pending, and one sitting out
- * a backoff is not either.
+ * an id whose axis is undecidable or settled is not pending either.
  */
 export function pendingEffortIds(state: CatalogState): string[] {
   // The SAME list the picker offers. `state.models` is the pre-gate catalogue,
@@ -587,20 +545,6 @@ export function effortVerdict(
   const samples = [...prior, candidate];
   if (samples.length >= EFFORT_CONCORDANCE) return { kind: "confirmed" };
   return { kind: "sample", samples };
-}
-
-/** Defensive read of the persisted ask-again cadence. */
-function readReach(value: unknown): Record<string, ReachRecord> {
-  if (!isPlainObject(value)) return {};
-  const out: Record<string, ReachRecord> = {};
-  for (const [id, entry] of Object.entries(value)) {
-    if (!isPlainObject(entry)) continue;
-    const { misses, nextAt } = entry as { misses?: unknown; nextAt?: unknown };
-    if (typeof misses === "number" && Number.isFinite(misses) && typeof nextAt === "number" && Number.isFinite(nextAt)) {
-      out[id] = { misses, nextAt };
-    }
-  }
-  return out;
 }
 
 /** Defensive read of a persisted effort measurement, in `isMeasuredChannel`'s style. */
@@ -1025,7 +969,6 @@ export interface CatalogCacheRecord {
    * Deliberately NOT inside `ProbeRecord`: a round that reached nothing must
    * write nothing there, and a model we never reached has no verdict to give it.
    */
-  readonly reach?: Readonly<Record<string, ReachRecord>>;
   /**
    * Models whose stored verdict was NOT adopted, because a median-based verdict
    * with no samples behind it cannot be reproduced. In-memory only: every write
@@ -1379,7 +1322,6 @@ export async function readCache(path: string): Promise<CatalogCacheRecord | null
       models: parsed.models,
       probes: read.probes,
       droppedVerdicts: read.droppedVerdicts,
-      reach: readReach(parsed.reach),
       lastProbeAt:
         typeof parsed.lastProbeAt === "number" && Number.isFinite(parsed.lastProbeAt)
           ? parsed.lastProbeAt
@@ -1442,7 +1384,6 @@ export async function writeCacheAtomic(
     fetchedAt: number;
     models: CatalogRecord;
     probes?: ProbeMap;
-    reach?: Record<string, ReachRecord>;
     lastProbeAt?: number;
     lastRound?: CatalogCacheRecord["lastRound"];
   },
@@ -1467,7 +1408,6 @@ export async function writeCacheAtomic(
     // existed (and a catalogue sync must carry the current verdicts forward
     // rather than silently dropping them).
     if (record.probes !== undefined && Object.keys(record.probes).length > 0) payload.probes = record.probes;
-    if (record.reach !== undefined && Object.keys(record.reach).length > 0) payload.reach = record.reach;
     if (record.lastProbeAt !== undefined && record.lastProbeAt > 0) payload.lastProbeAt = record.lastProbeAt;
     const round = record.lastRound;
     if (round !== undefined && round.total > 0) payload.lastRound = round;
@@ -1647,8 +1587,6 @@ export interface CatalogState {
   /** When Zen last answered the availability question; 0 = never this boot. */
   gateCheckedAt: number;
   probes: ProbeMap;
-  /** Ask-again cadence per model; see `ReachRecord`. */
-  reach: Record<string, ReachRecord>;
 
   lastProbeAt: number;
   probeUntrusted: boolean;
@@ -1696,8 +1634,7 @@ export function initialState(builtinBaseline: readonly Model<Api>[]): CatalogSta
     lastFetchWasNotModified: false,
     gateCheckedAt: 0,
     probes: {},
-    reach: {},
-    lastProbeAt: 0,
+      lastProbeAt: 0,
     probeUntrusted: false,
     probeRun: {
       running: false,
@@ -1993,9 +1930,9 @@ export interface ProbeProgress {
    * Models whose reasoning measurement is still open.
    *
    * "Still measuring" is a claim about the future, so it is computed by the same
-   * predicate the loop uses rather than inferred from a missing verdict —
-   * absence also means backoff, and a model waiting out a rate limit is not one
-   * the panel should keep asking the user to click for.
+   * predicate the loop uses rather than inferred from a missing verdict: absence
+   * also means the axis is undecidable, and that model is not one the panel
+   * should keep asking the user to click for.
    */
   readonly pending: readonly string[];
 }
@@ -2232,7 +2169,6 @@ export function planRound(
   probes: ProbeMap,
   hidden: ((id: string) => boolean) | undefined,
   now: number,
-  reach: Readonly<Record<string, ReachRecord>> = {},
   scope: ProbeScope = "visible",
 ): { targets: Model<Api>[]; notListed: Model<Api>[] } {
   // `served` — the daily round — asks about every model Zen still lists, hidden
@@ -2244,7 +2180,7 @@ export function planRound(
   const isShown = (id: string): boolean => scope === "served" || hidden?.(id) !== true;
   return {
     targets: live.filter(
-      (model) => isShown(model.id) && !isSettled(model.id, probes) && reachAllowsAttempt(reach[model.id], now),
+      (model) => isShown(model.id) && !isSettled(model.id, probes),
     ),
     notListed:
       servedSet === null
@@ -2333,18 +2269,6 @@ function adopt(
   }
 
   if (Object.keys(record.probes).length > 0) state.probes = { ...record.probes };
-  // The ask-again cadence, with one exception: a model whose verdict was DROPPED
-  // for want of its samples is not a model we have an answer about any more, and
-  // leaving its backoff in place means the user watches the capability row vanish
-  // and then waits hours for it to come back. Deciding we do not know is a reason
-  // to ask sooner, not later.
-  if (record.reach !== undefined && Object.keys(record.reach).length > 0) {
-    state.reach = { ...record.reach };
-    for (const id of record.droppedVerdicts ?? []) {
-      const { [id]: _due, ...rest } = state.reach;
-      state.reach = rest;
-    }
-  }
   // A channel a previous process MEASURED, re-applied. Without this the
   // measurement is on disk and ignored, so a restart silently reverted every
   // model to its inferred channel and the very failure the probe ruled out
@@ -2455,7 +2379,6 @@ async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
         fetchedAt: stamp,
         models: state.cache.models,
         probes: state.probes,
-        reach: state.reach,
         lastProbeAt: state.lastProbeAt,
         // Carried, not re-derived: a catalogue revalidation is not a probe
         // round and has nothing new to report, but DROPPING it would delete
@@ -2484,9 +2407,6 @@ async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
     fetchedAt: stamp,
     models: result.section,
     probes: state.probes,
-    // The live cadence, not the one this record was read with: `state.reach` is
-    // the only copy a round has been writing to.
-    reach: state.reach,
     lastProbeAt: state.lastProbeAt,
     lastRound: previousRound,
   };
@@ -2499,7 +2419,6 @@ async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
     fetchedAt: stamp,
     models: result.section,
     probes: state.probes,
-    reach: state.reach,
     lastProbeAt: state.lastProbeAt,
     lastRound: previousRound,
   });
@@ -2598,7 +2517,7 @@ export async function runProbeRound(
   // channel refused rather than a model that is gone — and a permanent verdict
   // on a wrong channel is how a working model goes missing for good.
   // The round's scope, decided by one pure function below.
-  const { targets, notListed } = planRound(state.models, live, servedSet, state.probes, hidden, deps.now(), state.reach, scope);
+  const { targets, notListed } = planRound(state.models, live, servedSet, state.probes, hidden, deps.now(), scope);
   // The panel polls this while the round runs: a progress pill ("4/10") and
   // one badge per row (ok with latency / failed / probing / waiting). It is
   // replaced wholesale at the start of every round and frozen when the round
@@ -2698,20 +2617,15 @@ export async function runProbeRound(
         && (outcome.http === 400 || outcome.http === 422);
       if (outcome === undefined || outcome === null || (outcome.kind === "inconclusive" && !spellingRefused)) {
         untrusted = true;
-        // A round that concluded nothing is a reason to ask LESS, not a verdict
-        // about the model. Recorded on the symptom, so a model that answers again
-        // has its cadence restored immediately.
-        // Deliberately NOT a ProbeRecord. A round that concluded nothing must
-        // write nothing there — and a model we never reached has no verdict, so
-        // giving it one would be the same "absence read as a claim" mistake this
-        // change set exists to remove. The cadence lives beside the verdicts.
-        state.reach = { ...state.reach, [model.id]: nextReachAttempt(state.reach[model.id], deps.now()) };
+        // A round that concluded nothing writes NO verdict: a model we could
+        // not reach has no verdict to give it, and giving it one would be the
+        // same "absence read as a claim" mistake this change set exists to
+        // remove. It is still asked next round — there is no cadence.
         harvestSelfReport(state, model.id, outcome);
         break;
       }
       if (outcome.kind !== "ok" && outcome.kind !== "dead" && !spellingRefused) {
         untrusted = true;
-        state.reach = { ...state.reach, [model.id]: nextReachAttempt(state.reach[model.id], deps.now()) };
         harvestSelfReport(state, model.id, outcome);
         break;
       }
@@ -2830,8 +2744,6 @@ export async function runProbeRound(
         // Reaching here means the prober exhausted every channel before
         // concluding, so this `dead` is earned and can be final.
         ...(outcome.kind === "dead" ? { swept: true } : {}),
-        // An answer clears the cadence: whatever was wrong with reaching this
-        // model is not wrong now, so the next round must not wait.
         // The tally is kept even when nothing was confirmed, so the next round
         // continues the count instead of restarting it.
         ...(tally !== undefined && question !== "settled"
@@ -2898,20 +2810,6 @@ export async function runProbeRound(
       // out. The cache write stays once per round.
       if (outcome.kind === "ok") {
         applyMeasuredChannel(state.models, state.probes);
-        // An answer clears the cadence: whatever was wrong with reaching this
-        // model is not wrong now, so the next round must not wait. The comment
-        // above used to make exactly this promise with no code behind it — the
-        // tally was kept, the cadence never was.
-        //
-        // The cost of that gap is a counter that only climbs. `nextReachAttempt`
-        // reads the miss count to pick its step, so one bad stretch early in a
-        // process ratcheted a model into the seven-day step permanently: after
-        // two misses and one success, the very NEXT failure cost a week instead
-        // of six hours, and nothing about the model had changed to justify it.
-        if (state.reach[model.id] !== undefined) {
-          const { [model.id]: _answered, ...rest } = state.reach;
-          state.reach = rest;
-        }
       }
       } // shot loop
       state.probeRun.done += 1;
@@ -2927,9 +2825,8 @@ export async function runProbeRound(
   // restart. The derivation is the SAME one the warm start uses, so the two
   // cannot answer differently about the same evidence.
   //
-  // `adopt()` is deliberately not called: it restores `state.reach` and the
-  // probe map FROM the record, which would roll back the entries this very round
-  // just advanced.
+  // `adopt()` is deliberately not called: it restores the probe map FROM the
+  // record, which would roll back what this very round just wrote.
   if (state.cache !== null) {
     const derived = deriveWithEvidence(state, deps, state.cache.models);
     if (derived.candidates.length > 0) state.models = derived.candidates;
@@ -2960,11 +2857,6 @@ export async function runProbeRound(
     fetchedAt: state.cache?.fetchedAt ?? 0,
     models: state.cache?.models ?? {},
     probes: state.probes,
-    // The cadence, not just this round's outcome. The read side already knew
-    // how to restore it (`readReach`, `adopt`) and `writeCacheAtomic` already
-    // knew how to write it — but no call site passed it, so every write erased
-    // the ask-again schedule and the next boot started the backoff from zero.
-    reach: state.reach,
     lastProbeAt: state.lastProbeAt,
     // The report, so the panel's progress area survives a restart.
     lastRound: report,
