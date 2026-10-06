@@ -1709,6 +1709,105 @@ test('GUARD: a round does not erase a harvested vocabulary or a measured window'
   })
 })
 
+test('GUARD: a refusal to the spelling we asked counts as a sample, not a silence', async () => {
+  // Measured 2026-10-06: space-bunny-free answers `reasoning_effort: "none"`
+  // with a hard 400 on both channels, while the same model answers the omitted
+  // request normally. That refusal is the evidence ADR 0004 §31 needs to move
+  // the round to the model's own lowest level — and it used to be filed as
+  // "this round reached nothing", which (a) discarded the only evidence that
+  // `none` is unusable there and (b) silenced the model for six hours, so the
+  // fallback could never even be asked.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async (_model, question) => {
+        asked.push(question)
+        // The generic 400 every model returns for a bad parameter; it carries no
+        // vocabulary, so nothing may be harvested from it either.
+        if (question === 'none') {
+          return { kind: 'inconclusive', code: 'unknown', http: 400, reason: 'invalid request（HTTP 400）' }
+        }
+        // The omitted request measures 42; the fallback level drops to 4.
+        const tokens = question === 'baseline' ? 42 : 4
+        return {
+          kind: 'ok',
+          api: 'openai-completions',
+          effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens },
+        }
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    })
+    await catalog.forceRefresh()
+    // Three baselines, the refusal, then enough rounds at the fallback to
+    // confirm: three samples to produce a verdict, three to agree.
+    for (let i = 0; i < 10; i += 1) {
+      pastProbeFloor(clock)
+      await catalog.forceProbes()
+    }
+
+    assert.equal(asked[3], 'none', 'the candidate question is asked first');
+    assert.equal(asked[4], 'low', 'one refusal moves the round to the model\'s own lowest level');
+    assert.deepEqual(
+      [...new Set(asked.slice(4).filter((q) => q !== 'settled'))],
+      ['low'],
+      'every question after the refusal is that same fallback level',
+    );
+    assert.equal(asked.at(-1), 'settled', 'and once the verdict is frozen the round stops re-measuring it');
+
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free')
+    assert.equal(record.verdict, 'ok', 'a refusal is not a verdict about liveness');
+    assert.equal(record.effort?.kind, 'level-works', 'the fallback level is what gets confirmed');
+    assert.equal(record.effort?.level, 'low');
+  })
+})
+
+test('GUARD: three refusals of the same spelling end at no Off row, never a wrong one', async () => {
+  // The terminal case: when no spelling works, ADR 0004 §31 wants `off: null` —
+  // an honest absence, not a control that does nothing. The refusal has to be
+  // able to REACH that verdict, which it could not while it was filed as a round
+  // that reached nothing.
+  await withTempDir(async (dir) => {
+    // Seeded BEFORE the container exists, so the warm read adopts it: the
+    // baseline is already measured (three samples) and nothing has disagreed.
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'space-bunny-free': modelsDict()['space-bunny-free'] },
+        probes: {
+          'space-bunny-free': { verdict: 'ok', at: 1_000_000, effortBaselineTokens: [35, 42, 55] },
+        },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    )
+    const clock = { t: 2_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async () => ({ kind: 'inconclusive', code: 'unknown', http: 400, reason: 'invalid request（HTTP 400）' }),
+      listZenIds: async () => ['space-bunny-free'],
+    })
+    await catalog.forceRefresh()
+    for (let i = 0; i < 4; i += 1) {
+      pastProbeFloor(clock)
+      await catalog.forceProbes()
+    }
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free')
+    assert.equal(record.effort?.kind, 'rejected', 'three agreeing refusals confirm a rejection');
+    assert.equal(record.effort?.level, undefined, 'a rejection names no level');
+    await catalog.forceRefresh();
+    const model = catalog.current().models.find((m) => m.id === 'space-bunny-free');
+    assert.equal(model?.thinkingLevelMap?.off, null, 'so the model gets no Off row rather than a lying one');
+  })
+})
+
 test('GUARD: a confirmed verdict names the level the probe actually asked', async () => {
   // The round derived the question TWICE: once to send it (with the model's own
   // lowest published level as the fallback) and once to label the verdict (with

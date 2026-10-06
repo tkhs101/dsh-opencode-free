@@ -2269,7 +2269,25 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       const elapsed = Math.max(0, deps.now() - started);
       state.probeRun.results[model.id] = probeRowFor(outcome, elapsed, state.probes[model.id]?.verdict);
       state.probeRun.done += 1;
-      if (outcome === undefined || outcome === null || outcome.kind === "inconclusive") {
+      // A refusal of a spelling THIS probe injected is a sample about that
+      // spelling, not a failure to reach the model. Measured 2026-10-06:
+      // space-bunny-free answers `none` with a hard 400 on both channels while
+      // the same model answers the omitted request normally — so the refusal is
+      // evidence, and it is exactly the evidence that moves the round to the
+      // model's own lowest level (ADR 0004 §31). Treating it as a round that
+      // concluded nothing both threw that away AND silenced the model for six
+      // hours, so the fallback could never be reached.
+      //
+      // Only 400/422 qualify, and only for a question this probe actually asked:
+      // a 403/429 is about the caller, a 404/410 is about the model, and both are
+      // already classified upstream. The probe's own request is `hi` with a
+      // 1024-token budget, so ADR 0004 §7's "a generic 400 also means context
+      // overflow" shape does not apply to it.
+      const spellingRefused =
+        outcome !== undefined && outcome !== null && outcome.kind === "inconclusive"
+        && question !== "baseline" && question !== "settled"
+        && (outcome.http === 400 || outcome.http === 422);
+      if (outcome === undefined || outcome === null || (outcome.kind === "inconclusive" && !spellingRefused)) {
         untrusted = true;
         // A round that concluded nothing is a reason to ask LESS, not a verdict
         // about the model. Recorded on the symptom, so a model that answers again
@@ -2282,13 +2300,17 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         harvestSelfReport(state, model.id, outcome);
         continue;
       }
-      if (outcome.kind !== "ok" && outcome.kind !== "dead") {
+      if (outcome.kind !== "ok" && outcome.kind !== "dead" && !spellingRefused) {
         untrusted = true;
         state.reach = { ...state.reach, [model.id]: nextReachAttempt(state.reach[model.id], deps.now()) };
         harvestSelfReport(state, model.id, outcome);
         continue;
       }
       const prior = state.probes[model.id];
+      // A refusal carries no usage and no channel of its own, but it was still
+      // answered on the channel this round asked — which is what a confirmed
+      // verdict needs to be fingerprinted against.
+      if (spellingRefused) harvestSelfReport(state, model.id, outcome);
       // The Off verdict the same request observed, held back until it agrees
       // with what came before. `big-pickle` accepted `none` on six of nine
       // identical requests and 400'd the rest while its liveness stayed `ok`, so
@@ -2314,15 +2336,25 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         observation?.kind === "candidate" && (tokens?.length ?? 0) >= EFFORT_SAMPLES
           ? effortVerdictFrom(tokens, baseTokens)
           : undefined;
+      // A refusal IS a sample: `rejected` is the one kind that needs no token
+      // count, and it is what the fallback branch is waiting for.
       const sample: MeasuredEffort["kind"] | undefined =
-        question === "settled" ? undefined : working === true ? "none-works" : working === false ? "noop" : undefined;
+        question === "settled"
+          ? undefined
+          : spellingRefused
+            ? "rejected"
+            : working === true
+              ? "none-works"
+              : working === false
+                ? "noop"
+                : undefined;
       const tally = sample === undefined ? undefined : effortVerdict(prior?.effortSamples, sample);
+      // A refusal names no channel of its own, but it WAS answered on the one
+      // this round asked — and a verdict that cannot say which channel it was
+      // taken on is a verdict `thinkingLevelMapFor` will refuse to apply.
+      const channel = isMeasuredChannel(outcome.api) ? outcome.api : spellingRefused && isMeasuredChannel(model.api) ? model.api : undefined;
       const confirmed =
-        sample !== undefined &&
-        tally !== undefined &&
-        tally.kind === "confirmed" &&
-        isMeasuredChannel(outcome.api) &&
-        rawById(model.id) !== undefined;
+        sample !== undefined && tally !== undefined && tally.kind === "confirmed" && channel !== undefined && rawById(model.id) !== undefined;
       // The record is REBUILT every round, so it starts from the previous one:
       // evidence this round does not re-derive — the other side of the effort
       // tally, a vocabulary a refusal enumerated, a measured window — is the
@@ -2337,12 +2369,22 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       const { reason: _staleReason, ...carried } = prior ?? {};
       const next: ProbeRecord = {
         ...carried,
-        verdict: outcome.kind,
+        // A round that only measured a refusal learned nothing new about
+        // LIVENESS, so the verdict it already earned stands; writing
+        // `inconclusive` here would both be a value `ProbeVerdict` does not
+        // admit and throw away a verdict the model did earn.
+        verdict: outcome.kind === "ok" || outcome.kind === "dead" ? outcome.kind : (prior?.verdict ?? "ok"),
         at: stamp,
         ...(typeof outcome.reason === "string" && outcome.reason !== "" ? { reason: outcome.reason } : {}),
         // Only an answer names a channel. A refusal is evidence that the
-        // channel did not work, not evidence that another one would.
-        ...(outcome.kind === "ok" && isMeasuredChannel(outcome.api) ? { api: outcome.api } : {}),
+        // channel did not work, not evidence that another one would — except a
+        // refusal to OUR OWN spelling, which was answered on the channel we
+        // asked and therefore keeps it.
+        ...(outcome.kind === "ok" && isMeasuredChannel(outcome.api)
+          ? { api: outcome.api }
+          : spellingRefused && channel !== undefined
+            ? { api: channel }
+            : {}),
         // Reaching here means the prober exhausted every channel before
         // concluding, so this `dead` is earned and can be final.
         ...(outcome.kind === "dead" ? { swept: true } : {}),
@@ -2365,16 +2407,17 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // The fallback question stays put: it answered the question, so
         // switching back would re-open a settled matter.
         ...(tally !== undefined ? { effortQuestion: question } : {}),
-        ...(confirmed && tally !== undefined && isMeasuredChannel(outcome.api)
+        ...(confirmed && tally !== undefined && channel !== undefined
           ? {
               effort: {
                 // The fallback question's answer is a claim about the level it
                 // named, so it is recorded in those words rather than as a
-                // claim about `none`.
-                kind: question === "none" ? "none-works" : "level-works",
-                ...(question === "none" ? {} : { level: question }),
+                // claim about `none`. A refusal names neither: it is about the
+                // spelling as such, and it carries no level.
+                kind: spellingRefused ? "rejected" : question === "none" ? "none-works" : "level-works",
+                ...(spellingRefused || question === "none" ? {} : { level: question }),
                 fp: reasoningFingerprint({ ...rawById(model.id)!, id: model.id }),
-                api: outcome.api,
+                api: channel,
                 at: stamp,
               },
               effortDiscord: 0,
