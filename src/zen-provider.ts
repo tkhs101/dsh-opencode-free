@@ -1217,12 +1217,23 @@ function failureKindFor(status: number, body: string, apiKey: string | undefined
   // `space-bunny-free`, a model this session is running on, sat in the panel as
   // "unmeasurable" for rounds while answering normally.
   if (FORMAT_SCOPED_PATTERN.test(body)) return "unknown";
-  // "Upstream request failed: Endpoint is unavailable." says the ROUTE cannot
-  // serve, not that the model is gone and certainly not that the credential is
-  // wrong. Measured 2026-10-07 on `ling-3.0-flash-fin-free`, which had been
-  // painted a red model failure for rounds while the endpoint was simply down.
-  if (ENDPOINT_FAILURE_PATTERN.test(body)) return "endpoint-unavailable";
   const kind = classifyZenFailure(status, body);
+  // The status wins where the status says something, and the body only breaks
+  // ties where it does not.
+  //
+  // That ordering is not cosmetic: this provider REUSES the sentence
+  // "Upstream request failed: Endpoint is unavailable." for a quota refusal.
+  // Measured 2026-10-07: `ling-3.1-flash-free` answers HTTP 429 with exactly
+  // that body. Read body-first, it became "the endpoint is unreachable" — which
+  // is not wrong-looking, just wrong: the remedy is to wait for the quota window,
+  // not to diagnose a route.
+  //
+  // Where the status says nothing — a 400, or a 200 carrying an error frame —
+  // the body is the only evidence there is, and "Endpoint is unavailable" then
+  // means the route is down. Measured the same day on
+  // `ling-3.0-flash-fin-free`, which had been painted a red model failure for
+  // rounds while the endpoint was simply down.
+  if (kind === "unknown" && ENDPOINT_FAILURE_PATTERN.test(body)) return "endpoint-unavailable";
   if (kind !== "bad-key") return kind;
   const sent = typeof apiKey === "string" ? apiKey.trim() : "";
   return sent === "" || sent === ANONYMOUS_KEY ? "anon-gated" : kind;

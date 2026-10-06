@@ -1443,6 +1443,27 @@ test('GUARD: an unreachable endpoint is a route problem, not a model failure', a
   assert.equal(calls, 1, 'the other channel is not asked; the endpoint is down for it too');
 });
 
+test('GUARD: a quota refusal stays a quota refusal even when the body blames the endpoint', async () => {
+  // Measured 2026-10-07 on `ling-3.1-flash-free`: HTTP 429 carrying
+  //   "Upstream request failed: Endpoint is unavailable."
+  // The same sentence, the same provider, as the genuine endpoint failure this
+  // note's sibling test feeds — which is why the two cannot be told apart from
+  // the body alone, and why the STATUS has to decide first.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () =>
+      new Response(
+        '{"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Endpoint is unavailable."}}',
+        { status: 429, headers: { 'Content-Type': 'application/json' } },
+      ),
+  });
+  assert.equal(outcome.code, 'quota-exhausted', '429 says quota whatever the body says');
+  assert.notEqual(outcome.code, 'endpoint-unavailable', 'and not a route failure');
+});
+
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
     () => 'probe-session',
