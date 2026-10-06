@@ -2286,7 +2286,23 @@ export function measuredContextFor(
 }
 
 // Warm start: a valid state.cache restores the catalogue without any network.
-function adopt(
+/**
+ * Restore a cached record into the running state.
+ *
+ * `restoreRound` is for STARTUP, and it is the only thing that puts a previous
+ * round's finished report back on screen. It must never do that to a round that
+ * is in flight: replacing a live `probeRun` (running, requests counting, done
+ * climbing) with the previous one sends `requests` back to 0, `done` back to
+ * the old total and `running` to false, so the panel adopts a finished-looking
+ * report immediately and stops following — the round the user just started runs
+ * on invisibly. Measured 2026-10-06: "click probe, it flashes, then nothing
+ * happens", with the endpoint reporting `running:false, requests:0, done:35/35`
+ * while a round was demonstrably in flight.
+ *
+ * The guard lives HERE rather than at the call site because this is where the
+ * clobbering happens, and every future caller inherits it.
+ */
+export function adopt(
   state: CatalogState,
   deps: CatalogDeps,
   record: CatalogCacheRecord,
@@ -2329,7 +2345,7 @@ function adopt(
   // outcome instead of an empty progress area. `running` stays false: this is
   // a completed round, not one to follow.
   const restored = record.lastRound;
-  if (restoreRound && restored !== undefined && restored.total > 0) {
+  if (restoreRound && state.probeRun.running !== true && restored !== undefined && restored.total > 0) {
     state.probeRun = {
       running: false,
       requests: 0,
@@ -2994,6 +3010,18 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         // Adopted whatever its age: a stale state.cache is still a far better answer
         // than the offline floor, and `ensureFresh` revalidates on the first read
         // in the background rather than making the user wait for 5.2MB.
+        //
+        // …unless a round is already in flight. `restoreRound` exists for the
+        // startup case, and this read is the startup read — but it resolves on
+        // its own schedule, and a round started from `getModels()` can begin
+        // before it lands. Restoring then replaces a LIVE `probeRun`
+        // (running, requests counting, done climbing) with the previous round's
+        // finished report: `requests` back to 0, `done` back to 35/35,
+        // `running` false. The panel adopts that at once and stops following, so
+        // the round the user just started runs on invisibly and the card shows
+        // nothing changing. Measured 2026-10-06: "click probe, it flashes, then
+        // nothing happens" with the live endpoint reporting `running:false,
+        // requests:0, done:35/35` while a round was demonstrably in flight.
         adopt(state, deps, found, true);
       })
       .catch(() => undefined)

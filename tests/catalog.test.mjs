@@ -12,6 +12,7 @@ import {
   GATE_TTL_MS,
   MODELS_DEV_URL,
   cachePath,
+  adopt,
   catalogueIsStale,
   channelFor,
   createCatalog,
@@ -2547,6 +2548,71 @@ test('GUARD: the daily round covers every model Zen serves; the manual one stays
   })
 })
 
+
+test('GUARD: restoring a cached round never overwrites a round that is running', async () => {
+  // "Click probe, it flashes, then nothing happens."
+  //
+  // The startup read restores the previous round's finished report. It resolves
+  // on its own schedule, and a round can begin before it lands — the daily round
+  // starts from `getModels()`, which is exactly what a restarting host does.
+  // Restoring over a live `probeRun` sends `requests` back to 0, `done` back to
+  // the old total and `running` to false, so the panel adopts a finished-looking
+  // report at once and stops following: the round runs on invisibly.
+  //
+  // Measured 2026-10-06: the endpoint reported `running:false, requests:0,
+  // done:35/35` while a round was demonstrably in flight.
+  //
+  // Driven through `adopt` itself — that is where the clobbering happens, and so
+  // where the guard belongs — using two plain objects, the way the other
+  // round-level cases here are driven.
+  const state = initialState([])
+  state.models = ['a-free', 'b-free'].map((id) => ({ id, name: id, api: 'openai-completions' }))
+  let release
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  const deps = {
+    path: join(tmpdir(), 'never-written-adopt-does-not-write'),
+    fetchImpl: async () => {
+      throw new Error('no network in this test');
+    },
+    now: () => 1_700_000_000_000,
+    userAgent: undefined,
+    ttlMs: 86_400_000,
+    warmReadTimeoutMs: 2_000,
+    warm: Promise.resolve(),
+    template: state.models[0],
+    knownApis: undefined,
+    probe: async (model) => {
+      if (model.id === 'a-free') await blocked;
+      return { kind: 'ok' };
+    },
+    listZenIds: async () => ['a-free', 'b-free'],
+    hidden: undefined,
+  };
+
+  const running = runProbeRound(state, deps);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(state.probeRun.running, true, 'a round is in flight');
+  const before = { done: state.probeRun.done, requests: state.probeRun.requests };
+  assert.equal(before.requests, 1, 'and it has spent a request');
+
+  // What the startup read does when it lands late: a finished report from disk.
+  adopt(state, deps, {
+    version: CACHE_VERSION,
+    fetchedAt: 1,
+    models: { 'a-free': {}, 'b-free': {} },
+    probes: {},
+    lastProbeAt: 1,
+    lastRound: { total: 7, done: 7, results: {}, targets: ['a-free'] },
+  }, true);
+
+  assert.equal(state.probeRun.running, true, 'still running');
+  assert.equal(state.probeRun.done, before.done, 'the tally it had reached is untouched');
+  assert.equal(state.probeRun.requests, before.requests, 'and so is its request count');
+  release();
+  await running;
+})
 
 test('GUARD: there is no ask-again cadence — every served model is asked every round', async () => {
   // The backoff (0 → 6h → 24h → 7d, keyed on consecutive misses) is gone by
