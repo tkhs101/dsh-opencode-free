@@ -1156,11 +1156,13 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
         // The baseline round sends nothing at all: it is the same request the
         // liveness probe was already making, so asking for the model's own
         // default costs no extra quota.
-        if (deps.question === undefined || deps.question === "baseline") return body;
+        // `settled` means the model already has a standing verdict: send the plain
+        // liveness request and measure nothing.
+        if (deps.question === undefined || deps.question === "baseline" || deps.question === "settled") return body;
         const responses = (sent as { api?: string } | undefined)?.api === "openai-responses";
         // Whatever level the round decided to ask about. `deps.question` is
         // `none`, a baseline marker, or a specific level name.
-        const spelling = deps.question === "none" || deps.question === "baseline" ? "none" : deps.question;
+        const spelling = deps.question === "none" ? "none" : deps.question;
         return responses ? { ...body, reasoning: { effort: spelling } } : { ...body, reasoning_effort: spelling };
       },
       // A probe must not spend a second call confirming anything: without this
