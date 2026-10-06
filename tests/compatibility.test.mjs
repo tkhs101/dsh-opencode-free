@@ -1124,6 +1124,30 @@ test('GUARD: the guard mirrors the map on both channels', async () => {
   assert.equal(real.reasoning?.effort, 'low', 'a real level passes through')
 })
 
+test('GUARD: a 500 records no effort sample at all', async () => {
+  // Measured 2026-10-06: big-pickle returned 500 on four consecutive requests
+  // carrying `minimal`, while omitting answered normally on the same endpoint
+  // (14 and 16 reasoning tokens). Only the `minimal` path was degraded.
+  //
+  // If a server error counted as a sample it would push the model toward
+  // "not working" and the fallback would record `off: null` — the exact
+  // no-Off-row failure the fallback exists to prevent. A model that is briefly
+  // unmeasurable must not be able to lose its control.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  for (const [label, status] of [['500', 500], ['429', 429], ['403', 403]]) {
+    const outcome = await probeModel(model, {
+      provider: {
+        streamSimple: () => ({ result: async () => { throw new Error('boom'); } }),
+      },
+      apiKey: 'public',
+      fetchImpl: async () => new Response('{"error":{"message":"nope"}}', { status }),
+    });
+    assert.notEqual(outcome.kind, 'ok', `${label} must not read as ok`);
+    assert.equal(outcome.effort, undefined, `${label} must carry no effort sample`);
+  }
+})
+
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
     () => 'probe-session',

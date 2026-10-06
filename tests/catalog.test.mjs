@@ -39,6 +39,7 @@ import {
   clampVerdict,
   effortVerdict,
   nextEffortQuestion,
+  effortVerdictFrom,
   topThinkingLevel,
   unknownFree,
   writeCacheAtomic,
@@ -514,36 +515,65 @@ test('contextFingerprint moves only for its own axis', () => {
   assert.notEqual(contextFingerprint({ ...base, limit: undefined }), original)
 })
 
-test('the probe stops asking about `none` once it cannot be agreed on', () => {
-  // A model whose `none` flips forever would otherwise sit unmeasured FOREVER
-  // and never get the Off row its lowest level demonstrably provides. The round
-  // changes what its existing request asks; it does not add one.
-  assert.equal(nextEffortQuestion(undefined), 'none', 'an unseen model starts at `none`')
-  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortDiscord: 2 }), 'none', 'two rounds is not yet')
-  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortDiscord: 3 }), 'minimal', 'three flips moves on')
-  // It stays moved: a settled question is not re-opened.
+test('the probe alternates its question so a baseline costs no extra request', () => {
+  // The baseline is asked for rather than assumed: an absolute threshold is not
+  // defensible across models, because longcat's floor of 36 sits ABOVE
+  // big-pickle's omitted baseline of 14. Asking costs nothing because the round
+  // changes what its existing request asks.
+  assert.equal(nextEffortQuestion(undefined), 'baseline', 'an unseen model starts by asking for its own default')
+  // Three baseline samples before a candidate is asked: a median over one point
+  // is just that point. The samples themselves are free on a no-ladder model,
+  // where the liveness request's `low` already clamps to omission.
+  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortBaselineTokens: [16] }), 'baseline', 'one is not a median');
+  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortBaselineTokens: [14, 16, 55] }), 'none');
+  // ONE decisive rejection moves on, not three. big-pickle's `none` sits at a
+  // ratio of 12.4 — far outside the bracket, so repeating it only spends quota
+  // to confirm what is settled. longcat is why the fallback exists at all: its
+  // `none` is 1.578 and its lowest level is 0.800, so both must be spent.
   assert.equal(
-    nextEffortQuestion({ verdict: 'ok', at: 1, effortQuestion: 'minimal', effortDiscord: 9 }),
+    nextEffortQuestion({ verdict: 'ok', at: 1, effortBaselineTokens: [14, 16, 55], effortDiscord: 1 }),
     'minimal',
-  )
-  // A confirmed verdict does not move at all — only discord does.
-  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortDiscord: 0 }), 'none')
+  );
+  assert.equal(
+    nextEffortQuestion({ verdict: 'ok', at: 1, effortBaselineTokens: [14, 16, 55], effortQuestion: 'minimal', effortDiscord: 1 }),
+    'minimal',
+    'it stays moved: a settled question is not re-opened',
+  );
+});
+
+test('INVARIANT: a candidate is judged on the MEDIAN, against the model not a number', () => {
+  // Measured 2026-10-06, medians against each model's own omitted baseline:
+  //   big-pickle  minimal 0    against 16  ->  0.000   WORKS
+  //   space-bunny low    9    against 42  ->  0.231   WORKS
+  //   longcat     minimal 36    against 45  ->  0.800   inert
+  //   muse-spark  minimal 38    against 166 ->  0.229   WORKS
+  //   big-pickle  none  173    against 16  ->  10.81   inert
+  // The bracket is (0.231, 0.800) and 0.43 is its max-margin cut in log space.
+  assert.equal(effortVerdictFrom([0, 8, 0, 0, 8, 0], [14, 16, 55]), true, 'big-pickle minimal');
+  assert.equal(effortVerdictFrom([0, 22, 0, 22], [35, 55, 36, 42]), true, 'space-bunny low');
+  assert.equal(effortVerdictFrom([36, 36, 36, 36], [36, 45, 77]), false, 'longcat minimal is its own default');
+  assert.equal(effortVerdictFrom([173, 198, 173], [14, 16, 55]), false, "big-pickle's none is nowhere near");
+  // The median is what makes big-pickle's bimodal samples work at all. Its
+  // `minimal` alternates 0 and 8; per-sample classification flips between
+  // "works" and "inert" on that, while the median of [0,8,0,0,8,0] is 0 and
+  // lands decisively below the 0.43 boundary.
+  assert.equal(effortVerdictFrom([0, 8, 0, 0, 8, 0], [14, 16, 55]), true);
+  assert.equal(effortVerdictFrom([0, 8], [14, 16, 55]), true, 'the same holds on two samples');
+  // And a sample that is genuinely near the baseline is not rescued by a
+  // favourable median: this is what a partial reduction looks like.
+  assert.equal(effortVerdictFrom([8, 8], [14, 16, 55]), false, '8 against 16 is a 0.50 ratio, inside the bracket, so no claim');
+  // An absolute threshold cannot work, and this pair is why: longcat's floor of
+  // 36 against muse-spark's working 38. Two tokens.
+  assert.equal(effortVerdictFrom([36, 36], [45, 45]), false);
+  assert.equal(effortVerdictFrom([38, 38], [166, 184]), true);
+  // No claim without both sides. "We did not look" must never read as "it does
+  // not work" — that is the lie this change set exists to remove.
+  assert.equal(effortVerdictFrom([], [16]), undefined, 'no candidate samples');
+  assert.equal(effortVerdictFrom([0], []), undefined, 'no baseline samples');
+  assert.equal(effortVerdictFrom([0], undefined), undefined, 'an absent baseline');
+  assert.equal(effortVerdictFrom([0], [0]), undefined, 'a zero baseline cannot be divided by');
 })
 
-test('the fallback question is recorded in its own words', () => {
-  // The fallback answers a question about `minimal`, so its verdict must not be
-  // filed as a claim about `none`. A record that says `none-works` because
-  // `minimal` was asked is the exact confusion this naming prevents.
-  const fp = reasoningFingerprint({ reasoning: true, reasoning_options: [{ type: 'toggle' }] });
-  assert.equal(effortVerdict(undefined, 'level-works').kind, 'discord');
-  assert.equal(effortVerdict(['level-works', 'level-works'], 'level-works').kind, 'confirmed');
-  // And the level name travels with the verdict, so the map can name the rung
-  // rather than guess which one was meant.
-  const measured = { kind: 'level-works', level: 'minimal', fp, api: 'openai-completions', at: 1 };
-  assert.equal(thinkingLevelMapFor({ reasoning: true, reasoning_options: [{ type: 'toggle' }] }, 'openai-completions', measured).off, 'minimal');
-  // A `level-works` record without a level names nothing — it is not usable.
-  assert.equal(isMeasuredEffort({ kind: 'level-works', fp, api: 'openai-completions', at: 1 }), false);
-})
 
 test('INVARIANT: an effort verdict needs agreeing samples, not a majority', () => {
   // Measured 2026-10-06: `big-pickle` returned HTTP 400 on three of nine
