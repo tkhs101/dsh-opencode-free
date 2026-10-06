@@ -446,15 +446,27 @@ export function effortMeasurementPending(
   if (!model.reasoning || model.thinkingLevelMap === undefined) return false;
   if (question === "settled") return false;
   if (question === "baseline") return (record?.effortBaselineTokens?.length ?? 0) < EFFORT_SAMPLES;
-  // A baseline of zero makes the whole axis STRUCTURALLY undecidable: the ratio
-  // test is `candidate < 0.43 × baseline`, and nothing is below 0.43 × 0. So no
-  // verdict is reachable — not "works", not "noop" — and without this guard every
-  // round spent its whole budget asking a question whose answer cannot land.
-  //
-  // Measured 2026-10-06: `fledge-alpha-free` sends no `completion_tokens_details`
-  // at all (ADR 0004 §33), so its baseline reads 0 and stayed 0 forever.
-  if (median(record?.effortBaselineTokens ?? []) === 0) return false;
   return (record?.effortTokens?.length ?? 0) < EFFORT_CANDIDATE_SAMPLES;
+}
+
+/**
+ * Whether this model's reasoning can be measured at all.
+ *
+ * A baseline of zero makes the axis STRUCTURALLY undecidable: the ratio test is
+ * `candidate < 0.43 × baseline`, and nothing is below 0.43 × 0, so neither "works"
+ * nor "noop" is reachable — and a question whose answer cannot land must not be
+ * asked at all.
+ *
+ * Measured 2026-10-06: `fledge-alpha-free` sends no `completion_tokens_details`
+ * (ADR 0004 §33), so its baseline reads 0. Stopping the LOOP was not enough: the
+ * round still opened with one shot, that shot asked the spelling, and its reading
+ * was filed — so the sample array grew by one every round for ever. Deciding it
+ * here instead means the round asks for LIVENESS only, exactly like a settled
+ * model, and nothing accumulates.
+ */
+function effortAxisUndecidable(record: ProbeRecord | undefined): boolean {
+  const baseline = record?.effortBaselineTokens;
+  return baseline !== undefined && baseline.length >= EFFORT_SAMPLES && median(baseline) === 0;
 }
 
 export function nextEffortQuestion(
@@ -462,6 +474,7 @@ export function nextEffortQuestion(
   fallback = "minimal",
   settled = false,
 ): EffortQuestion {
+  if (effortAxisUndecidable(record)) return "settled";
   // A confirmed verdict stands. The model is still probed for LIVENESS — that is
   // unchanged and still how a `dead` verdict is earned — but no further effort
   // sample is taken, because a verdict that keeps absorbing samples has a median
@@ -972,6 +985,12 @@ export interface CatalogCacheRecord {
    * write nothing there, and a model we never reached has no verdict to give it.
    */
   readonly reach?: Readonly<Record<string, ReachRecord>>;
+  /**
+   * Models whose stored verdict was NOT adopted, because a median-based verdict
+   * with no samples behind it cannot be reproduced. In-memory only: every write
+   * site names its fields, so this never reaches disk.
+   */
+  readonly droppedVerdicts?: readonly string[];
   /** When the last probe ROUND ran, whether or not it concluded anything. */
   readonly lastProbeAt: number;
   /**
@@ -1226,8 +1245,9 @@ export interface ProbeResult {
  * other than `none`/`minimal` (a fallback LEVEL — `low` on space-bunny-free —
  * was silently dropped, so a restart sent the model back to `none`).
  */
-function readProbes(value: unknown): ProbeMap {
-  if (!isPlainObject(value)) return {};
+function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string[] } {
+  const droppedVerdicts: string[] = [];
+  if (!isPlainObject(value)) return { probes: {}, droppedVerdicts };
   const probes: ProbeMap = {};
   for (const [id, entry] of Object.entries(value)) {
     if (!isPlainObject(entry)) continue;
@@ -1254,6 +1274,7 @@ function readProbes(value: unknown): ProbeMap {
       isMeasuredEffort(entry.effort) &&
       entry.effort.kind !== "rejected" &&
       (!Array.isArray(entry.effortTokens) || entry.effortTokens.length === 0);
+    if (unsupported) droppedVerdicts.push(id);
     probes[id] = {
       ...(unsupported ? {} : isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
       verdict: entry.verdict,
@@ -1292,7 +1313,11 @@ function readProbes(value: unknown): ProbeMap {
         : {}),
     };
   }
-  return probes;
+  // The ids whose verdict could not be adopted. Collected HERE because the
+  // sanitised map has already lost the evidence that they had one: whoever
+  // restores the catalogue must be able to tell "never measured" from "we just
+  // decided we do not know", and only this list says which.
+  return { probes, droppedVerdicts };
 }
 
 /** D5: `$DSH_HOME/dsh-opencode-free/catalog.json` (same convention as dsh-pocket). */
@@ -1311,12 +1336,14 @@ export async function readCache(path: string): Promise<CatalogCacheRecord | null
     // carrying the old `opencode` provider record is rejected outright rather
     // than adopted as a catalogue.
     if (!isPlainObject(parsed.models)) return null;
+    const read = readProbes(parsed.probes);
     return {
       version: CACHE_VERSION,
       etag: typeof parsed.etag === "string" ? parsed.etag : undefined,
       fetchedAt: typeof parsed.fetchedAt === "number" ? parsed.fetchedAt : 0,
       models: parsed.models,
-      probes: readProbes(parsed.probes),
+      probes: read.probes,
+      droppedVerdicts: read.droppedVerdicts,
       reach: readReach(parsed.reach),
       lastProbeAt:
         typeof parsed.lastProbeAt === "number" && Number.isFinite(parsed.lastProbeAt)
@@ -2229,7 +2256,18 @@ function adopt(
   }
 
   if (Object.keys(record.probes).length > 0) state.probes = { ...record.probes };
-  if (record.reach !== undefined && Object.keys(record.reach).length > 0) state.reach = { ...record.reach };
+  // The ask-again cadence, with one exception: a model whose verdict was DROPPED
+  // for want of its samples is not a model we have an answer about any more, and
+  // leaving its backoff in place means the user watches the capability row vanish
+  // and then waits hours for it to come back. Deciding we do not know is a reason
+  // to ask sooner, not later.
+  if (record.reach !== undefined && Object.keys(record.reach).length > 0) {
+    state.reach = { ...record.reach };
+    for (const id of record.droppedVerdicts ?? []) {
+      const { [id]: _due, ...rest } = state.reach;
+      state.reach = rest;
+    }
+  }
   // A channel a previous process MEASURED, re-applied. Without this the
   // measurement is on disk and ignored, so a restart silently reverted every
   // model to its inferred channel and the very failure the probe ruled out

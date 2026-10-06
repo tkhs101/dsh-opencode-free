@@ -1949,6 +1949,92 @@ test('GUARD: a verdict whose samples were deleted reads as no verdict', async ()
   })
 })
 
+test('GUARD: dropping a verdict makes the model due again, not in six hours', async () => {
+  // 0.3.1's verdicts are unsupported, so the reader drops them — and that is a
+  // decision we do not know something. Live 2026-10-06: ling-3.1-flash-free lost
+  // its Off row at boot and then sat in a backoff until 01:35, because its
+  // cadence entry survived the drop. A capability the user can see disappear and
+  // then wait hours to get back is worse than never having claimed it.
+  await withTempDir(async (dir) => {
+    const ling = { ...modelsDict()['space-bunny-free'], id: 'ling-3.1-flash-free', name: 'Ling 3.1 Flash Free' }
+    const fp = reasoningFingerprint(ling)
+    // The backoff is expressed against the SAME clock the catalogue runs on, or
+    // the test would silently be testing nothing.
+    const clock = { t: 1_000_000 }
+    const future = clock.t + 6 * 60 * 60_000;
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'ling-3.1-flash-free': ling },
+        probes: {
+          'ling-3.1-flash-free': {
+            verdict: 'ok',
+            at: 1_000_000,
+            effortReading: EFFORT_READING,
+            effort: { kind: 'none-works', fp, api: 'openai-completions', at: 1_000_000 },
+            effortFrozenAt: 1_000_000,
+            effortTokens: [],
+            effortBaselineTokens: [22, 47, 31],
+          },
+        },
+        reach: { 'ling-3.1-flash-free': { misses: 1, nextAt: future } },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    )
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'ling-3.1-flash-free': ling }) }),
+      probe: async (_model, question) => {
+        asked.push(question);
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 30 } };
+      },
+      listZenIds: async () => ['ling-3.1-flash-free'],
+    });
+    await catalog.forceProbes();
+    assert.ok(
+      asked.length > 0,
+      'the model is asked now, not at the end of its backoff — we just decided we do not know',
+    );
+  })
+
+  // A model that is merely unreachable keeps its cadence: this exception is for
+  // the drop, not for every entry in the map.
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    const future = clock.t + 6 * 60 * 60_000;
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'space-bunny-free': modelsDict()['space-bunny-free'] },
+        probes: { 'space-bunny-free': { verdict: 'ok', at: 1_000_000 } },
+        reach: { 'space-bunny-free': { misses: 1, nextAt: future } },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    )
+    let asked = 0;
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async () => {
+        asked += 1;
+        return { kind: 'ok', api: 'openai-completions' };
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    });
+    await catalog.forceProbes();
+    assert.equal(asked, 0, 'a model inside its backoff is still left alone');
+  })
+})
+
 test('GUARD: a confirmed verdict keeps the samples it rests on', async () => {
   // The samples were cleared on confirmation while the comment beside them said
   // they were kept. That is not a tidiness question: they are the only evidence a
@@ -2024,12 +2110,21 @@ test('GUARD: a route that reports no reasoning stops being asked, not asked for 
     const record = await readProbeRecord(join(dir, 'catalog.json'), 'fledge-alpha-free');
     assert.deepEqual(record.effortBaselineTokens, [0, 0, 0]);
     assert.equal(record.effort, undefined, 'nothing is claimed about a model we cannot measure');
+    assert.deepEqual(record.effortTokens, undefined, 'and no candidate reading was filed from a question that cannot land');
 
-    // And a second click does not spend the budget again on the same question.
-    asked = 0;
-    clock.t += 25 * 60 * 60_000;
-    await catalog.runProbes();
-    assert.equal(asked, 1, 'later rounds pay one liveness request, not a budget');
+    // Later rounds pay one liveness request, and file nothing: stopping the LOOP
+    // was not enough on its own — the round still opened with one shot, that shot
+    // asked the spelling, and its reading grew the sample array by one every
+    // round for ever. Live 2026-10-06: `fledge-alpha-free` went from six samples
+    // to seven while already "abandoned".
+    for (let i = 0; i < 3; i += 1) {
+      clock.t += 25 * 60 * 60_000;
+      await catalog.runProbes();
+    }
+    const later = await readProbeRecord(join(dir, 'catalog.json'), 'fledge-alpha-free');
+    assert.deepEqual(later.effortBaselineTokens, [0, 0, 0], 'the baseline does not grow either');
+    assert.equal(later.effortTokens, undefined, 'nor does the candidate array');
+    assert.equal(later.effortQuestion, undefined, 'and no question is left standing');
   })
 })
 
