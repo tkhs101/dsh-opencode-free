@@ -1907,6 +1907,60 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
   })
 })
 
+test('GUARD: a verdict whose own samples contradict it is corrected on read', async () => {
+  // longcat-2.5-preview-free, exactly as it sits on disk on 2026-10-06:
+  // verdict `level-works / minimal`, samples [1,36,36,36,36], baseline
+  // [36,36,36]. Median 36 against a threshold of 15.48 — no reduction — and the
+  // model was handed an Off row anyway.
+  //
+  // The verdict is a pure function of those samples and the samples sit beside
+  // it, so waiting for the TTL or a re-measurement is waiting for an answer
+  // that is already in the record. Reading recomputes the kind.
+  await withTempDir(async (dir) => {
+    const fp = reasoningFingerprint({ ...modelsDict()['space-bunny-free'], id: 'longcat-2.5-preview-free' });
+    const stored = {
+      verdict: 'ok',
+      at: 1_000_000,
+      effortReading: EFFORT_READING,
+      effort: { kind: 'level-works', level: 'minimal', fp, api: 'openai-completions', at: 1_000_000 },
+      effortFrozenAt: 1_000_000,
+      effortTokens: [1, 36, 36, 36, 36],
+      effortBaselineTokens: [36, 36, 36],
+    };
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'longcat-2.5-preview-free': modelsDict()['space-bunny-free'] },
+        probes: { 'longcat-2.5-preview-free': stored },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    );
+    const read = await readCache(join(dir, 'catalog.json'));
+    assert.equal(read.probes['longcat-2.5-preview-free'].effort?.kind, 'noop', 'the samples say it reduces nothing');
+    assert.equal(read.probes['longcat-2.5-preview-free'].effort?.level, undefined, 'so it names no level');
+
+    // A verdict the samples DO support keeps its level, and one that reduces
+    // reasoning stays a finding rather than being rewritten into `noop`.
+    const good = { ...stored, effortTokens: [0, 0, 0], effortBaselineTokens: [36, 36, 36] };
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'longcat-2.5-preview-free': modelsDict()['space-bunny-free'] },
+        probes: { 'longcat-2.5-preview-free': good },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    );
+    const read2 = await readCache(join(dir, 'catalog.json'));
+    assert.equal(read2.probes['longcat-2.5-preview-free'].effort?.kind, 'level-works', 'supported: the level is kept');
+  })
+})
+
 test('GUARD: a verdict whose samples were deleted reads as no verdict', async () => {
   // 0.3.1 confirmed a verdict and then cleared `effortTokens`. Every verdict it
   // wrote is therefore an assertion nobody can reproduce — and one of them

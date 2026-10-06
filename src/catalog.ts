@@ -1210,6 +1210,44 @@ export interface ProbeResult {
 }
 
 /**
+ * A stored verdict's KIND is derived from its own samples, every time it is
+ * read.
+ *
+ * For a while the round re-derived that kind from the question spelling
+ * ("were we asking about `none`, or about a level?") instead of taking it from
+ * the confirmed sample, so a confirmed `noop` could be stored as
+ * `level-works`. Live 2026-10-06: `longcat-2.5-preview-free` carried
+ * `[1,36,36,36,36]` against a `[36,36,36]` baseline — median 36 against a
+ * threshold of 15.48, no reduction at all — and was handed an Off row at
+ * `minimal`.
+ *
+ * The verdict is a pure function of those samples, and the samples sit right
+ * beside it, so there is nothing to wait for and no request to spend: recompute.
+ * A model whose verdict is stored without samples yields no recomputation and
+ * no claim, which is the same place the unsupported check above already sends
+ * it.
+ */
+function correctedEffortKind(entry: Record<string, unknown>): MeasuredEffort | undefined {
+  if (!isMeasuredEffort(entry.effort)) return undefined;
+  const effort = entry.effort;
+  // A refusal is decided by refusals, not by a median; there is nothing to
+  // recompute and nothing that could contradict it.
+  if (effort.kind === "rejected") return effort;
+  const tokens = Array.isArray(entry.effortTokens) ? entry.effortTokens : undefined;
+  const baseline = Array.isArray(entry.effortBaselineTokens) ? entry.effortBaselineTokens : undefined;
+  const verdict = effortVerdictFrom(tokens, baseline);
+  // No samples to judge from: make no claim rather than carry one we cannot check.
+  if (verdict === undefined) return undefined;
+  if (verdict) {
+    // It reduces reasoning. `level-works` and `none-works` are the same finding
+    // spoken in the words of the level that was asked.
+    return effort.level === undefined ? { ...effort, kind: "none-works" } : { ...effort, kind: "level-works" };
+  }
+  // It reduces nothing. That is `noop`, whatever spelling was asked.
+  return { ...effort, kind: "noop", level: undefined };
+}
+
+/**
  * Read persisted verdicts defensively: a damaged entry is dropped, not fatal.
  *
  * Every evidence field the round writes MUST be read here, and the reader is
@@ -1254,7 +1292,7 @@ function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string
       (!Array.isArray(entry.effortTokens) || entry.effortTokens.length === 0);
     if (unsupported) droppedVerdicts.push(id);
     probes[id] = {
-      ...(unsupported ? {} : isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
+      ...(unsupported ? {} : { effort: correctedEffortKind(entry) }),
       verdict: entry.verdict,
       at: entry.at,
       ...(typeof entry.reason === "string" && entry.reason !== "" ? { reason: entry.reason } : {}),
