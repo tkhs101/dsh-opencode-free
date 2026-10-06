@@ -478,7 +478,12 @@ function effortAxisUndecidable(record: ProbeRecord | undefined): boolean {
  * a backoff is not either.
  */
 export function pendingEffortIds(state: CatalogState): string[] {
-  return state.models
+  // The SAME list the picker offers. `state.models` is the pre-gate catalogue,
+  // so a model Zen no longer lists would otherwise be reported as "still being
+  // measured" — the panel would then ask the user to keep clicking for a model
+  // that is not in their picker at all and never will be (live 2026-10-06: 28
+  // pending, 23 of them not-listed).
+  return effectiveList(state.models, state.zenIds, state.probes)
     .filter((model) => !effortVerdictFresh(state.probes[model.id], "", 0))
     .filter((model) => {
       const record = state.probes[model.id];

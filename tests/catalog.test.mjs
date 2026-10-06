@@ -2643,6 +2643,37 @@ test('a dead verdict is final: the model is never probed again', async () => {
   })
 })
 
+test('GUARD: "still measuring" never names a model the picker does not offer', async () => {
+  // Live 2026-10-06: the panel reported 28 models as still being measured, 23 of
+  // which Zen no longer lists — they are the round's `not-listed` bucket, gated
+  // out of the picker entirely. Telling a user to keep clicking for models that
+  // are not in their list, and never will be, is how a badge teaches distrust.
+  await withTempDir(async (dir) => {
+    const clock = { t: 1_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: scriptedFetch([fakeResponse({ body: apiBody() })]),
+      probe: async () => ({ kind: 'ok' }),
+    });
+    await catalog.forceRefresh();
+    // The Zen gate, applied the way a round applies it.
+    catalog.applyZenGate(['big-pickle', 'space-bunny-free']);
+    const pending = catalog.probeProgress().pending;
+    assert.ok(pending.includes('big-pickle'), 'a served, unmeasured model is pending');
+    assert.equal(
+      pending.some((id) => id === 'gpt-6-astra' || id === 'glm-5-free'),
+      false,
+      'and a model Zen does not list is not — it is not in the picker to be measured',
+    );
+    assert.deepEqual(
+      pending.slice().sort(),
+      ['big-pickle', 'space-bunny-free'],
+      'pending is exactly the picker list minus what has been measured',
+    );
+  })
+})
+
 test('probeProgress tracks the round live: current, done/total and per-model results', async () => {
   await withTempDir(async (dir) => {
     const seen = []
@@ -2707,7 +2738,13 @@ test('probeProgress tracks the round live: current, done/total and per-model res
     // One request per model here: the harness pins the manual budget to 1, and
     // this is the number the panel will show for what the round cost.
     assert.equal(end.requests, DERIVED.length, 'the round reports requests, which is not the model count')
-    assert.deepEqual(end.pending, [...DERIVED], 'and every model still owes samples — nothing was measured yet')
+    assert.deepEqual(
+      end.pending,
+      // deepseek-v4-flash-free is absent: the round killed it, and a model the
+      // picker no longer offers cannot owe a measurement.
+      ['big-pickle', 'ling-3.0-flash-fin-free', 'muse-spark-1.2-contributor-free', 'muse-spark-1.3-contributor-free', 'space-bunny-free'],
+      'and the models that still owe samples — which is the picker list minus what is settled or gone',
+    );
     assert.equal(end.current, null)
     assert.equal(end.results['big-pickle'].status, 'ok')
     assert.equal(end.results['big-pickle'].ms, 120)
