@@ -863,6 +863,13 @@ export type ProbeOutcome =
       usage?: ProbeUsage;
       /** The channel that ANSWERED, when one did. */
       api?: Api;
+      /**
+       * What the SAME request observed about `reasoning_effort:"none"`, since
+       * the probe sends it at the payload boundary. One request, two signals —
+       * measured: a model that honours `none` still returns text, so this costs
+       * the liveness verdict nothing.
+       */
+      effort?: { readonly kind: "none-works" | "noop" | "rejected" };
     }
   | { kind: "dead"; reason: string; code: "dead"; http: number }
   | {
@@ -887,6 +894,8 @@ export type ProbeOutcome =
 export interface ProbeUsage {
   readonly input?: number | undefined;
   readonly output?: number | undefined;
+  /** Upstream's own reasoning count. `undefined` when the route omits it. */
+  readonly reasoning?: number | undefined;
 }
 
 /** Why a probe did not get an answer the round could trust. */
@@ -1106,8 +1115,25 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
       // The default reasoning effort for muse-spark is xhigh; a probe only
       // needs any reply, so it asks for the cheapest one.
       reasoning: "low",
-      // The last gate before the bytes leave. See enforceAnonymousTools.
-      onPayload: (payload: unknown) => enforceAnonymousTools(payload),
+      // The last gate before the bytes leave — and where the Off question is
+      // asked, at no marginal quota.
+      //
+      // `clampThinkingLevel` cannot be used to send "none": the spelling is not
+      // in pi-ai's level vocabulary, so it resolves to `off` and is dropped
+      // before the bytes leave (verified locally). Writing it into the body here
+      // is the only path that actually reaches the wire.
+      //
+      // Measured 2026-10-06, this does NOT cost the liveness verdict: with zero
+      // reasoning tokens the model still returned text (mimo 29 characters,
+      // big-pickle 32), so `hasAnswer` still holds.
+      onPayload: (payload: unknown, sent: unknown) => {
+        const gated = enforceAnonymousTools(payload);
+        const body = gated as Record<string, unknown>;
+        const responses = (sent as { api?: string } | undefined)?.api === "openai-responses";
+        return responses
+          ? { ...body, reasoning: { effort: "none" } }
+          : { ...body, reasoning_effort: "none" };
+      },
       // A probe must not spend a second call confirming anything: without this
       // a 429 costs three requests instead of one, because the SDK's default
       // retry policy treats a rate limit as worth repeating. Production retries
@@ -1138,7 +1164,15 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
   // The usage is carried through rather than dropped: it decides nothing here,
   // but it is the only way to tell what a probe actually costs, and the
   // upstream already computed it.
-  if (hasAnswer(result)) return { kind: "ok", usage: usageOf(result) };
+  if (hasAnswer(result)) {
+    // One request, two signals: the liveness verdict AND what `none` did.
+    // Measured: reasoning_tokens 0 means `none` stopped reasoning; a non-zero
+    // count with HTTP 200 means it was accepted and ignored. The gate tools are
+    // always present, so this costs the round nothing.
+    const usage = usageOf(result);
+    const observed = Number(usage?.reasoning ?? 0);
+    return { kind: "ok", usage, effort: { kind: observed === 0 ? "none-works" : "noop" } };
+  }
   const { status, body, cause } = recorder.read();
   // The body is the only place the upstream's actual words exist, and an
   // `inconclusive` is never persisted — so without this a refusal is
