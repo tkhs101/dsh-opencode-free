@@ -45,6 +45,7 @@ import {
   EFFORT_READING,
   EFFORT_TTL_MS,
   EFFORT_SAMPLES,
+  EFFORT_WORKING_RATIO,
   EFFORT_CANDIDATE_SAMPLES,
   MANUAL_SAMPLE_BUDGET,
   reachAllowsAttempt,
@@ -1887,6 +1888,52 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
     await catalog.forceRefresh();
     const model = catalog.current().models.find((m) => m.id === 'mimo-v2.6-flash-free');
     assert.equal(model?.thinkingLevelMap?.off, 'none', 'so it gets the Off row the measurement always supported');
+  })
+})
+
+test('GUARD: a confirmed verdict keeps the samples it rests on', async () => {
+  // The samples were cleared on confirmation while the comment beside them said
+  // they were kept. That is not a tidiness question: they are the only evidence a
+  // frozen verdict has, and a verdict whose evidence is gone cannot be checked by
+  // anyone, including the next measurement. On 2026-10-06 that left
+  // `longcat-2.5-preview-free` confirmed at a level the recorded measurement says
+  // does nothing, with no way to see what it was confirmed on.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async (_model, question) => {
+        const tokens = question === 'baseline' ? 40 : 6;
+        return {
+          kind: 'ok',
+          api: 'openai-completions',
+          effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens },
+        };
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free');
+    assert.ok(record.effort !== undefined, 'a verdict exists');
+    assert.ok(
+      (record.effortTokens?.length ?? 0) >= EFFORT_SAMPLES,
+      'and the samples behind it survive, so the median can be recomputed by a reader',
+    );
+    assert.deepEqual(record.effortBaselineTokens, [40, 40, 40], 'as does the baseline it was judged against');
+    assert.deepEqual(record.effortSamples, [], 'while the TALLY is emptied, which is what was meant by frozen');
+
+    // The median that produced the verdict is the one a reader can recompute.
+    const median = (values) => values.slice().sort((a, b) => a - b)[values.length >> 1];
+    assert.ok(
+      median(record.effortTokens) < EFFORT_WORKING_RATIO * median(record.effortBaselineTokens),
+      'and it still explains the verdict after the fact',
+    );
   })
 })
 

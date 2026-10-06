@@ -2727,11 +2727,19 @@ export async function runProbeRound(
               },
               effortDiscord: 0,
               effortFrozenAt: stamp,
-              // Frozen: the samples that produced the verdict are kept as they
-              // were, so a later re-measurement starts from the declaration
-              // rather than from a median that has been quietly growing.
-              effortTokens: [],
-              effortBaselineTokens: baseTokens ?? [],
+              // Frozen: the samples that produced this verdict are KEPT, and
+              // the tally is emptied — two different things, and the comment here
+              // used to claim the first while the code did the second.
+              //
+              // The tally is what would keep growing (a settled model is still
+              // probed for liveness, and `effortSamples` would otherwise count
+              // judgements made against a frozen verdict). The samples are the
+              // ONLY evidence the verdict rests on: clearing them made every
+              // frozen verdict unauditable, which is how a classifier can be
+              // wrong with no way to notice — and on 2026-10-06 that is exactly
+              // where `longcat-2.5-preview-free` landed, confirmed at a level
+              // the recorded measurement says does nothing.
+              effortSamples: [],
             }
           : {}),
       };
