@@ -1240,13 +1240,27 @@ function readProbes(value: unknown): ProbeMap {
     // could not confirm one, so a record carrying `effort` already says it came
     // from this one.
     const readableEffort = entry.effortReading === EFFORT_READING || isMeasuredEffort(entry.effort);
+    // A median-based verdict whose samples are gone is not a verdict any more —
+    // it is an assertion nobody can reproduce. 0.3.1 confirmed those verdicts and
+    // then cleared `effortTokens`, so every one of them is unsupported (live
+    // 2026-10-06: longcat-2.5-preview-free confirmed at a level the recorded
+    // measurement says does nothing). Dropping it here re-measures the model on
+    // the next round instead of trusting a number whose evidence was deleted by
+    // the code that produced it.
+    //
+    // `rejected` is exempt: it is decided by refusals, not by a median, so it
+    // legitimately has no samples.
+    const unsupported =
+      isMeasuredEffort(entry.effort) &&
+      entry.effort.kind !== "rejected" &&
+      (!Array.isArray(entry.effortTokens) || entry.effortTokens.length === 0);
     probes[id] = {
+      ...(unsupported ? {} : isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
       verdict: entry.verdict,
       at: entry.at,
       ...(typeof entry.reason === "string" && entry.reason !== "" ? { reason: entry.reason } : {}),
       ...(entry.swept === true ? { swept: true } : {}),
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
-      ...(isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
       ...(Array.isArray(entry.selfReported)
         ? { selfReported: entry.selfReported.filter((level): level is string => typeof level === "string") }
@@ -1258,7 +1272,7 @@ function readProbes(value: unknown): ProbeMap {
         ? { effortSamples: entry.effortSamples.filter((k) => typeof k === "string") as EffortSamples }
         : {}),
       ...(readableEffort && isEffortQuestion(entry.effortQuestion) ? { effortQuestion: entry.effortQuestion } : {}),
-      ...(readableEffort && typeof entry.effortFrozenAt === "number" && Number.isFinite(entry.effortFrozenAt)
+      ...(readableEffort && !unsupported && typeof entry.effortFrozenAt === "number" && Number.isFinite(entry.effortFrozenAt)
         ? { effortFrozenAt: entry.effortFrozenAt }
         : {}),
       ...(readableEffort && typeof entry.effortDiscord === "number" && Number.isFinite(entry.effortDiscord)

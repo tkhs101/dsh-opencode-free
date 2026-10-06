@@ -1891,6 +1891,64 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
   })
 })
 
+test('GUARD: a verdict whose samples were deleted reads as no verdict', async () => {
+  // 0.3.1 confirmed a verdict and then cleared `effortTokens`. Every verdict it
+  // wrote is therefore an assertion nobody can reproduce — and one of them
+  // disagrees with the recorded measurement (live 2026-10-06:
+  // `longcat-2.5-preview-free` confirmed at a level that does nothing for it).
+  //
+  // The plugin should not trust a number whose evidence the code that produced it
+  // deleted. Dropping it on read re-measures the model on the next round.
+  await withTempDir(async (dir) => {
+    const fp = reasoningFingerprint({ ...modelsDict()['space-bunny-free'], id: 'longcat-2.5-preview-free' });
+    const cache = {
+      version: CACHE_VERSION,
+      fetchedAt: 1_000_000,
+      models: { 'longcat-2.5-preview-free': modelsDict()['space-bunny-free'] },
+      probes: {
+        // The shape 0.3.1 wrote: a frozen verdict, and no samples behind it.
+        'longcat-2.5-preview-free': {
+          verdict: 'ok',
+          at: 1_000_000,
+          effortReading: EFFORT_READING,
+          effort: { kind: 'level-works', level: 'minimal', fp, api: 'openai-completions', at: 1_000_000 },
+          effortFrozenAt: 1_000_000,
+          effortTokens: [],
+          effortBaselineTokens: [36, 36, 36],
+        },
+        // A `rejected` verdict is decided by refusals, not by a median, so having
+        // no samples is legitimate and it must survive.
+        'space-bunny-free': {
+          verdict: 'ok',
+          at: 1_000_000,
+          effortReading: EFFORT_READING,
+          effort: { kind: 'rejected', fp: 'x', api: 'openai-completions', at: 1_000_000 },
+          effortFrozenAt: 1_000_000,
+          effortTokens: [],
+        },
+      },
+      lastProbeAt: 1_000_000,
+    };
+    await writeFile(join(dir, 'catalog.json'), JSON.stringify(cache), 'utf8');
+    const read = await readCache(join(dir, 'catalog.json'));
+    assert.equal(
+      read.probes['longcat-2.5-preview-free'].effort,
+      undefined,
+      'an unreproducible verdict is not adopted',
+    );
+    assert.equal(
+      read.probes['longcat-2.5-preview-free'].effortFrozenAt,
+      undefined,
+      'nor is its freeze marker, so the model is measured again',
+    );
+    assert.equal(
+      read.probes['space-bunny-free'].effort?.kind,
+      'rejected',
+      'a refusal-based verdict stands without samples',
+    );
+  })
+})
+
 test('GUARD: a confirmed verdict keeps the samples it rests on', async () => {
   // The samples were cleared on confirmation while the comment beside them said
   // they were kept. That is not a tidiness question: they are the only evidence a
