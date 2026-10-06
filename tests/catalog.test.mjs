@@ -448,16 +448,16 @@ test('the levels a host offers follow models.dev, per model', () => {
     })
   assert.deepEqual(of('space-bunny-free'), ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
   assert.deepEqual(of('muse-spark-1.3-contributor-free'), ['minimal', 'low', 'medium', 'high', 'xhigh'])
-  // And a model that NAMES `max` in a refusal gets it, even though models.dev
-  // does not publish it: the model's own vocabulary beats a transcription.
+  // And a model that NAMES `max` in a refusal does NOT get it: naming a level
+  // is not offering it. See the named test below for why.
   assert.deepEqual(
     getSupportedThinkingLevels({
       id: 'muse-spark-1.3-contributor-free',
       reasoning: true,
       thinkingLevelMap: thinkingLevelMapFor(modelsDict()['muse-spark-1.3-contributor-free'], 'openai-responses', undefined, ['low', 'high', 'max']),
     }),
-    ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-    'a self-reported level is offered',
+    ['minimal', 'low', 'medium', 'high', 'xhigh'],
+    'naming a level is not offering it',
   )
   // Undeclared `max` stays hidden UNTIL the model names it: pi-ai treats it as
   // opt-in, and offering a level on no evidence is the other half of the same
@@ -831,27 +831,46 @@ test('INVARIANT: a confirmed verdict stops being re-litigated', () => {
   assert.equal(nextEffortQuestion(fresh, 'minimal', false), 'none', 'unsettled it keeps measuring');
 });
 
-test('a level the model NAMES is offered even when models.dev omits it', () => {
-  // `muse-spark-1.3-contributor-free` returned
-  // `reasoning_effort 'none' is not supported ... allowed values: ["low","high","max"]`
-  // — naming `max`, which models.dev does not publish, at 516 reasoning tokens.
-  // The model's own vocabulary beats a third party's transcription of it, the
-  // same way it does on `limit.context`.
-  const record = { reasoning: true, reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }] };
+test('a level the model NAMES is not thereby OFFERED', () => {
+  // `muse-spark-1.3-contributor-free` refused `none` with
+  // `allowed values: ["minimal","low","medium","high","xhigh","max"]` — naming
+  // `max`, which models.dev does not publish.
+  //
+  // That enumeration says the SPELLING is accepted. It does not say the tier
+  // exposes the mode: a route can take `max` and answer from `xhigh` instead,
+  // returning 200 with the reasoning count of a mode the user never chose. The
+  // one `max` request on record has NO token count at all
+  // (`tests/measured-samples.json`: `max -> 200, tokens: null, n=1`), so nothing
+  // ever distinguished honoured from downgraded — and the operator confirms `max`
+  // is not open to individuals on this route.
+  //
+  // Offering a level claims what the user will GET; a refusal's vocabulary claims
+  // what the parser will accept. Only the first kind may produce a row.
+  const record = { reasoning: true, reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }] }
   assert.equal(
     getSupportedThinkingLevels({ id: 'm', reasoning: true, thinkingLevelMap: thinkingLevelMapFor(record, 'openai-responses') }).includes('max'),
     false,
     'withheld on no evidence',
-  );
+  )
   assert.equal(
     getSupportedThinkingLevels({
       id: 'm',
       reasoning: true,
       thinkingLevelMap: thinkingLevelMapFor(record, 'openai-responses', undefined, ['low', 'high', 'max']),
     }).includes('max'),
+    false,
+    'and STILL withheld once the model names it — validity is not availability',
+  )
+  // A level models.dev publishes is offered exactly as before: the change is
+  // about where a NEW level may come from, not about the published ladder.
+  assert.equal(
+    getSupportedThinkingLevels({
+      id: 'm',
+      reasoning: true,
+      thinkingLevelMap: thinkingLevelMapFor(record, 'openai-responses', undefined, ['xhigh']),
+    }).includes('xhigh'),
     true,
-    'offered once the model names it',
-  );
+  )
 });
 
 test('the same fixture shape yields opposite maps from opposite measurements', () => {

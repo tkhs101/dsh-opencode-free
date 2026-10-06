@@ -700,11 +700,30 @@ export function thinkingLevelMapFor(
   // gated on measurement and a ladder level is not.
   //
   // xhigh/max stay opt-in, as pi-ai intends: they are offered only where a
-  // measurement or the model's own self-report named them. That keeps the
-  // opt-in convention and limits the surface of a refusal to the levels where
-  // we have positive evidence.
+  // DECLARATION named them, or a measurement showed one doing something.
+  //
+  // A model's OWN self-report is deliberately NOT one of those. It is evidence
+  // about VALIDITY — the spelling is accepted instead of 400'd — and that is
+  // exactly what it says. It is not evidence about AVAILABILITY, and the two come
+  // apart: a tier can accept `max` and route the request to `xhigh` instead,
+  // answering 200 with the reasoning count of a mode the user did not choose.
+  //
+  // Measured 2026-10-06 and confirmed by the operator: `max` is not open to
+  // individuals on this route. The refusal that names it lists
+  // `[minimal, low, medium, high, xhigh, max]`, and one `max` request came back
+  // 200 — with NO token count recorded, so nothing ever distinguished "honored"
+  // from "silently downgraded". models.dev does not publish `max` for this model
+  // either, which is what a tier that does not expose it looks like.
+  //
+  // The recorded vocabulary is kept: it is what makes a refusal useful later, and
+  // §19 already showed that a declaration's SHAPE carries no predictive power —
+  // a model's enumeration is a shape too, and it must not grant a capability.
+  //
+  // `selfReported` is a parameter this function accepts and deliberately does
+  // not consult for what to OFFER. It is kept on the signature because
+  // `derive` carries it as evidence and dropping it here would make the two look
+  // unrelated when they are the same record.
   const named = new Set(published);
-  for (const level of selfReported ?? []) if (typeof level === "string") named.add(level);
   for (const level of THINKING_LEVELS) {
     if (level === "off") continue;
     if (named.has(level)) map[level] = level;
