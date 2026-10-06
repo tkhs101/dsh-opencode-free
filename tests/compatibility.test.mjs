@@ -1354,6 +1354,30 @@ test('GUARD: a 401 blaming the request shape is not read as a credential failure
   assert.notEqual(outcome.code, 'anon-gated');
 });
 
+test('GUARD: an overload costs one request, not one per channel', async () => {
+  // `upstream-overloaded` is a condition of the UPSTREAM, measured 2026-10-06 on
+  // `nemotron-3-ultra-free`: HTTP 200 whose only frame is a 503. Asking the
+  // other channel buys the same 503 for another request from a bucket shared per
+  // egress IP — and it is not evidence about the model either, so the panel must
+  // not paint the row as a model failure.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  let calls = 0;
+  const outcome = await probeModel(model, {
+    provider: p,
+    apiKey: 'public',
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(
+        'data: ' + JSON.stringify({ error: { type: 'server_error', message: 'Streaming response failed: [503] Upstream error: Service temporarily overloaded' } }),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      );
+    },
+  });
+  assert.equal(outcome.code, 'upstream-overloaded');
+  assert.equal(calls, 1, 'the other channel is not asked for the same upstream answer');
+});
+
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
     () => 'probe-session',

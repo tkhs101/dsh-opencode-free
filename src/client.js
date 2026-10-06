@@ -689,7 +689,12 @@ window.__ModuleLoader__.load({
 		 * model is bad" when the round actually learned nothing about it, which
 		 * is exactly how a working model ends up wearing a failure badge.
 		 */
-		var CALLER_CODES = { "anon-gated": true, "quota-exhausted": true, "bad-key": true };
+		/* Codes that are about the CALLER, not the model. A row wearing one of these
+		   is grey, never red: the round learned nothing about that model. The reason
+		   is shown INLINE rather than only on hover — three different conditions all
+		   render as "未测到", and a reader who cannot tell them apart cannot tell
+		   whether to wait, reconfigure, or give up. */
+		var CALLER_CODES = { "anon-gated": true, "quota-exhausted": true, "bad-key": true, "upstream-overloaded": true };
 
 		function failureText(t, result) {
 			var key = typeof result.code === "string" && hasOwnKey(FAILURE_WORDS, result.code)
@@ -1187,7 +1192,8 @@ window.__ModuleLoader__.load({
 								className: "opf-probe opf-probe-wait",
 								title: failureDetail(t, verdict)
 							}, E("span", { className: "opf-waitdot" }),
-								E("span", null, t("probing.unmeasured"))));
+								E("span", null, t("probing.unmeasured")),
+								E("span", null, " · " + failureText(t, verdict))));
 						} else {
 							/* Red, but never mute: the badge names the reason and
 							   the full story (status + what to do about it) rides

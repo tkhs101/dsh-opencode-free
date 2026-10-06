@@ -1132,7 +1132,16 @@ function isCallerScoped(outcome: ProbeOutcome): boolean {
   // Only a failure carries a code; an `ok` never reaches here, but the type
   // says so and the check should not pretend otherwise.
   if (outcome.kind === "ok") return false;
-  if (outcome.code === "anon-gated" || outcome.code === "quota-exhausted" || outcome.code === "bad-key")
+  // `upstream-overloaded` joins these: an upstream that answers 503 will answer
+  // 503 on the other channel too, so asking again spends a request from the
+  // shared bucket to learn the same thing. It is also not evidence about the
+  // model — the classification exists precisely so the panel can say so.
+  if (
+    outcome.code === "anon-gated" ||
+    outcome.code === "quota-exhausted" ||
+    outcome.code === "bad-key" ||
+    outcome.code === "upstream-overloaded"
+  )
     return true;
   // 403/429 only when it is NOT a "this model is gone" verdict: that sentence
   // is the wrong channel talking, and it must still be retried elsewhere.
