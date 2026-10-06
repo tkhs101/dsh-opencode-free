@@ -33,6 +33,10 @@ import {
   measuredEffortMap,
   reasoningFingerprint,
   isMeasuredEffort,
+  isMeasuredContext,
+  contextFingerprint,
+  contextWindowFor,
+  clampVerdict,
   topThinkingLevel,
   unknownFree,
   writeCacheAtomic,
@@ -437,6 +441,75 @@ test('the levels a host offers follow models.dev, per model', () => {
   const derived = derive(modelsDict(), { template: template(), knownApis: new Map() })
   const spark = derived.candidates.find((m) => m.id === 'muse-spark-1.3-contributor-free')
   assert.deepEqual(getSupportedThinkingLevels(spark), ['minimal', 'low', 'medium', 'high', 'xhigh'])
+})
+
+test('the clamp signature is arithmetic, not an error-body inference', () => {
+  // `clampMaxTokensToContext` is min(maxTokens, max(1, contextWindow - estimate
+  // - 4096)), so an emitted value of exactly 1 means the conversation passed the
+  // declared window minus 4096. One-directional: an OVERSTATED window cannot make
+  // the clamp fire at all, so a hit is positive evidence of understatement only.
+  // It needs no attribution, which is what keeps it immune to the generic-400
+  // blindness the upstream provokes.
+  const starved = { emitted: 1, starved: true }
+  // Nothing: the request was not starved.
+  assert.deepEqual(clampVerdict(undefined, { emitted: 1, starved: false }, 200000), { kind: 'none' })
+  // Not the floor: a merely reduced budget is not the signature.
+  assert.deepEqual(clampVerdict(undefined, { emitted: 904, starved: true }, 200000), { kind: 'none' })
+  // One observation is not a conclusion — measured: a single reply here cannot
+  // distinguish an understated window from a genuinely full conversation.
+  assert.deepEqual(clampVerdict(undefined, starved, 200000), { kind: 'hit', hits: 1 })
+  assert.deepEqual(clampVerdict({ verdict: 'ok', at: 1, contextHits: 1 }, starved, 200000), {
+    kind: 'confirmed',
+    raisedTo: 800000,
+  })
+})
+
+test('a raise never lowers a window and never exceeds the cap', () => {
+  // C1: the declaration is the value. Nothing is substituted from a band, and
+  // decimal-vs-binary formatting was measured to carry no predictive power.
+  const record = { limit: { context: 200000, output: 32000 } }
+  assert.equal(contextWindowFor(record), 200000, 'unmeasured keeps the declaration')
+  assert.equal(contextWindowFor(record, { raisedTo: 1048576, fp: contextFingerprint(record), at: 1 }), 800000)
+  // A stale measurement about revised limits is discarded, not applied.
+  assert.equal(contextWindowFor(record, { raisedTo: 1048576, fp: 'stale', at: 1 }), 200000)
+  // A proposal BELOW the declaration can never lower it.
+  assert.equal(contextWindowFor(record, { raisedTo: 50000, fp: contextFingerprint(record), at: 1 }), 200000)
+  // The ceiling binds even when the measurement asks for more.
+  const big = { limit: { context: 1048576, output: 64000 } }
+  assert.equal(contextWindowFor(big, { raisedTo: 8388608, fp: contextFingerprint(big), at: 1 }), 1048576)
+  // A model whose window really was full keeps its window: the proposal is
+  // already at the ceiling, so there is nothing to raise and the counter resets.
+  assert.deepEqual(
+    clampVerdict({ verdict: 'ok', at: 1, contextHits: 5 }, { emitted: 1, starved: true }, 1048576),
+    { kind: 'hit', hits: 0 },
+  )
+})
+
+test('a malformed context measurement is dropped, not trusted', () => {
+  assert.equal(isMeasuredContext({ raisedTo: 800000, fp: 'f', at: 1 }), true)
+  for (const bad of [
+    undefined,
+    null,
+    'x',
+    { raisedTo: 0, fp: 'f', at: 1 },
+    { raisedTo: -5, fp: 'f', at: 1 },
+    { raisedTo: Number.NaN, fp: 'f', at: 1 },
+    { raisedTo: 800000, at: 1 },
+    { raisedTo: 800000, fp: 'f' },
+  ]) {
+    assert.equal(isMeasuredContext(bad), false, `expected ${JSON.stringify(bad)} to be rejected`)
+  }
+})
+
+test('contextFingerprint moves only for its own axis', () => {
+  const base = { reasoning: true, reasoning_options: [{ type: 'effort', values: ['low'] }], limit: { context: 1, output: 2 } }
+  const original = contextFingerprint(base)
+  assert.equal(contextFingerprint({ ...base, reasoning: false }), original, 'reasoning does not move it')
+  assert.equal(contextFingerprint({ ...base, reasoning_options: [] }), original, 'effort does not move it')
+  assert.notEqual(contextFingerprint({ ...base, limit: { context: 2, output: 2 } }), original)
+  assert.notEqual(contextFingerprint({ ...base, limit: { context: 1, output: 3 } }), original)
+  // A record with no limits at all is distinguishable from one declaring zeros.
+  assert.notEqual(contextFingerprint({ ...base, limit: undefined }), original)
 })
 
 test('a measurement is applied only when its fingerprint and channel still match', () => {
