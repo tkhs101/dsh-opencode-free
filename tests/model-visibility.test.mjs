@@ -420,12 +420,15 @@ test('the progress reading reaches the wire with each failure reason intact', as
     assert.deepEqual(Object.keys(wire).sort(), [
       'current',
       'done',
+      'pending',
+      'requests',
       'results',
       'running',
       'startedAt',
       'targets',
       'total',
     ])
+    assert.equal(typeof wire.requests, 'number', 'the round reports what it spent, not only what it covered')
   } finally {
     host.dispose()
   }
@@ -440,12 +443,15 @@ test('GET on the probe route reports live progress without starting a round', as
     assert.equal(idle.status, 200)
     assert.deepEqual(idle.body, {
       running: false,
+      requests: 0,
       total: 0,
       done: 0,
       current: null,
       results: {},
       targets: [],
       startedAt: 0,
+      // The offline floor's two reasoning models: never measured, so still owed.
+      pending: ['muse-spark-1.2-contributor-free', 'muse-spark-1.3-contributor-free'],
     })
     // A read-only GET carries no origin fence (like the catalogue read);
     // only the POST that spends quota does.

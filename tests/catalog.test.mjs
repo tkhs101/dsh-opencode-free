@@ -2678,12 +2678,14 @@ test('probeProgress tracks the round live: current, done/total and per-model res
       catalog.probeProgress(),
       {
         running: false,
+        requests: 0,
         total: 0,
         done: 0,
         current: null,
         results: {},
         targets: [],
         startedAt: 0,
+        pending: [...DERIVED],
       },
       'no round has ever run',
     )
@@ -2702,6 +2704,10 @@ test('probeProgress tracks the round live: current, done/total and per-model res
     const end = catalog.probeProgress()
     assert.equal(end.running, false)
     assert.equal(end.done, DERIVED.length)
+    // One request per model here: the harness pins the manual budget to 1, and
+    // this is the number the panel will show for what the round cost.
+    assert.equal(end.requests, DERIVED.length, 'the round reports requests, which is not the model count')
+    assert.deepEqual(end.pending, [...DERIVED], 'and every model still owes samples — nothing was measured yet')
     assert.equal(end.current, null)
     assert.equal(end.results['big-pickle'].status, 'ok')
     assert.equal(end.results['big-pickle'].ms, 120)

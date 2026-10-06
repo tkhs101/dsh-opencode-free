@@ -469,6 +469,27 @@ function effortAxisUndecidable(record: ProbeRecord | undefined): boolean {
   return baseline !== undefined && baseline.length >= EFFORT_SAMPLES && median(baseline) === 0;
 }
 
+/**
+ * Models whose reasoning measurement is still open, in catalogue order.
+ *
+ * The panel needs to say "these still need measuring" rather than make the user
+ * infer it from a missing row, and it must be the SAME predicate the loop uses —
+ * an id whose axis is undecidable or settled is not pending, and one sitting out
+ * a backoff is not either.
+ */
+export function pendingEffortIds(state: CatalogState): string[] {
+  return state.models
+    .filter((model) => !effortVerdictFresh(state.probes[model.id], "", 0))
+    .filter((model) => {
+      const record = state.probes[model.id];
+      const raw = state.cache?.models?.[model.id];
+      const question = nextEffortQuestion(record, raw === undefined ? "minimal" : fallbackLevelFor({ ...raw, id: model.id }));
+      if (question === "settled") return false;
+      return effortMeasurementPending(model, record, question);
+    })
+    .map((model) => model.id);
+}
+
 export function nextEffortQuestion(
   record: ProbeRecord | undefined,
   fallback = "minimal",
@@ -1628,6 +1649,8 @@ export interface CatalogState {
   probeUntrusted: boolean;
   probeRun: {
     running: boolean;
+    /** Requests sent so far this round; the models-vs-requests counterpart of `done`. */
+    requests: number;
     total: number;
     done: number;
     current: string | null;
@@ -1671,7 +1694,16 @@ export function initialState(builtinBaseline: readonly Model<Api>[]): CatalogSta
     reach: {},
     lastProbeAt: 0,
     probeUntrusted: false,
-    probeRun: { running: false, total: 0, done: 0, current: null, results: {}, targets: [], startedAt: 0 },
+    probeRun: {
+      running: false,
+      requests: 0,
+      total: 0,
+      done: 0,
+      current: null,
+      results: {},
+      targets: [],
+      startedAt: 0,
+    },
     probeInflight: null,
   };
 }
@@ -1915,6 +1947,15 @@ export type ProbeStart =
 
 export interface ProbeProgress {
   readonly running: boolean;
+  /**
+   * Requests this round actually sent.
+   *
+   * Not the same as `done`: a round may take several samples of one model, so
+   * the tally counts models and this counts what the shared anonymous bucket
+   * paid. Someone who presses "Probe now" is spending that bucket and is
+   * entitled to the number.
+   */
+  readonly requests: number;
   readonly total: number;
   readonly done: number;
   readonly current: string | null;
@@ -1930,6 +1971,15 @@ export interface ProbeProgress {
   readonly targets: readonly string[];
   /** When the current (or last) round started; 0 means no round has ever run. */
   readonly startedAt: number;
+  /**
+   * Models whose reasoning measurement is still open.
+   *
+   * "Still measuring" is a claim about the future, so it is computed by the same
+   * predicate the loop uses rather than inferred from a missing verdict —
+   * absence also means backoff, and a model waiting out a rate limit is not one
+   * the panel should keep asking the user to click for.
+   */
+  readonly pending: readonly string[];
 }
 
 /** One model's outcome in a round: answered (with latency) or not (with why). */
@@ -2283,6 +2333,7 @@ function adopt(
   if (restoreRound && restored !== undefined && restored.total > 0) {
     state.probeRun = {
       running: false,
+      requests: 0,
       total: restored.total,
       done: restored.done,
       current: null,
@@ -2524,6 +2575,7 @@ export async function runProbeRound(
   // ends, so a late poll never shows a previous round's leftovers as live.
   state.probeRun = {
     running: true,
+    requests: 0,
     // The round's whole scope, so the panel can tell "queued" from "skipped".
     targets: [...targets, ...notListed].map((model) => model.id),
     total: targets.length + notListed.length,
@@ -2556,6 +2608,7 @@ export async function runProbeRound(
       let okShots = 0;
       let elapsedTotal = 0;
       for (let shot = 1; shot <= samplesPerModel; shot += 1) {
+      state.probeRun.requests += 1;
       state.probeRun.current = model.id;
       const started = deps.now();
       let outcome: ProbeResult;
@@ -3133,6 +3186,8 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
         results: { ...state.probeRun.results },
         targets: state.probeRun.targets.slice(),
         startedAt: state.probeRun.startedAt,
+        requests: state.probeRun.requests,
+        pending: pendingEffortIds(state),
       };
     },
     applyZenGate(ids: readonly string[] | null): void {
