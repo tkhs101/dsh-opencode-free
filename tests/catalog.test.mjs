@@ -1889,6 +1889,63 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
   })
 })
 
+test('GUARD: a round counts models, and a row reports what it learned about one', async () => {
+  // The shot loop broke the tally's two invariants at once. `done` counted
+  // SAMPLES while `total` counted models, so the panel read "53/27" live on
+  // 2026-10-06; and each shot overwrote the row, so a model that produced three
+  // good baseline samples and then hit a 429 was painted red — the round's actual
+  // finding discarded by its last request.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    let shot = 0
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'mimo-v2.6-flash-free': mimoRecord() }) }),
+      // Three good baseline samples, then the shared bucket says no.
+      probe: async () => {
+        shot += 1;
+        if (shot > 3) return { kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' };
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 37 } };
+      },
+      listZenIds: async () => ['mimo-v2.6-flash-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    const progress = catalog.probeProgress();
+    assert.equal(progress.total, 1, 'one model is the whole round');
+    assert.equal(progress.done, 1, 'and one model is the whole tally, however many samples it took');
+    assert.equal(
+      progress.results['mimo-v2.6-flash-free'].status,
+      'ok',
+      'the row reports what the round learned about the model, not what its last request hit',
+    );
+  })
+
+  // The other direction: a model that never answers is still a red row, and the
+  // reason survives.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'mimo-v2.6-flash-free': mimoRecord() }) }),
+      probe: async () => ({ kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' }),
+      listZenIds: async () => ['mimo-v2.6-flash-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+    const row = catalog.probeProgress().results['mimo-v2.6-flash-free'];
+    assert.equal(row.status, 'failed');
+    assert.equal(row.code, 'quota-exhausted', 'a red row still carries why');
+  })
+})
+
 test('GUARD: a verdict is visible in the same round that confirms it', async () => {
   // `state.models` was derived before the round, so the Off row a round confirms
   // landed on disk but not in the list the picker reads: the user watched a round

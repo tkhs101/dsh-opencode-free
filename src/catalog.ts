@@ -2014,6 +2014,25 @@ function isSettled(id: string, probes: ProbeMap): boolean {
  * because the panel's tally has to add up and a silent hole in the list is
  * exactly what a reader cannot explain.
  */
+/**
+ * A model's row for THIS round.
+ *
+ * A round may take several samples of one model, so the shot count and the row
+ * count stopped being the same thing: `done` was incremented per SAMPLE (the
+ * panel read "53/27"), and each shot overwrote the row, so a model that
+ * produced three good baseline samples and then hit a 429 was painted red — the
+ * round's actual finding about it discarded by its last request.
+ *
+ * So: the tally counts MODELS (a row per model, which is what `total` counts),
+ * and the row reports the round's finding about that model — ok if any sample
+ * answered, because that is what the round learned. `dead` and a removal stay
+ * loud; only a later failure stops being able to bury an earlier answer.
+ */
+function roundRowSoFar(last: ProbeProgressResult, okShots: number, elapsed: number): ProbeProgressResult {
+  if (okShots === 0 || last.status === "ok") return { ...last, ms: elapsed };
+  return { status: "ok", ms: elapsed };
+}
+
 export function planRound(
   models: readonly Model<Api>[],
   live: readonly Model<Api>[],
@@ -2371,6 +2390,9 @@ export async function runProbeRound(
       // always meant: this model is done for this round. The budget is the only
       // hard stop, and `effortMeasurementPending` is what stops it early — so the
       // cost follows the evidence rather than the calendar.
+      // One row and one tally tick per MODEL, however many samples it takes.
+      let okShots = 0;
+      let elapsedTotal = 0;
       for (let shot = 1; shot <= samplesPerModel; shot += 1) {
       state.probeRun.current = model.id;
       const started = deps.now();
@@ -2399,7 +2421,6 @@ export async function runProbeRound(
           code: "error",
           http: 0,
         };
-        state.probeRun.done += 1;
         break;
       }
       // The row badge reports whether the model ANSWERED, not what the
@@ -2408,8 +2429,10 @@ export async function runProbeRound(
       // `ok` earns the green badge; everything else is red — and red carries
       // WHY, because a red badge with no reason is not a report.
       const elapsed = Math.max(0, deps.now() - started);
-      state.probeRun.results[model.id] = probeRowFor(outcome, elapsed, state.probes[model.id]?.verdict);
-      state.probeRun.done += 1;
+      elapsedTotal += elapsed;
+      const row = probeRowFor(outcome, elapsed, state.probes[model.id]?.verdict);
+      if (row.status === "ok") okShots += 1;
+      state.probeRun.results[model.id] = roundRowSoFar(row, okShots, elapsedTotal);
       // A refusal of a spelling THIS probe injected is a sample about that
       // spelling, not a failure to reach the model. Measured 2026-10-06:
       // space-bunny-free answers `none` with a hard 400 on both channels while
@@ -2638,6 +2661,7 @@ export async function runProbeRound(
         }
       }
       } // shot loop
+      state.probeRun.done += 1;
     }
   } finally {
     state.probeRun.running = false;
