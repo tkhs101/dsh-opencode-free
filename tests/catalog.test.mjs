@@ -334,7 +334,12 @@ test('thinkingLevelMapFor maps the published effort levels and nulls the rest', 
     ),
     {
       off: null,
-      minimal: null,
+      // Ladder rows are not filtered by models.dev: measured across eight models
+      // and both channels, no ladder level has EVER been refused, and
+      // muse-spark-1.3 accepts a `max` it never published at 516 reasoning
+      // tokens. An ignored ladder level is inert; an ignored `off` is the
+      // opposite of its promise, which is why only `off` is gated.
+      minimal: 'minimal',
       low: 'low',
       medium: 'medium',
       high: 'high',
@@ -355,7 +360,8 @@ test('thinkingLevelMapFor maps the published effort levels and nulls the rest', 
       medium: 'medium',
       high: 'high',
       xhigh: 'xhigh',
-      max: null,
+      // ABSENT, not null: pi-ai reads an absent opt-in level as "not offered",
+      // and `max` is withheld until the model names it.
     },
   )
   // `off` is always PRESENT as a key now, and null for an unmeasured ladder.
@@ -431,18 +437,26 @@ test('the levels a host offers follow models.dev, per model', () => {
       reasoning: true,
       thinkingLevelMap: thinkingLevelMapFor(modelsDict()[id], 'openai-completions', measured),
     })
-  assert.deepEqual(of('space-bunny-free'), ['low', 'medium', 'high', 'xhigh', 'max'])
-  assert.deepEqual(of('muse-spark-1.3-contributor-free'), [
-    'minimal',
-    'low',
-    'medium',
-    'high',
-    'xhigh',
-  ])
+  assert.deepEqual(of('space-bunny-free'), ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(of('muse-spark-1.3-contributor-free'), ['minimal', 'low', 'medium', 'high', 'xhigh'])
+  // And a model that NAMES `max` in a refusal gets it, even though models.dev
+  // does not publish it: the model's own vocabulary beats a transcription.
+  assert.deepEqual(
+    getSupportedThinkingLevels({
+      id: 'muse-spark-1.3-contributor-free',
+      reasoning: true,
+      thinkingLevelMap: thinkingLevelMapFor(modelsDict()['muse-spark-1.3-contributor-free'], 'openai-responses', undefined, ['low', 'high', 'max']),
+    }),
+    ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    'a self-reported level is offered',
+  )
+  // Undeclared `max` stays hidden UNTIL the model names it: pi-ai treats it as
+  // opt-in, and offering a level on no evidence is the other half of the same
+  // mistake in the opposite direction.
   // No published list and no measurement: nothing is claimed, so the host
   // renders its provider-default row alone.
-  assert.deepEqual(of('big-pickle'), [])
-  assert.deepEqual(of('ling-3.0-flash-fin-free'), [])
+  assert.deepEqual(of('big-pickle'), ['minimal', 'low', 'medium', 'high'], 'the default ladder is offered unfiltered')
+  assert.deepEqual(of('ling-3.0-flash-fin-free'), ['minimal', 'low', 'medium', 'high'])
   // The derived records themselves carry the same maps.
   const derived = derive(modelsDict(), { template: template(), knownApis: new Map() })
   const spark = derived.candidates.find((m) => m.id === 'muse-spark-1.3-contributor-free')
@@ -737,6 +751,58 @@ test('a malformed persisted measurement is dropped, not trusted', () => {
   }
 })
 
+test('INVARIANT: the ladder is not filtered by models.dev, and `off` still is', () => {
+  // The asymmetry is measured, not preferred.
+  //
+  // LADDER ROWS: across eight models and both channels, no ladder level has ever
+  // been refused — not a declared one, and not an undeclared one. `big-pickle`
+  // accepts `low` at 164 reasoning tokens; `mimo-v2.6-flash-free` accepts
+  // `minimal` and `high`; `muse-spark-1.3` accepts a `max` it never published, at
+  // 516, the strongest mode that model has. An IGNORED ladder level is inert —
+  // the user gets the default, which is what the provider-default row also gives.
+  //
+  // `off`: an ignored Off is the opposite of its promise — maximum reasoning
+  // where the user asked for none — so it is gated on measurement alone. That
+  // asymmetry is why the two are decided apart rather than by one rule.
+  const noLadder = thinkingLevelMapFor({ reasoning: true, reasoning_options: [] }, 'openai-completions');
+  assert.deepEqual(noLadder, {
+    off: null,
+    minimal: 'minimal',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+  });
+  // xhigh/max stay opt-in: absent means NOT offered, and they are withheld until
+  // a measurement or the model's own refusal names them.
+  assert.equal(Object.prototype.hasOwnProperty.call(noLadder, 'xhigh'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(noLadder, 'max'), false);
+  // A model that publishes no reasoning at all still gets nothing.
+  assert.equal(thinkingLevelMapFor({ reasoning_options: [] }, 'openai-completions'), undefined);
+});
+
+test('a level the model NAMES is offered even when models.dev omits it', () => {
+  // `muse-spark-1.3-contributor-free` returned
+  // `reasoning_effort 'none' is not supported ... allowed values: ["low","high","max"]`
+  // — naming `max`, which models.dev does not publish, at 516 reasoning tokens.
+  // The model's own vocabulary beats a third party's transcription of it, the
+  // same way it does on `limit.context`.
+  const record = { reasoning: true, reasoning_options: [{ type: 'effort', values: ['minimal', 'low', 'medium', 'high', 'xhigh'] }] };
+  assert.equal(
+    getSupportedThinkingLevels({ id: 'm', reasoning: true, thinkingLevelMap: thinkingLevelMapFor(record, 'openai-responses') }).includes('max'),
+    false,
+    'withheld on no evidence',
+  );
+  assert.equal(
+    getSupportedThinkingLevels({
+      id: 'm',
+      reasoning: true,
+      thinkingLevelMap: thinkingLevelMapFor(record, 'openai-responses', undefined, ['low', 'high', 'max']),
+    }).includes('max'),
+    true,
+    'offered once the model names it',
+  );
+});
+
 test('the same fixture shape yields opposite maps from opposite measurements', () => {
   // The whole reason shape cannot drive this rule. Measured 2026-10-06:
   // ling-3.1-flash-free (`[toggle]`) took `none` from 32 reasoning tokens to 0,
@@ -819,8 +885,10 @@ test('GUARD: the muse-spark xhigh default is no longer silently clamped away', a
     (m) => m.id === 'space-bunny-free',
   )
   assert.equal(clampThinkingLevel(bunny, 'max'), 'max', 'a published opt-in level is reachable')
-  // A level the model does not publish clamps DOWN rather than being offered.
-  assert.equal(getSupportedThinkingLevels(bunny).includes('minimal'), false)
+  // Ladder rows are no longer filtered by models.dev, so `minimal` is offered
+  // even though space-bunny does not publish it. What is still withheld is
+  // anything a model has never named and never reported.
+  assert.equal(getSupportedThinkingLevels(bunny).includes('minimal'), true, 'undeclared ladder levels are offered')
 })
 
 test('a derived record carries all four capabilities from models.dev', () => {
@@ -889,9 +957,11 @@ test('modelCapability projects image and top level per record', () => {
   assert.deepEqual(card('ling-3.0-flash-fin-free'), {
     id: 'ling-3.0-flash-fin-free',
     image: false,
-    thinking: null,
+    // The default ladder is offered, so the strongest offered rung is now the
+    // badge. The card names what exists, not what models.dev declared.
+    thinking: 'high',
   })
-  assert.deepEqual(card('big-pickle'), { id: 'big-pickle', image: false, thinking: null })
+  assert.deepEqual(card('big-pickle'), { id: 'big-pickle', image: false, thinking: 'high' })
 })
 
 test('capabilities ride alongside visible, same ids in the same order', async () => {
