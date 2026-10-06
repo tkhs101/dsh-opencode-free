@@ -38,6 +38,7 @@ import {
   contextWindowFor,
   clampVerdict,
   effortVerdict,
+  nextEffortQuestion,
   topThinkingLevel,
   unknownFree,
   writeCacheAtomic,
@@ -511,6 +512,37 @@ test('contextFingerprint moves only for its own axis', () => {
   assert.notEqual(contextFingerprint({ ...base, limit: { context: 1, output: 3 } }), original)
   // A record with no limits at all is distinguishable from one declaring zeros.
   assert.notEqual(contextFingerprint({ ...base, limit: undefined }), original)
+})
+
+test('the probe stops asking about `none` once it cannot be agreed on', () => {
+  // A model whose `none` flips forever would otherwise sit unmeasured FOREVER
+  // and never get the Off row its lowest level demonstrably provides. The round
+  // changes what its existing request asks; it does not add one.
+  assert.equal(nextEffortQuestion(undefined), 'none', 'an unseen model starts at `none`')
+  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortDiscord: 2 }), 'none', 'two rounds is not yet')
+  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortDiscord: 3 }), 'minimal', 'three flips moves on')
+  // It stays moved: a settled question is not re-opened.
+  assert.equal(
+    nextEffortQuestion({ verdict: 'ok', at: 1, effortQuestion: 'minimal', effortDiscord: 9 }),
+    'minimal',
+  )
+  // A confirmed verdict does not move at all — only discord does.
+  assert.equal(nextEffortQuestion({ verdict: 'ok', at: 1, effortDiscord: 0 }), 'none')
+})
+
+test('the fallback question is recorded in its own words', () => {
+  // The fallback answers a question about `minimal`, so its verdict must not be
+  // filed as a claim about `none`. A record that says `none-works` because
+  // `minimal` was asked is the exact confusion this naming prevents.
+  const fp = reasoningFingerprint({ reasoning: true, reasoning_options: [{ type: 'toggle' }] });
+  assert.equal(effortVerdict(undefined, 'level-works').kind, 'discord');
+  assert.equal(effortVerdict(['level-works', 'level-works'], 'level-works').kind, 'confirmed');
+  // And the level name travels with the verdict, so the map can name the rung
+  // rather than guess which one was meant.
+  const measured = { kind: 'level-works', level: 'minimal', fp, api: 'openai-completions', at: 1 };
+  assert.equal(thinkingLevelMapFor({ reasoning: true, reasoning_options: [{ type: 'toggle' }] }, 'openai-completions', measured).off, 'minimal');
+  // A `level-works` record without a level names nothing — it is not usable.
+  assert.equal(isMeasuredEffort({ kind: 'level-works', fp, api: 'openai-completions', at: 1 }), false);
 })
 
 test('INVARIANT: an effort verdict needs agreeing samples, not a majority', () => {

@@ -394,10 +394,11 @@ export function apply(ctx: HostContext, config?: Config): void {
     now: Date.now,
     // Never rejects: `probeModel` converts every failure mode, including a
     // thrown transport error, into a three-state conclusion.
-    probe: async (model) =>
+    probe: async (model, question) =>
       await probeModel(model, {
         provider: provider as unknown as ProbeStreamer,
         apiKey: getConfigKey() ?? "public",
+        question,
       }),
     // A probe round asks the catalogue before it asks any model: one free GET
     // settles "does Zen still serve this id", so a withdrawn model costs no
