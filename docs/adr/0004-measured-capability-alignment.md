@@ -1296,6 +1296,28 @@ C4 將窗口抬到 `min(宣告×4, 1048576)`，抬得過頭會讓壓縮更晚發
 為一個從未觀測的情形引入終態，是拿複雜度換不存在的問題；提案留存於
 `.scratch/reports/termination.md`，待真有模型落入帶內再啟用。
 
+---
+
+## 三十九、證據放在哪裡
+
+**持久證據是 `tests/measured-samples.json`**——provider 自己的回答，逐點標注
+「問的是什麼」，由 `tests/measured-corpus.test.mjs` 回放。它是追��回歸的錨點，
+且**不含任何本機路徑**。
+
+**設計推理留存於 `.scratch/reports/`**：本 ADR 之前的三輪設計文件
+（`scheme.md`、`surface.md`、`final-change-list.md`、`threshold.md`、
+`termination.md`），依本倉庫既有慣例隨 `.scratch/` 一起入庫——
+該目錄已跟踪 18 個 markdown 設計文件。
+
+**原始探測 JSON 與一次性 harness 刻意不入庫。**它們是單日快照，
+來自共享配額桶，永遠無法重現；而它們支持的結論已固化在
+`tests/measured-samples.json` 與本 ADR 中。`scripts/` 亦不收留——
+該目錄存放的是被源碼引用的成品工具（如 `zen-provider.ts:742` 引用的
+`scripts/probe-ab.mjs`），而本輪的探測腳本是含本機路徑的臨時 harness。
+
+**回歸語料自證有效**：把分類器改回逐樣本 `=== 0`，語料立刻失敗兩條；
+恢復中位數即恢復。這是本輪唯一能證明「測試不會看起來對而其實錯」的機制。
+
 **Consequences**
 
 - 10 個活躍模型的提供檔位數由 5 降為 1（7 個）、4 降為 3（`fledge-alpha-free`）、
