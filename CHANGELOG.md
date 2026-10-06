@@ -4,6 +4,62 @@ All notable user-visible changes to `dsh-opencode-free` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The probe round now measures what it offers, and the panel says what a round
+cost. Behaviour below is what a user can observe change.
+
+### Added
+
+- **A round's cost is reported.** The report names how many requests it sent
+  (a round may take several samples of one model, so the model count is not the
+  bill) and how many models still owe samples.
+- **A click that is refused says so.** Two clicks inside five minutes: the
+  second is refused with the time remaining instead of starting a round.
+- **A row that learned nothing names the condition inline** — `not measured ·
+  quota spent`, `not measured · upstream overloaded`, `not measured ·
+  endpoint unreachable` — rather than three identical words with the reason in a
+  hover.
+
+### Changed
+
+- **`off` is measured, not assumed.** The round asks the model for no
+  reasoning and for its own lowest level and compares the reasoning tokens
+  against that model's own baseline. `off` is offered only when there is a
+  real reduction: the exact `none` where the model reaches zero, otherwise the
+  lowest level that measurably helps. A model that reduces nothing gets no `off`
+  row at all, which withdraws the row rather than leaving a control that does
+  nothing.
+- **Probe now finishes a measurement.** A manual round keeps asking each model
+  you have switched on until the axis has an answer (up to nine requests), so
+  one click can complete it. The daily round still spends one request per
+  model — but now covers every model Zen lists, including the ones you
+  switched off, because a hidden model's status is what nobody would otherwise
+  find out.
+- **An unreachable endpoint and an overloaded upstream are named** instead of
+  being reported as a model failure, and neither spends a second request on
+  the other channel.
+- **A model the upstream retires in words is removed.** `Model <id> has been
+  deprecated` is treated as a positive answer, and a channel that answers
+  nothing can no longer overrule a channel that named the model. Before this, a
+  model Zen had explicitly retired sat in the picker as a red failure.
+
+### Fixed
+
+- **The probe read no reasoning counts at all**, so no capability row could
+  ever be earned and repeated rounds changed nothing.
+- **A model whose reasoning the route never reports is asked once and then
+  left alone**, instead of being asked again at the full budget every round,
+  forever.
+- **A withdrawal visible in Zen's own list no longer lingers.** A model that
+  answers `Model is unavailable.` on the channel it actually serves is removed.
+- **A restored cache report can no longer overwrite a round that is running**,
+  which made the panel sit still while the round you started ran on invisibly.
+- **Measured context windows are used.** Where the endpoint has stated its own
+  limit, that value is offered instead of models.dev's declaration, and a
+  changed declaration discards it. A stated verdict keeps the samples behind
+  it, so any verdict can be recomputed.
+
 ## [0.3.1] - 2026-10-03
 
 Supports DeepSeek Harness `0.2.1-alpha.1`.

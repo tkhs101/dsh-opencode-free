@@ -122,10 +122,17 @@ picker to see the current ones; the latest live check results are in
 ### Reasoning and capabilities
 
 All models support reasoning and tool calls. DSH passes your reasoning level
-through, and the levels offered come from models.dev per model (Muse Spark gets
-`minimal`…`xhigh`, Space Bunny gets `low`…`max`). A level a model does not
-publish is never offered. `off` stays offered and sends no reasoning parameter,
-like OpenCode's "Default". If you choose nothing, Muse Spark uses `xhigh`.
+through, and the ladder offered comes from models.dev per model (Muse Spark
+gets `minimal`…`xhigh`, Space Bunny gets `low`…`max`). A level a model does not
+publish is never offered.
+
+`off` is the exception: it is **measured, not assumed**. The round asks the
+model for no reasoning and for its own lowest level, compares the reasoning
+tokens against that model's own baseline, and offers `off` only when the
+answer is a real reduction — the exact `none` where the model reaches zero,
+otherwise the lowest level that measurably helps. A model whose reasoning the
+route never reports gets no `off` row at all, rather than a row that does
+nothing. If you choose nothing, Muse Spark uses `xhigh`.
 
 A screenshot is attached only to a model that declares image input. The context
 size and maximum output shown in the picker are that model's own.
@@ -139,25 +146,35 @@ until the next round replaces it.
 
 - **When.** Once per local day, started when the model list is read, plus the
   **Probe now** button at any time. If you never open the model list, you never
-  pay.
+  pay. Two clicks inside five minutes: the second is refused and says how long
+  is left, rather than starting a round and leaving you watching a spinner.
 - **How.** The round first reads Zen's catalogue (one `GET`, no inference
   quota); a model Zen no longer lists is dropped without a completion being
-  sent. Each remaining model then gets one short request, one at a time,
-  because anonymous callers share one quota bucket. Models that answered are
-  asked again next round, so their latency stays current. Models you switched
-  off are not asked.
+  sent. Then each model is asked one at a time, because anonymous callers share
+  one quota bucket.
+  - **Once a day**, every model Zen still lists gets **one** short request —
+    including the ones you switched off, because a hidden model's status is
+    exactly what nobody would otherwise find out. A model that fails costs one
+    request, not more.
+  - **Probe now**, only the models you have switched on, and it keeps asking
+    each of them until the measurement is finished (up to nine requests), so
+    one click can finish the job instead of starting it. The report says what
+    that cost and how many models still owe samples.
 - **What removes a model.** Only a positive answer: Zen stops listing it, or the
   route says it will not serve it (`Model is unavailable.`,
-  `Model <id> is not supported`, `404`, `410`). Zen does not publish which
-  endpoint serves which model, so a model is asked on both endpoints this
-  provider implements before it counts as gone. models.dev's `deprecated` flag
+  `Model <id> is not supported`, `Model <id> has been deprecated`, `404`,
+  `410`). Zen does not publish which endpoint serves which model, so a model is
+  asked on both endpoints this provider implements before it counts as gone —
+  and a channel that answers nothing cannot overrule one that named the model,
+  or a wrong channel's `not supported for format` would retire every model. models.dev's `deprecated` flag
   never decides this: on this provider it can mean the free tier ended or only
   that the record is stale.
 - **What does not.** A gate refusal, exhausted quota, rejected key, dropped
-  network, or a whole endpoint being down. Those rounds learned nothing about
-  any model, so the rows turn grey "not measured" instead of red, and a banner
-  names which condition answered. A red row names its reason, with the HTTP
-  status and what to do in its tooltip.
+  network, an overloaded upstream, or a whole endpoint being down. Those rounds
+  learned nothing about any model, so the rows turn grey "not measured" instead
+  of red, and **the row names the condition inline** (`not measured · quota
+  spent`), with the HTTP status and what to do about it in its tooltip. A red
+  row is a statement about the model and always names its reason.
 - **A removal is final.** A model the route has refused is not asked again,
   because re-asking a settled question only spends quota. A Zen key does not
   bring it back: **a key changes your quota, not the model list**, and a model
