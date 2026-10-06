@@ -2035,6 +2035,25 @@ export function planRound(
   };
 }
 
+/**
+ * The one derivation of the catalogue: models.dev's dictionary plus whatever
+ * this process has measured.
+ *
+ * Two callers, and they must not drift: the warm start, and the end of a probe
+ * round — a verdict the round just wrote changes what the user is offered, so
+ * the list has to be rebuilt from it rather than waiting for the next sync or a
+ * restart. Everything a measurement can add (the Off row, a harvested
+ * vocabulary) is applied HERE, which is why neither caller may do it itself.
+ */
+function deriveWithEvidence(state: CatalogState, deps: CatalogDeps, section: CatalogRecord): DerivedCatalog {
+  const base = derive(section, { knownApis: deps.knownApis, template: deps.template });
+  const evidence = measuredEffortMap(base.candidates, section, state.probes);
+  const reported = selfReportedMap(state.probes);
+  return evidence.size === 0 && reported.size === 0
+    ? base
+    : derive(section, { knownApis: deps.knownApis, template: deps.template, measuredEffort: evidence, selfReported: reported });
+}
+
 // Warm start: a valid state.cache restores the catalogue without any network.
 function adopt(
   state: CatalogState,
@@ -2054,18 +2073,7 @@ function adopt(
   // itself rather than patched onto the result: the map is a function of the
   // record plus the evidence, so patching afterwards would leave two places that
   // decide `off` — which is how the two authorities drifted apart before.
-  const base = derive(record.models, { knownApis: deps.knownApis, template: deps.template });
-  const evidence = measuredEffortMap(base.candidates, record.models, record.probes);
-  const reported = selfReportedMap(record.probes);
-  const derived =
-    evidence.size === 0 && reported.size === 0
-      ? base
-      : derive(record.models, {
-          knownApis: deps.knownApis,
-          template: deps.template,
-          measuredEffort: evidence,
-          selfReported: reported,
-        });
+  const derived = deriveWithEvidence(state, deps, record.models);
   // An empty state.models dictionary is NOT a catalogue — it is a fetch that failed
   // and got persisted anyway (a round writes one when the catalogue fetch
   // never succeeded, see runProbeRound). Adopting it empties the picker on
@@ -2630,6 +2638,21 @@ export async function runProbeRound(
   } finally {
     state.probeRun.running = false;
     state.probeRun.current = null;
+  }
+  // Republish what this round just measured. `state.models` was derived before
+  // the round, so a verdict that landed here was on disk but not in the list the
+  // picker and the panel read — the user clicked "Probe now" and watched a round
+  // confirm an Off row that stayed invisible until the next catalogue sync or a
+  // restart. The derivation is the SAME one the warm start uses, so the two
+  // cannot answer differently about the same evidence.
+  //
+  // `adopt()` is deliberately not called: it restores `state.reach` and the
+  // probe map FROM the record, which would roll back the entries this very round
+  // just advanced.
+  if (state.cache !== null) {
+    const derived = deriveWithEvidence(state, deps, state.cache.models);
+    if (derived.candidates.length > 0) state.models = derived.candidates;
+    applyMeasuredChannel(state.models, state.probes);
   }
   // The round marker is written even when nothing concluded: it is the only
   // thing that stops a fully-gated day from re-probing on every single read.

@@ -1889,6 +1889,38 @@ test('GUARD: samples from an older instrument are re-measured, not judged', asyn
   })
 })
 
+test('GUARD: a verdict is visible in the same round that confirms it', async () => {
+  // `state.models` was derived before the round, so the Off row a round confirms
+  // landed on disk but not in the list the picker reads: the user watched a round
+  // confirm it and had to wait for the next catalogue sync or a restart. The
+  // round republishes from its own evidence now, using the same derivation the
+  // warm start uses.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'mimo-v2.6-flash-free': mimoRecord() }) }),
+      probe: async (_model, question) => ({
+        kind: 'ok',
+        api: 'openai-completions',
+        effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens: question === 'baseline' ? 37 : 0 },
+      }),
+      listZenIds: async () => ['mimo-v2.6-flash-free'],
+    });
+    await catalog.forceRefresh();
+    const before = catalog.current().models.find((m) => m.id === 'mimo-v2.6-flash-free');
+    assert.equal(before.thinkingLevelMap?.off, null, 'nothing has been measured yet');
+
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+    const after = catalog.current().models.find((m) => m.id === 'mimo-v2.6-flash-free');
+    assert.equal(after.thinkingLevelMap?.off, 'none', 'the row the round confirmed is in the list it republished');
+    assert.equal(after.contextWindow, before.contextWindow, 'and nothing else moved with it');
+  })
+})
+
 test('GUARD: one manual click can finish a measurement, not just start one', async () => {
   // A round used to spend exactly one request per model. A verdict needs three
   // baseline samples plus five candidate ones (median first, then three agreeing
