@@ -121,10 +121,15 @@ picker to see the current ones; the latest live check results are in
 
 ### Reasoning and capabilities
 
-All models support reasoning and tool calls. DSH passes your reasoning level
-through, and the ladder offered comes from models.dev per model (Muse Spark
-gets `minimal`…`xhigh`, Space Bunny gets `low`…`max`). A level a model does not
-publish is never offered.
+DSH passes your reasoning level through, and the ladder offered comes from
+models.dev per model (Muse Spark gets `minimal`…`xhigh`, Space Bunny gets
+`low`…`max`). A level a model does not publish is never offered.
+
+Tool calls work: the free tier admits a request only when it carries the
+`read` and `bash` tools, so a model that answered this round answered with
+them present. That is an admission requirement rather than a measurement of
+whether a model *uses* them — nothing here has asked one to call a tool and
+checked the answer.
 
 `off` is the exception: it is **measured, not assumed**. The round asks the
 model for no reasoning and for its own lowest level, compares the reasoning
