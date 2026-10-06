@@ -762,8 +762,6 @@ export interface DeriveOptions {
    * state so `derive()` stays pure and fixture-testable.
    */
   readonly measuredEffort?: ReadonlyMap<string, MeasuredEffort>;
-  /** Levels each model named in a refusal; the model's own vocabulary. */
-  readonly selfReported?: ReadonlyMap<string, readonly string[]>;
   /**
    * Measured context windows, keyed by id. Supplied rather than read from state
    * so `derive()` stays pure and fixture-testable, exactly like `measuredEffort`.
@@ -797,7 +795,6 @@ function buildModel(
   template: Model<Api>,
   knownApis?: ReadonlyMap<string, Api>,
   measured?: MeasuredEffort,
-  selfReported?: readonly string[],
   measuredContext?: MeasuredContext,
 ): Model<Api> {
   const id = typeof record.id === "string" && record.id !== "" ? record.id : "";
@@ -807,7 +804,7 @@ function buildModel(
   const declaredInput = Array.isArray(modalities.input)
     ? modalities.input.filter((entry): entry is "text" | "image" => entry === "text" || entry === "image")
     : [];
-  const levels = thinkingLevelMapFor(record, api, measured, selfReported);
+  const levels = thinkingLevelMapFor(record, api, measured);
   return {
     ...template,
     id,
@@ -860,7 +857,6 @@ export function derive(section: CatalogRecord, options: DeriveOptions): DerivedC
         options.template,
         options.knownApis,
         options.measuredEffort?.get(id),
-        options.selfReported?.get(id),
         options.measuredContext?.get(id),
       ),
     );
@@ -1201,15 +1197,6 @@ export function measuredEffortMap(
   return out;
 }
 
-/** The levels each model named in a refusal, for the derivation to consult. */
-export function selfReportedMap(probes: ProbeMap): Map<string, readonly string[]> {
-  const out = new Map<string, readonly string[]>();
-  for (const [id, record] of Object.entries(probes)) {
-    if (Array.isArray(record.selfReported) && record.selfReported.length > 0) out.set(id, record.selfReported);
-  }
-  return out;
-}
-
 /**
  * What the transport layer reports for one probe. Structurally compatible with
  * `zen-provider`'s `ProbeOutcome`; declared here so this module keeps no
@@ -1258,11 +1245,14 @@ export interface ProbeResult {
  *
  * Every evidence field the round writes MUST be read here, and the reader is
  * the second half of that contract. Three were missing, which made the write
- * side a fiction: `selfReported` (a vocabulary a refusal enumerated, harvestable
- * only on models that self-report at all), `effortFrozenAt` (the marker that
- * stops a confirmed verdict from being re-litigated), and every `effortQuestion`
- * other than `none`/`minimal` (a fallback LEVEL — `low` on space-bunny-free —
- * was silently dropped, so a restart sent the model back to `none`).
+ * side a fiction: `effortFrozenAt` (the marker that stops a confirmed verdict
+ * from being re-litigated) and every `effortQuestion` other than
+ * `none`/`minimal` (a fallback LEVEL — `low` on space-bunny-free — was silently
+ * dropped, so a restart sent the model back to `none`).
+ *
+ * `selfReported` is read back for the same reason even though it no longer
+ * decides anything: it is the only record of what a model's refusal said it
+ * accepts, and that is worth keeping for a cross-check that does not exist yet.
  */
 function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string[] } {
   const droppedVerdicts: string[] = [];
@@ -2201,19 +2191,12 @@ export function planRound(
 function deriveWithEvidence(state: CatalogState, deps: CatalogDeps, section: CatalogRecord): DerivedCatalog {
   const base = derive(section, { knownApis: deps.knownApis, template: deps.template });
   const evidence = measuredEffortMap(base.candidates, section, state.probes);
-  const reported = selfReportedMap(state.probes);
   // A live measurement outranks the recorded one: it is newer and it was taken
   // against this very record. The seed fills in only what nobody has measured.
   const windows = measuredContextFor(base.candidates, section, state.probes);
-  return evidence.size === 0 && reported.size === 0 && windows.size === 0
+  return evidence.size === 0 && windows.size === 0
     ? base
-    : derive(section, {
-        knownApis: deps.knownApis,
-        template: deps.template,
-        measuredEffort: evidence,
-        selfReported: reported,
-        measuredContext: windows,
-      });
+    : derive(section, { knownApis: deps.knownApis, template: deps.template, measuredEffort: evidence, measuredContext: windows });
 }
 
 /**
