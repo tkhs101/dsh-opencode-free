@@ -229,15 +229,105 @@ export type EffortSamples = readonly MeasuredEffort["kind"][];
  * provides (0 reasoning tokens across six samples). One request per round either
  * way; only the question changes.
  */
-export type EffortQuestion = "none" | "minimal";
+export type EffortQuestion = "baseline" | "none" | "minimal";
 
-/** Discordant rounds before the probe stops asking about `none`. */
-export const EFFORT_FALLBACK_AFTER = 3;
+/**
+ * A candidate counts as a working Off below this fraction of the same model's
+ * omitted baseline, taken in the same round.
+ *
+ * Measured 2026-10-06 on the two models that can be reached:
+ *   big-pickle  minimal 0-8   against omitted 14-16  ->  0.00-0.57
+ *   longcat     minimal 36     against omitted 36-45  ->  0.80-1.00
+ * longcat's `minimal` output is byte-identical to omitting, so it genuinely
+ * does nothing there; big-pickle's is a 95-100% reduction.
+ *
+ * A RATIO, not an absolute count. The absolute counts would separate this pair
+ * too (8 against 36) and that is the trap: longcat's floor of 36 sits ABOVE
+ * big-pickle's omitted baseline of 14, so any fixed absolute number collides the
+ * moment a third model appears.
+ *
+ * 0.43 is DERIVED, not determined: it is the max-margin cut in log space of the
+ * measured bracket, and ANY value in (0.231, 0.800) classifies the whole
+ * dataset correctly. It is recorded as a judgement call so the next measurement
+ * does not get to choose it symmetrically. At 0.43 the margins are 1.86x on
+ * each side — nothing in the dataset lands closer.
+ */
+export const EFFORT_WORKING_RATIO = 0.43;
 
-/** Which spelling to ask about next, given what the record has seen. */
+/**
+ * Decisive rejections before the probe moves to the next candidate.
+ *
+ * One, not three. big-pickle's `none` sits at a ratio of 12.4 — a rejection so
+ * far outside the bracket that repeating it only spends quota to confirm what is
+ * already settled. `longcat` is the counter-example that keeps the fallback at
+ * all: its `none` is 1.578 and its lowest level is 0.800, so both candidates
+ * must be spent before the model can honestly be left with no Off row.
+ */
+export const EFFORT_FALLBACK_AFTER = 1;
+
+/** Samples per side before a verdict is drawn. A median needs more than one. */
+export const EFFORT_SAMPLES = 3;
+
+/**
+ * Which spelling to ask about next.
+ *
+ * The baseline is asked for rather than assumed, because a threshold on an
+ * absolute count is not defensible across models. It costs nothing extra: the
+ * round alternates the question inside the one request it was already making,
+ * so the per-round cost is unchanged and the pairing is consecutive.
+ */
 export function nextEffortQuestion(record: ProbeRecord | undefined): EffortQuestion {
+  // The liveness request IS the omitted request on a no-ladder model — its
+  // hardcoded `reasoning: "low"` clamps to omission there — so the baseline
+  // usually arrives without a round being spent on asking for it.
+  if ((record?.effortBaselineTokens?.length ?? 0) < EFFORT_SAMPLES) return "baseline";
   if (record?.effortQuestion === "minimal") return "minimal";
   return (record?.effortDiscord ?? 0) >= EFFORT_FALLBACK_AFTER ? "minimal" : "none";
+}
+
+/**
+ * Whether a candidate brought reasoning down to the floor.
+ *
+ * Returns `undefined` when there is no baseline, which the caller must read as
+ * "no claim" rather than as a negative: a model we have not measured against
+ * itself has told us nothing about whether a level works.
+ */
+export function effortWorking(candidate: number, baseline: number | undefined): boolean | undefined {
+  if (baseline === undefined || baseline <= 0) return undefined;
+  return median([candidate]) < EFFORT_WORKING_RATIO * median([baseline]);
+}
+
+/**
+ * The median of a sample set.
+ *
+ * Classification runs on a MEDIAN, never per sample. Per-sample classification
+ * measures the classifier's fragility rather than the model's: big-pickle's
+ * `minimal` alternates 0 and 8, and a `=== 0` test flips on that even though
+ * both values sit two orders of magnitude below its baseline.
+ */
+function median(values: readonly number[]): number {
+  const sorted = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (sorted.length === 0) return Number.NaN;
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * The verdict for a candidate, judged on the medians of what has been seen.
+ *
+ * `undefined` means no claim: without enough of either side there is nothing to
+ * compare, and "we did not look" must never read as "it does not work".
+ */
+export function effortVerdictFrom(
+  candidateSamples: readonly number[] | undefined,
+  baselineSamples: readonly number[] | undefined,
+): boolean | undefined {
+  if (baselineSamples === undefined || baselineSamples.length === 0) return undefined;
+  if (candidateSamples === undefined || candidateSamples.length === 0) return undefined;
+  const base = median(baselineSamples);
+  const cand = median(candidateSamples);
+  if (!Number.isFinite(base) || !Number.isFinite(cand) || base <= 0) return undefined;
+  return cand < EFFORT_WORKING_RATIO * base;
 }
 
 /**
@@ -691,6 +781,16 @@ export interface ProbeRecord {
   /** Discordant rounds seen on the current question; drives the fallback. */
   readonly effortDiscord?: number;
   /**
+   * The model's reasoning tokens when nothing was asked for, as of the last
+   * baseline round. A candidate is judged against THIS rather than against an
+   * absolute count.
+   */
+  readonly effortBaseline?: number;
+  /** Every candidate sample seen for the current question, kept to judge on. */
+  readonly effortTokens?: readonly number[];
+  /** Every omitted sample seen, the reference the candidate is judged against. */
+  readonly effortBaselineTokens?: readonly number[];
+  /**
    * Consecutive clamp observations seen since the last write. In-memory only,
    * like the liveness round's counters: it is a confidence gauge, not a verdict,
    * so losing it on restart costs one round, never correctness.
@@ -791,7 +891,7 @@ export interface ProbeResult {
    * sends it at the payload boundary. Deliberately coarse: the round, not the
    * prober, decides when enough of these agree to persist.
    */
-  readonly effort?: { readonly kind: "none-works" | "noop" | "rejected" };
+  readonly effort?: { readonly kind: "baseline" | "candidate"; readonly tokens: number };
   /** HTTP status the transport saw; 0 means no response ever arrived. */
   readonly http?: number;
   /**
@@ -828,6 +928,15 @@ function readProbes(value: unknown): ProbeMap {
         : {}),
       ...(typeof entry.effortDiscord === "number" && Number.isFinite(entry.effortDiscord)
         ? { effortDiscord: entry.effortDiscord }
+        : {}),
+      ...(typeof entry.effortBaseline === "number" && Number.isFinite(entry.effortBaseline)
+        ? { effortBaseline: entry.effortBaseline }
+        : {}),
+      ...(Array.isArray(entry.effortTokens)
+        ? { effortTokens: entry.effortTokens.filter((n) => typeof n === "number" && Number.isFinite(n)) }
+        : {}),
+      ...(Array.isArray(entry.effortBaselineTokens)
+        ? { effortBaselineTokens: entry.effortBaselineTokens.filter((n) => typeof n === "number" && Number.isFinite(n)) }
         : {}),
     };
   }
@@ -1895,18 +2004,25 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       // identical requests and 400'd the rest while its liveness stayed `ok`, so
       // a single sample would persist the wrong row a third of the time with
       // nothing downstream able to notice.
-      const sample =
-        outcome.kind !== "ok"
-          ? undefined
-          : question === "none"
-            ? outcome.effort?.kind
-            : // The fallback question's answer is a claim about `minimal`, not
-              // about `none`, so it is recorded in those words.
-              outcome.effort?.kind === "none-works"
-              ? "level-works"
-              : outcome.effort?.kind === "noop"
-                ? "noop"
-                : undefined;
+      // The probe reports an OBSERVATION; what it means is decided here, because
+      // the baseline arrives on a different round and only the round holds both.
+      const observation = outcome.kind === "ok" ? outcome.effort : undefined;
+      const isBaseline = observation?.kind === "baseline";
+      // A candidate is judged against the model's OWN omitted baseline, never
+      // against an absolute count: longcat's floor of 36 sits above big-pickle's
+      // baseline of 14, so any fixed number collides on the third model.
+      const tokens = observation === undefined ? undefined : [...(prior?.effortTokens ?? []), observation.tokens];
+      const baseTokens =
+        observation?.kind === "baseline" ? [...(prior?.effortBaselineTokens ?? []), observation.tokens] : prior?.effortBaselineTokens;
+      // Judged on medians, once enough of both sides exist. Per-sample
+      // classification would measure the classifier's fragility — big-pickle's
+      // `minimal` alternates 0 and 8 — rather than the model's.
+      const working =
+        observation?.kind === "candidate" && (tokens?.length ?? 0) >= EFFORT_SAMPLES
+          ? effortVerdictFrom(tokens, baseTokens)
+          : undefined;
+      const sample: MeasuredEffort["kind"] | undefined =
+        working === true ? "none-works" : working === false ? "noop" : undefined;
       const tally = sample === undefined ? undefined : effortVerdict(prior?.effortSamples, sample);
       const confirmed =
         sample !== undefined &&
@@ -1927,6 +2043,13 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // The tally is kept even when nothing was confirmed, so the next round
         // continues the count instead of restarting it.
         ...(tally !== undefined ? { effortSamples: tally.kind === "confirmed" ? [] : tally.samples } : {}),
+        // The baseline is the reference every later candidate is judged against,
+        // so it is kept even when nothing was concluded.
+        ...(isBaseline && observation !== undefined ? { effortBaseline: observation.tokens } : {}),
+        // The raw samples are what the verdict is drawn from; keeping them is
+        // what lets a later round judge the MEDIAN rather than the last value.
+        ...(isBaseline && baseTokens !== undefined ? { effortBaselineTokens: baseTokens } : {}),
+        ...(observation?.kind === "candidate" && tokens !== undefined ? { effortTokens: tokens } : {}),
         // Written ONLY on agreement. A disagreement empties the tally and leaves
         // the map unmeasured, which offers no Off row rather than a wrong one.
         // The fallback question stays put: it answered the question, so
@@ -1935,10 +2058,11 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         ...(confirmed && tally !== undefined && isMeasuredChannel(outcome.api)
           ? {
               effort: {
-                kind: sample === "level-works" ? "level-works" : sample === "none-works" ? "none-works" : "noop",
-                // The measured level name travels with the verdict, so the map
-                // can name it rather than guess which rung was meant.
-                ...(sample === "level-works" ? { level: "minimal" } : {}),
+                // The fallback question's answer is a claim about the level it
+                // named, so it is recorded in those words rather than as a
+                // claim about `none`.
+                kind: question === "minimal" ? "level-works" : "none-works",
+                ...(question === "minimal" ? { level: "minimal" } : {}),
                 fp: reasoningFingerprint({ ...rawById(model.id)!, id: model.id }),
                 api: outcome.api,
                 at: stamp,

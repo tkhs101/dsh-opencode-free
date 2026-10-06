@@ -869,7 +869,7 @@ export type ProbeOutcome =
        * measured: a model that honours `none` still returns text, so this costs
        * the liveness verdict nothing.
        */
-      effort?: { readonly kind: "none-works" | "noop" | "rejected" };
+      effort?: { readonly kind: "baseline" | "candidate"; readonly tokens: number };
     }
   | { kind: "dead"; reason: string; code: "dead"; http: number }
   | {
@@ -939,7 +939,7 @@ export interface ProbeDeps {
    * because the round changes what its existing request asks rather than
    * adding one.
    */
-  readonly question?: "none" | "minimal" | undefined;
+  readonly question?: "baseline" | "none" | "minimal" | undefined;
   readonly now?: (() => number) | undefined;
 }
 
@@ -1106,6 +1106,9 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     signal.aborted ||
     (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
   let result: Record<string, unknown> | undefined;
+  // Whether the request that actually left carried a reasoning field. Set by the
+  // payload hook below and read once the reply settles.
+  const injected: { reasoning: boolean } = { reasoning: false };
   let thrown: unknown;
   try {
     // `streamSimple`, not `stream`. Measured 2026-09-30: `stream()` ignores
@@ -1136,6 +1139,17 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
       onPayload: (payload: unknown, sent: unknown) => {
         const gated = enforceAnonymousTools(payload);
         const body = gated as Record<string, unknown>;
+        // Whether this request actually carries a reasoning parameter is a
+        // property of the BYTES, not of the question we meant to ask: on a
+        // no-ladder model the liveness probe's hardcoded `low` clamps to
+        // omission, which makes that very request the omitted baseline. Reading
+        // it here is what lets the baseline cost no extra quota.
+        const sent0 = body.reasoning_effort !== undefined || body.reasoning !== undefined;
+        injected.reasoning = deps.question !== "baseline" && !sent0;
+        // The baseline round sends nothing at all: it is the same request the
+        // liveness probe was already making, so asking for the model's own
+        // default costs no extra quota.
+        if (deps.question === "baseline") return body;
         const responses = (sent as { api?: string } | undefined)?.api === "openai-responses";
         const spelling = deps.question === "minimal" ? "minimal" : "none";
         return responses ? { ...body, reasoning: { effort: spelling } } : { ...body, reasoning_effort: spelling };
@@ -1177,7 +1191,19 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     // always present, so this costs the round nothing.
     const usage = usageOf(result);
     const observed = Number(usage?.reasoning ?? 0);
-    return { kind: "ok", usage, effort: { kind: observed === 0 ? "none-works" : "noop" } };
+    // The probe reports what it OBSERVED; it does not decide what it means.
+    // Judging the number against the model's own baseline is the round's job,
+    // because the baseline arrives on a different round.
+    return {
+      kind: "ok",
+      usage,
+      // What the bytes actually carried, not what we meant to ask. On a no-ladder
+      // model the liveness request silently becomes the baseline this way.
+      effort: {
+        kind: injected.reasoning === true ? "candidate" : "baseline",
+        tokens: observed,
+      },
+    };
   }
   const { status, body, cause } = recorder.read();
   // The body is the only place the upstream's actual words exist, and an
