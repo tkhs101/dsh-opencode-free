@@ -37,6 +37,7 @@ import {
   contextFingerprint,
   contextWindowFor,
   clampVerdict,
+  effortVerdict,
   topThinkingLevel,
   unknownFree,
   writeCacheAtomic,
@@ -510,6 +511,52 @@ test('contextFingerprint moves only for its own axis', () => {
   assert.notEqual(contextFingerprint({ ...base, limit: { context: 1, output: 3 } }), original)
   // A record with no limits at all is distinguishable from one declaring zeros.
   assert.notEqual(contextFingerprint({ ...base, limit: undefined }), original)
+})
+
+test('INVARIANT: an effort verdict needs agreeing samples, not a majority', () => {
+  // Measured 2026-10-06: `big-pickle` returned HTTP 400 on three of nine
+  // IDENTICAL requests and HTTP 200 on the rest, with `reasoning_content`
+  // present on every 200. A single sample therefore records the wrong row about a
+  // third of the time, and nothing downstream can notice — unlike an
+  // `inconclusive`, the probe returns a clean 200.
+  assert.deepEqual(effortVerdict(undefined, 'none-works'), { kind: 'discord', samples: ['none-works'] });
+  assert.deepEqual(effortVerdict(['none-works'], 'none-works'), { kind: 'sample', samples: ['none-works', 'none-works'] });
+  assert.deepEqual(effortVerdict(['none-works', 'none-works'], 'none-works'), { kind: 'confirmed' });
+  // A disagreement RESETS rather than being out-voted. big-pickle's six-to-three
+  // would decide "accepted" by majority, which is the reading its own data
+  // refutes: when it does accept, the reasoning is still present.
+  assert.deepEqual(effortVerdict(['none-works', 'none-works'], 'noop'), { kind: 'discord', samples: ['noop'] });
+  assert.deepEqual(effortVerdict(['noop', 'none-works'], 'noop'), { kind: 'discord', samples: ['noop'] });
+})
+
+test('effort samples persist so a restart does not restart the count', async () => {
+  // Losing the tally costs a few more rounds, never a wrong verdict — but only
+  // if the tally is actually carried on disk.
+  const dir = await mkdtemp(join(tmpdir(), 'effort-'));
+  const file = join(dir, 'catalog.json');
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      etag: undefined,
+      fetchedAt: 1,
+      models: {},
+      probes: {
+        'flip-free': { verdict: 'ok', at: 1, effortSamples: ['none-works', 'none-works'] },
+        'bad-free': { verdict: 'ok', at: 1, effortSamples: ['none-works', 7, null] },
+        'absent-free': { verdict: 'ok', at: 1 },
+      },
+      lastProbeAt: 0,
+    }),
+  );
+  const read = await readCache(file);
+  assert.deepEqual(read.probes['flip-free'].effortSamples, ['none-works', 'none-works']);
+  // Damaged entries are dropped rather than trusted.
+  assert.deepEqual(read.probes['bad-free'].effortSamples, ['none-works']);
+  // A cache written before this field existed reads as "never sampled", which
+  // is exactly right and self-heals on the next round.
+  assert.equal(read.probes['absent-free'].effortSamples, undefined);
+  await rm(dir, { recursive: true, force: true });
 })
 
 test('a measurement is applied only when its fingerprint and channel still match', () => {

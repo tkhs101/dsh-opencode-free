@@ -201,6 +201,50 @@ export function reasoningFingerprint(record: CatalogRecord): string {
   return `${record.reasoning === false ? "no" : "yes"}:${options === null ? "absent" : JSON.stringify(options)}`;
 }
 
+/**
+ * How many consecutive agreeing samples an effort verdict needs before it may be
+ * persisted.
+ *
+ * Measured 2026-10-06, `big-pickle` accepted `reasoning_effort:"none"` on six of
+ * nine identical requests and returned HTTP 400 on the other three, while
+ * `reasoning_content` was present on every 200. One sample therefore records the
+ * wrong row about a third of the time, and — unlike an `inconclusive` — nothing
+ * downstream can detect it, because the probe returned a clean 200.
+ *
+ * Three is the smallest count that turns an intermittent failure into a
+ * negligible one without making the round unconverge.
+ */
+export const EFFORT_CONCORDANCE = 3;
+
+/** The recent samples a verdict is judged against, oldest first. */
+export type EffortSamples = readonly MeasuredEffort["kind"][];
+
+/**
+ * Whether a fresh sample agrees with what came before.
+ *
+ * A sample that DISAGREES resets the tally rather than being averaged or
+ * out-voted: `big-pickle`'s six-to-three record would decide "accepted" by
+ * majority, which is precisely the reading its own data refutes — when it does
+ * accept `none`, the reasoning is still present.
+ *
+ * An `inconclusive` produces no sample at all and so leaves the tally untouched:
+ * a gated IP is not evidence about the model.
+ */
+export function effortVerdict(
+  previous: EffortSamples | undefined,
+  candidate: MeasuredEffort["kind"],
+): { kind: "sample"; samples: EffortSamples } | { kind: "discord"; samples: EffortSamples } | { kind: "confirmed" } {
+  const prior = Array.isArray(previous) ? previous : [];
+  const agrees = prior.length > 0 && prior.every((sample) => sample === candidate);
+  if (!agrees) {
+    // Keep only the newest: a stale disagreement must not delay forever.
+    return { kind: "discord", samples: [candidate] };
+  }
+  const samples = [...prior, candidate];
+  if (samples.length >= EFFORT_CONCORDANCE) return { kind: "confirmed" };
+  return { kind: "sample", samples };
+}
+
 /** Defensive read of a persisted effort measurement, in `isMeasuredChannel`'s style. */
 export function isMeasuredEffort(value: unknown): value is MeasuredEffort {
   if (!isPlainObject(value)) return false;
@@ -615,6 +659,13 @@ export interface ProbeRecord {
    */
   readonly context?: MeasuredContext;
   /**
+   * The recent effort samples, oldest first. Persisted rather than held in
+   * memory so a restart does not restart the count — the cost of a lost tally is
+   * a few more rounds, and it is only ever spent on a model whose verdict is
+   * still unconfirmed.
+   */
+  readonly effortSamples?: EffortSamples;
+  /**
    * Consecutive clamp observations seen since the last write. In-memory only,
    * like the liveness round's counters: it is a confidence gauge, not a verdict,
    * so losing it on restart costs one round, never correctness.
@@ -710,6 +761,12 @@ export interface ProbeResult {
   readonly api?: Api;
   /** Machine-readable failure code; the panel localizes it rather than guessing. */
   readonly code?: string;
+  /**
+   * What an `ok` observed about `reasoning_effort:"none"`, since the probe
+   * sends it at the payload boundary. Deliberately coarse: the round, not the
+   * prober, decides when enough of these agree to persist.
+   */
+  readonly effort?: { readonly kind: "none-works" | "noop" | "rejected" };
   /** HTTP status the transport saw; 0 means no response ever arrived. */
   readonly http?: number;
   /**
@@ -738,6 +795,9 @@ function readProbes(value: unknown): ProbeMap {
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
       ...(isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
+      ...(Array.isArray(entry.effortSamples)
+        ? { effortSamples: entry.effortSamples.filter((k) => typeof k === "string") as EffortSamples }
+        : {}),
     };
   }
   return probes;
@@ -1694,6 +1754,14 @@ function runProbeSingle(state: CatalogState, deps: CatalogDeps): Promise<void> {
  */
 export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Promise<void> {
   const { path, hidden, probe } = deps;
+  // The raw models.dev record behind a derived model, so an effort measurement
+  // is fingerprinted against what it is actually ABOUT. Absent before the first
+  // sync, which is exactly when there is nothing to fingerprint yet.
+  const rawById = (id: string): CatalogRecord | undefined => {
+    const section = state.cache?.models;
+    const raw = section === undefined ? undefined : section[id];
+    return isPlainObject(raw) ? ({ ...raw, id } as CatalogRecord) : undefined;
+  };
   // A round reads `state.probes` twice — to decide what is already settled, and
   // to answer `priorVerdict`, which is the only thing that lets it tell a fresh
   // removal from a re-confirmed old one — and `state.models` to decide what to
@@ -1789,6 +1857,20 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         untrusted = true;
         continue;
       }
+      const prior = state.probes[model.id];
+      // The Off verdict the same request observed, held back until it agrees
+      // with what came before. `big-pickle` accepted `none` on six of nine
+      // identical requests and 400'd the rest while its liveness stayed `ok`, so
+      // a single sample would persist the wrong row a third of the time with
+      // nothing downstream able to notice.
+      const sample = outcome.kind === "ok" ? outcome.effort?.kind : undefined;
+      const tally = sample === undefined ? undefined : effortVerdict(prior?.effortSamples, sample);
+      const confirmed =
+        sample !== undefined &&
+        tally !== undefined &&
+        tally.kind === "confirmed" &&
+        isMeasuredChannel(outcome.api) &&
+        rawById(model.id) !== undefined;
       state.probes[model.id] = {
         verdict: outcome.kind,
         at: stamp,
@@ -1799,6 +1881,21 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // Reaching here means the prober exhausted every channel before
         // concluding, so this `dead` is earned and can be final.
         ...(outcome.kind === "dead" ? { swept: true } : {}),
+        // The tally is kept even when nothing was confirmed, so the next round
+        // continues the count instead of restarting it.
+        ...(tally !== undefined ? { effortSamples: tally.kind === "confirmed" ? [] : tally.samples } : {}),
+        // Written ONLY on agreement. A disagreement empties the tally and leaves
+        // the map unmeasured, which offers no Off row rather than a wrong one.
+        ...(confirmed && tally !== undefined && isMeasuredChannel(outcome.api)
+          ? {
+              effort: {
+                kind: outcome.effort!.kind === "none-works" ? "none-works" : "noop",
+                fp: reasoningFingerprint({ ...rawById(model.id)!, id: model.id }),
+                api: outcome.api,
+                at: stamp,
+              },
+            }
+          : {}),
       };
       // Applied HERE, not when the round ends. A row is painted the moment its
       // verdict lands, so a model shown as working must already be routed the
