@@ -39,6 +39,9 @@ import {
   clampVerdict,
   effortVerdict,
   nextEffortQuestion,
+  reachAllowsAttempt,
+  nextReachAttempt,
+  UNREACHABLE_BACKOFF_MS,
   effortVerdictFrom,
   topThinkingLevel,
   unknownFree,
@@ -618,6 +621,49 @@ test('effort samples persist so a restart does not restart the count', async () 
   // A cache written before this field existed reads as "never sampled", which
   // is exactly right and self-heals on the next round.
   assert.equal(read.probes['absent-free'].effortSamples, undefined);
+  await rm(dir, { recursive: true, force: true });
+})
+
+test('a model that cannot be reached is asked less, not concluded about', () => {
+  // Measured 2026-10-06: ling-3.1-flash-free returned `Endpoint is unavailable`
+  // on seven attempts across hours. One draw a day was being spent every day to
+  // learn nothing, against a bucket shared per egress IP.
+  //
+  // The cadence lives BESIDE the verdicts, never inside them: a model we never
+  // reached has no verdict, and giving it one would be the "absence read as a
+  // claim" mistake this change set exists to remove.
+  const now = 1_000_000;
+  assert.equal(reachAllowsAttempt(undefined, now), true, 'an unseen model is due now');
+  let record = nextReachAttempt(undefined, now);
+  assert.equal(reachAllowsAttempt(record, now), false, 'not immediately after a miss');
+  assert.equal(reachAllowsAttempt(record, now + 6 * 60 * 60_000), true, 'six hours later it is due again');
+  record = nextReachAttempt(record, now);
+  record = nextReachAttempt(record, now);
+  // Bounded, not abandoned: a week is the ceiling, because the upstream fixing
+  // the outage is exactly what makes the re-ask worth making.
+  assert.equal(UNREACHABLE_BACKOFF_MS[UNREACHABLE_BACKOFF_MS.length - 1], 7 * 24 * 60 * 60_000);
+})
+
+test('the reach cadence round-trips and never becomes a verdict', async () => {
+  // A round that concluded nothing must leave `probes` byte-identical — that
+  // invariant is what stops one gated IP from emptying the picker, and a cadence
+  // smuggled in as a ProbeRecord would quietly break it.
+  const dir = await mkdtemp(join(tmpdir(), 'reach-'));
+  const file = join(dir, 'catalog.json');
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1, etag: undefined, fetchedAt: 1, models: {},
+      probes: { 'ok-free': { verdict: 'ok', at: 1 } },
+      reach: { 'down-free': { misses: 2, nextAt: 999 }, 'bad-free': { misses: 'x' } },
+      lastProbeAt: 0,
+    }),
+  );
+  const read = await readCache(file);
+  assert.deepEqual(read.probes['ok-free'], { verdict: 'ok', at: 1 }, 'an answered model has no cadence');
+  assert.deepEqual(read.reach['down-free'], { misses: 2, nextAt: 999 });
+  // Damaged entries are dropped rather than trusted.
+  assert.equal(read.reach['bad-free'], undefined);
   await rm(dir, { recursive: true, force: true });
 })
 
