@@ -607,6 +607,19 @@ export interface ProbeRecord {
    * are what make a stale measurement detectable rather than permanent.
    */
   readonly effort?: MeasuredEffort;
+  /**
+   * What was MEASURED about this model's context window, if anything has been.
+   *
+   * Written only by the clamp observation, and only after repeated agreement —
+   * a single silent reply is not evidence, and one gated round is not either.
+   */
+  readonly context?: MeasuredContext;
+  /**
+   * Consecutive clamp observations seen since the last write. In-memory only,
+   * like the liveness round's counters: it is a confidence gauge, not a verdict,
+   * so losing it on restart costs one round, never correctness.
+   */
+  readonly contextHits?: number;
 }
 
 export type ProbeMap = Record<string, ProbeRecord>;
@@ -724,6 +737,7 @@ function readProbes(value: unknown): ProbeMap {
       ...(entry.swept === true ? { swept: true } : {}),
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
       ...(isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
+      ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
     };
   }
   return probes;
@@ -1058,6 +1072,126 @@ export function initialState(builtinBaseline: readonly Model<Api>[]): CatalogSta
     probeInflight: null,
   };
 }
+/**
+ * What was MEASURED about a model's context window, and what the plugin may
+ * therefore do about it.
+ *
+ * `raisedTo` is a PROPOSAL the measurement produced, not a substituted value:
+ * models.dev's declaration is always the default, and this only ever raises.
+ */
+export interface MeasuredContext {
+  /** The window to advertise in place of the declared one. */
+  readonly raisedTo: number;
+  /** Fingerprint of `limit`, so a revised declaration voids the measurement. */
+  readonly fp: string;
+  readonly at: number;
+}
+
+/** Stable fingerprint of the limits a context measurement is about. */
+export function contextFingerprint(record: CatalogRecord): string {
+  const limit = isPlainObject(record.limit) ? record.limit : {};
+  return `${String(limit.context ?? "-")}:${String(limit.output ?? "-")}`;
+}
+
+/** Defensive read of a persisted context measurement. */
+export function isMeasuredContext(value: unknown): value is MeasuredContext {
+  if (!isPlainObject(value)) return false;
+  return (
+    typeof value.raisedTo === "number" &&
+    Number.isFinite(value.raisedTo) &&
+    value.raisedTo > 0 &&
+    typeof value.fp === "string" &&
+    typeof value.at === "number"
+  );
+}
+
+/** Consecutive clamp observations required before a window may be raised. */
+export const CLAMP_HITS_REQUIRED = 2;
+
+/**
+ * The bound a raise may reach, as a multiple of what was declared.
+ *
+ * This is the false-positive safety valve. A wrong raise cannot make the clamp
+ * stop firing, which would cost capability; it can only send a request that is
+ * too large and have it refused VISIBLY, which the user can act on. That
+ * bounded, loud failure is what makes an unknown error rate shippable.
+ */
+export const CLAMP_RAISE_FACTOR = 4;
+export const CLAMP_RAISE_CEILING = 1_048_576;
+
+/** The window a confirmed clamp would raise a model to. */
+export function clampProposalFor(declared: number): number {
+  if (!Number.isFinite(declared) || declared <= 0) return 0;
+  return Math.min(declared * CLAMP_RAISE_FACTOR, CLAMP_RAISE_CEILING);
+}
+
+/**
+ * The advertised context window.
+ *
+ * C1: models.dev's value is the value. It is never substituted from a band, and
+ * decimal-vs-binary formatting was measured to carry no predictive power —
+ * ling-3.1-flash-free declares 262144 and is exactly right, while
+ * nemotron-3.5-lightning-free declares the same 262144 and really has 1000000.
+ *
+ * C4: a measured, fingerprinted raise may lift it, and only upward.
+ */
+export function contextWindowFor(record: CatalogRecord, measured?: MeasuredContext): number | undefined {
+  const limit = isPlainObject(record.limit) ? record.limit : {};
+  const declared = finitePositive(limit.context);
+  if (measured === undefined || declared === undefined) return declared;
+  if (measured.fp !== contextFingerprint(record)) return declared;
+  const cap = Math.min(declared * CLAMP_RAISE_FACTOR, CLAMP_RAISE_CEILING);
+  const bounded = Math.min(measured.raisedTo, cap);
+  return bounded > declared ? bounded : declared;
+}
+
+/**
+ * What one request observed about the clamp.
+ *
+ * `floorHit` is read straight off the outgoing body — the number pi-ai emitted
+ * AFTER `clampMaxTokensToContext` ran — so it is a fact about the request, not an
+ * inference about why it was small.
+ */
+export interface ClampObservation {
+  /** The emitted `max_tokens` / `max_completion_tokens`, if the body carried one. */
+  readonly emitted: number | undefined;
+  /** `stopReason === "length"` with no usable content. */
+  readonly starved: boolean;
+}
+
+/**
+ * Whether one observation is the clamp signature, and whether it is enough.
+ *
+ * The signature is arithmetic, not an error-body inference: `clampMaxTokensToContext`
+ * is `min(maxTokens, max(1, contextWindow - estimate - 4096))`, so an emitted
+ * value of exactly 1 means the conversation passed the declared window minus
+ * 4096. That is one-directional — an OVERSTATED window cannot make the clamp
+ * fire at all — so a hit is positive evidence of an understated window and
+ * nothing else.
+ *
+ * `starved` is the second conjunct because `max_tokens: 1` was measured to
+ * return HTTP 200 with zero characters and no error anywhere: without it the
+ * signature would also match a request that simply ran out of room honestly.
+ *
+ * Repeated agreement is required because a single observation cannot
+ * distinguish an understated window from a genuinely full conversation, and
+ * because a probe here has been seen returning 200 while proving nothing.
+ */
+export function clampVerdict(
+  previous: ProbeRecord | undefined,
+  observation: ClampObservation,
+  declared: number,
+): { kind: "none" } | { kind: "hit"; hits: number } | { kind: "confirmed"; raisedTo: number } {
+  if (!observation.starved || observation.emitted !== 1) return { kind: "none" };
+  const hits = (previous?.contextHits ?? 0) + 1;
+  if (hits < CLAMP_HITS_REQUIRED) return { kind: "hit", hits };
+  // Only ever upward, and never past the cap. A model whose context really was
+  // full keeps a correct window: raising it there would only send a request
+  // that is too large and get it refused visibly.
+  const proposal = clampProposalFor(declared);
+  return proposal > declared ? { kind: "confirmed", raisedTo: proposal } : { kind: "hit", hits: 0 };
+}
+
 export interface Catalog {
   current(): CatalogSnapshot;
   /** Post-Zen-gate models — the single list the picker and the panel share. */
@@ -1078,6 +1212,17 @@ export interface Catalog {
    * gauge, not a verdict, so it is never persisted and never narrows anything.
    */
   probeProgress(): ProbeProgress;
+  /**
+   * Report what one real request observed about the clamp.
+   *
+   * The seam exists because the observation can only be made where the bytes
+   * are: the transport reads the emitted `max_tokens` and the terminal
+   * `stopReason`, and neither is visible to the catalogue. Fire-and-forget by
+   * design — a request must never wait on bookkeeping — and it can only ever
+   * RAISE a window, so a spurious observation costs a visible upstream refusal
+   * rather than capability.
+   */
+  observeClamp(id: string, observation: ClampObservation): void;
 }
 
 /**
@@ -1819,7 +1964,40 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    * empty the picker.
    */
 
+  /** Records one clamp observation and, once they agree, raises the window. */
+  function observeClamp(id: string, observation: ClampObservation): void {
+    const model = state.models.find((m) => m.id === id);
+    if (model === undefined || !observation.starved) return;
+    const record = state.probes[id];
+    const verdict = clampVerdict(record, observation, model.contextWindow);
+    if (verdict.kind === "none") return;
+    if (verdict.kind === "hit") {
+      // In-memory only. Losing it on restart costs one more round, never a
+      // wrong verdict, which is the same bargain the round's counters make.
+      state.probes = { ...state.probes, [id]: { ...(record ?? { verdict: "ok", at: now() }), contextHits: verdict.hits } };
+      return;
+    }
+    // The raw section the derivation came from, so the measurement is fingerprinted
+    // against what it is actually about rather than against whatever is on hand.
+    const section = state.cache?.models;
+    const record0 = section !== undefined && isPlainObject(section[id]) ? { ...(section[id] as CatalogRecord), id } : undefined;
+    const measured: MeasuredContext = {
+      raisedTo: verdict.raisedTo,
+      fp: record0 === undefined ? "" : contextFingerprint(record0),
+      at: now(),
+    };
+    state.probes = {
+      ...state.probes,
+      [id]: { ...(record ?? { verdict: "ok", at: now() }), context: measured, contextHits: 0 },
+    };
+    // Only ever upward, and re-derived from the same function that produced it,
+    // so the live list and the next warm start cannot disagree.
+    const raised = record0 === undefined ? verdict.raisedTo : contextWindowFor(record0, measured) ?? verdict.raisedTo;
+    if (raised > model.contextWindow) (model as { contextWindow: number }).contextWindow = raised;
+  }
+
   return {
+    observeClamp,
     current(): CatalogSnapshot {
       // One pass over the single effective list feeds both `visible` and
       // `capabilities`, so the ids and the cards can never disagree.

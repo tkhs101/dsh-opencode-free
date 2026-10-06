@@ -1271,11 +1271,48 @@ export async function resolveZenApiKey(input: {
   return { apiKey: "public", source: "Anonymous free tier" };
 }
 
+/**
+ * Options objects to their per-request outcome.
+ *
+ * A WeakMap rather than a property on the options: `processed` is spread into
+ * the transport call, and anything enumerable on it could reach the wire. This
+ * is bookkeeping that must never become part of a request.
+ */
+const REQUEST_OUTCOMES = new WeakMap<object, RequestOutcome>();
+
+function attachOutcome<T extends StreamOptions>(processed: T, outcome: RequestOutcome): T {
+  REQUEST_OUTCOMES.set(processed as unknown as object, outcome);
+  return processed;
+}
+
+/** The per-request outcome, when `processed` is one of ours. */
+export function requestOutcomeOf(options: unknown): RequestOutcome | undefined {
+  if (options === null || typeof options !== "object") return undefined;
+  return REQUEST_OUTCOMES.get(options as object);
+}
+
+/**
+ * Per-request scratch the transport fills in and the stream wrapper reads.
+ *
+ * The emitted clamp value and the terminal `stopReason` are only ever both
+ * visible in the same module, which is why the clamp observation is assembled
+ * here rather than in the catalogue.
+ */
+export interface RequestOutcome {
+  /** The `max_tokens` / `max_completion_tokens` pi-ai emitted, after clamping. */
+  clampEmitted?: number | undefined;
+  /** Terminal `stopReason` of the request this belongs to. */
+  stopReason?: string | undefined;
+  /** Whether any usable content came back. */
+  answered?: boolean;
+}
+
 function compatRequestOptions<T extends StreamOptions>(
   options: T,
   getSessionId: SessionGetter,
   fallbackSession: string,
   recorder?: TransportRecorder,
+  outcome?: RequestOutcome,
 ): T {
   const headers = Object.fromEntries(
     Object.entries(options?.headers ?? {}).filter(
@@ -1331,6 +1368,19 @@ function compatRequestOptions<T extends StreamOptions>(
         const out = await (incomingPayload as (p: never, m: never) => unknown)(payload as never, model as never);
         if (out !== undefined) next = out as Record<string, unknown>;
       }
+      // The number pi-ai actually emitted, read AFTER clampMaxTokensToContext ran.
+      // The field name is not uniform: 31 of 36 derived records carry a template
+      // compat with `maxTokensField: "max_tokens"`, and pi-ai lets an explicit
+      // compat override its own detection (openai-completions.js:1317). Reading
+      // only `max_completion_tokens` would find nothing on those records.
+      const body = next as Record<string, unknown>;
+      const emitted =
+        typeof body.max_completion_tokens === "number"
+          ? body.max_completion_tokens
+          : typeof body.max_tokens === "number"
+            ? body.max_tokens
+            : undefined;
+      if (outcome !== undefined) outcome.clampEmitted = emitted;
       const map = (model as { thinkingLevelMap?: Record<string, string | null> } | undefined)?.thinkingLevelMap;
       // `"none"` is a REAL wire value wherever a measurement said it stops
       // reasoning; it must survive. Everywhere else it is pi-ai's placeholder.
@@ -1909,7 +1959,49 @@ export function zenProvider(
     },
   });
 
-  function requestOptions<T extends StreamOptions>(
+/**
+ * Feed one finished request back to the catalogue as a clamp observation.
+ *
+ * `starved` is deliberately not `!hasAnswer(result)` alone: a reasoning model
+ * can spend its whole budget thinking and still count as answered, which is the
+ * plugin's existing issue-3010 rule. Here the stricter reading is the honest one
+ * — a clamp observation that acted on a merely-thinking reply would raise a
+ * window for a request that was never starved.
+ */
+function reportClamp<S extends { result(): Promise<{ stopReason?: unknown; content?: unknown }> }>(
+  model: Model<Api>,
+  catalog: Catalog | null,
+  processed: unknown,
+  stream: S,
+): S {
+  if (catalog === null) return stream;
+  const outcome = requestOutcomeOf(processed);
+  if (outcome === undefined) return stream;
+  const original = stream.result.bind(stream);
+  let reported = false;
+  // Wrapped in place rather than re-wrapped: the host holds this object and may
+  // read other members of it, so replacing it with a narrower one would be a
+  // silent capability loss of the same kind this whole change set removes.
+  stream.result = async () => {
+    const result = await original();
+    if (reported) return result;
+    reported = true;
+    outcome.stopReason = typeof result.stopReason === "string" ? result.stopReason : undefined;
+    outcome.answered = hasAnswer(result);
+    catalog.observeClamp(model.id, {
+      emitted: outcome.clampEmitted,
+      // A reasoning model can spend its whole budget thinking and still count as
+      // answered — the plugin's existing issue-3010 rule. Here the stricter
+      // reading is the honest one: an observation taken on a merely-thinking
+      // reply would raise a window for a request that was never starved.
+      starved: outcome.stopReason === "length" && outcome.answered !== true,
+    });
+    return result;
+  };
+  return stream;
+}
+
+function requestOptions<T extends StreamOptions>(
     options: T = {} as T,
     context?: unknown,
   ): { processed: T; recorder: TransportRecorder } {
@@ -1963,19 +2055,29 @@ export function zenProvider(
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(toTranscript(context), key), key);
       const { processed, recorder } = requestOptions(options, gate.context);
-      return withGuidance(provider.stream(model, gate.context, processed), gate.restoreShell, recorder);
+      return reportClamp(
+        model,
+        catalog,
+        processed,
+        withGuidance(provider.stream(model, gate.context, processed), gate.restoreShell, recorder),
+      );
     },
     streamSimple(model, context, options) {
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(toTranscript(context), key), key);
       const { processed, recorder } = requestOptions(options, gate.context);
-      return withGuidance(
-        provider.streamSimple(model, gate.context, {
-          ...processed,
-          reasoning: options?.reasoning ?? (model.id.startsWith("muse-spark-") ? "xhigh" : undefined),
-        }),
-        gate.restoreShell,
-        recorder,
+      return reportClamp(
+        model,
+        catalog,
+        processed,
+        withGuidance(
+          provider.streamSimple(model, gate.context, {
+            ...processed,
+            reasoning: options?.reasoning ?? (model.id.startsWith("muse-spark-") ? "xhigh" : undefined),
+          }),
+          gate.restoreShell,
+          recorder,
+        ),
       );
     },
   };
