@@ -209,6 +209,26 @@ export function reasoningFingerprint(record: CatalogRecord): string {
 }
 
 /**
+ * Which instrument produced the effort samples on a record.
+ *
+ * Reading 1 never read `usage.reasoning` (the field `usageOf` did not copy), so
+ * every sample it wrote was a hard 0 — a constant, not a measurement. Those
+ * samples cannot be recognised from their VALUE: a model asked for `low` and
+ * reporting zero reasoning is possible, so "0" is a legitimate observation and
+ * guessing would be the very mistake this axis exists to remove.
+ *
+ * They are recognisable by their INSTRUMENT. A measurement format change
+ * invalidates the measurements taken under the old one, exactly as a changed
+ * `reasoning_options` invalidates a fingerprint; this is the same idea with the
+ * other operand. Nothing is lost: the old instrument could not produce a
+ * confirmed verdict at all, so no real measurement is thrown away — only
+ * baselines that would otherwise poison the median forever (a single stored 0
+ * alongside real samples keeps `median(baseline)` at 0, which `effortVerdictFrom`
+ * reads as "no claim", for ever).
+ */
+export const EFFORT_READING = 2;
+
+/**
  * How many consecutive agreeing samples an effort verdict needs before it may be
  * persisted.
  *
@@ -961,6 +981,11 @@ export interface ProbeRecord {
    */
   readonly context?: MeasuredContext;
   /**
+   * Which instrument wrote the effort samples here. See {@link EFFORT_READING};
+   * a record without it is read as unmeasured on that axis.
+   */
+  readonly effortReading?: number;
+  /**
    * The recent effort samples, oldest first. Persisted rather than held in
    * memory so a restart does not restart the count — the cost of a lost tally is
    * a few more rounds, and it is only ever spent on a model whose verdict is
@@ -1132,6 +1157,13 @@ function readProbes(value: unknown): ProbeMap {
     if (!isPlainObject(entry)) continue;
     if (entry.verdict !== "ok" && entry.verdict !== "dead") continue;
     if (typeof entry.at !== "number" || !Number.isFinite(entry.at)) continue;
+    // Effort samples written by an older instrument are not weak evidence, they
+    // are a constant; see EFFORT_READING. Dropped here so the model is measured
+    // again rather than judged against numbers that were never read from a
+    // response. The verdict itself is kept when there is one: the old instrument
+    // could not confirm one, so a record carrying `effort` already says it came
+    // from this one.
+    const readableEffort = entry.effortReading === EFFORT_READING || isMeasuredEffort(entry.effort);
     probes[id] = {
       verdict: entry.verdict,
       at: entry.at,
@@ -1143,26 +1175,29 @@ function readProbes(value: unknown): ProbeMap {
       ...(Array.isArray(entry.selfReported)
         ? { selfReported: entry.selfReported.filter((level): level is string => typeof level === "string") }
         : {}),
-      ...(Array.isArray(entry.effortSamples)
+      ...(typeof entry.effortReading === "number" && Number.isFinite(entry.effortReading)
+        ? { effortReading: entry.effortReading }
+        : {}),
+      ...(readableEffort && Array.isArray(entry.effortSamples)
         ? { effortSamples: entry.effortSamples.filter((k) => typeof k === "string") as EffortSamples }
         : {}),
-      ...(isEffortQuestion(entry.effortQuestion) ? { effortQuestion: entry.effortQuestion } : {}),
-      ...(typeof entry.effortFrozenAt === "number" && Number.isFinite(entry.effortFrozenAt)
+      ...(readableEffort && isEffortQuestion(entry.effortQuestion) ? { effortQuestion: entry.effortQuestion } : {}),
+      ...(readableEffort && typeof entry.effortFrozenAt === "number" && Number.isFinite(entry.effortFrozenAt)
         ? { effortFrozenAt: entry.effortFrozenAt }
         : {}),
-      ...(typeof entry.effortDiscord === "number" && Number.isFinite(entry.effortDiscord)
+      ...(readableEffort && typeof entry.effortDiscord === "number" && Number.isFinite(entry.effortDiscord)
         ? { effortDiscord: entry.effortDiscord }
         : {}),
-      ...(typeof entry.effortBaseline === "number" && Number.isFinite(entry.effortBaseline)
+      ...(readableEffort && typeof entry.effortBaseline === "number" && Number.isFinite(entry.effortBaseline)
         ? { effortBaseline: entry.effortBaseline }
         : {}),
       ...(typeof entry.contextHits === "number" && Number.isFinite(entry.contextHits)
         ? { contextHits: entry.contextHits }
         : {}),
-      ...(Array.isArray(entry.effortTokens)
+      ...(readableEffort && Array.isArray(entry.effortTokens)
         ? { effortTokens: entry.effortTokens.filter((n) => typeof n === "number" && Number.isFinite(n)) }
         : {}),
-      ...(Array.isArray(entry.effortBaselineTokens)
+      ...(readableEffort && Array.isArray(entry.effortBaselineTokens)
         ? { effortBaselineTokens: entry.effortBaselineTokens.filter((n) => typeof n === "number" && Number.isFinite(n)) }
         : {}),
     };
@@ -2366,6 +2401,29 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
                 ? "noop"
                 : undefined;
       const tally = sample === undefined ? undefined : effortVerdict(prior?.effortSamples, sample);
+      // How many times the CURRENT question has failed.
+      //
+      // `EFFORT_FALLBACK_AFTER` counts failures, not disagreements. It had to
+      // count whatever `effortVerdict` calls a discord — and that function has to
+      // call the very first sample one, because there is no prior to agree with.
+      // So one measurement of `none` was enough to move the round off `none`,
+      // including when `none` was exactly what works: mimo-v2.6-flash-free would
+      // have been asked `minimal` instead, and `minimal` measures 16 against a 37
+      // baseline — a miss of 0.09 tokens against the 15.91 threshold — so a model
+      // with a perfect Off would have ended with no Off row at all.
+      //
+      // A question switch also resets the count: the fallback level is a fresh
+      // attempt, and the failures recorded against `none` say nothing about it.
+      const failed = sample !== undefined && sample !== "none-works";
+      const movedOn = prior?.effortQuestion !== undefined && prior.effortQuestion !== question;
+      const discord =
+        tally === undefined
+          ? (prior?.effortDiscord ?? 0)
+          : tally.kind === "confirmed"
+            ? 0
+            : movedOn
+              ? 0
+              : (prior?.effortDiscord ?? 0) + (failed ? 1 : 0);
       // A refusal names no channel of its own, but it WAS answered on the one
       // this round asked — and a verdict that cannot say which channel it was
       // taken on is a verdict `thinkingLevelMapFor` will refuse to apply.
@@ -2386,6 +2444,12 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       const { reason: _staleReason, ...carried } = prior ?? {};
       const next: ProbeRecord = {
         ...carried,
+        // Whatever this round concluded about effort, it concluded it with THIS
+        // instrument. Recorded on the samples it touched, so a record written by
+        // an older one is recognisable on the way back in.
+        ...(observation !== undefined || carried.effortReading !== undefined || tally !== undefined
+          ? { effortReading: EFFORT_READING }
+          : {}),
         // A round that only measured a refusal learned nothing new about
         // LIVENESS, so the verdict it already earned stands; writing
         // `inconclusive` here would both be a value `ProbeVerdict` does not
@@ -2410,7 +2474,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         // The tally is kept even when nothing was confirmed, so the next round
         // continues the count instead of restarting it.
         ...(tally !== undefined && question !== "settled"
-        ? { effortSamples: tally.kind === "confirmed" ? [] : tally.samples }
+        ? { effortSamples: tally.kind === "confirmed" ? [] : tally.samples, effortDiscord: discord }
         : {}),
         // The baseline is the reference every later candidate is judged against,
         // so it is kept even when nothing was concluded.
@@ -2445,9 +2509,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
               effortTokens: [],
               effortBaselineTokens: baseTokens ?? [],
             }
-          : tally !== undefined && tally.kind === "discord"
-            ? { effortDiscord: (prior?.effortDiscord ?? 0) + 1 }
-            : {}),
+          : {}),
       };
       state.probes[model.id] = next;
       // Applied HERE, not when the round ends. A row is painted the moment its

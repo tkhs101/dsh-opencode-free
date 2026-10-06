@@ -41,6 +41,7 @@ import {
   nextEffortQuestion,
   fallbackLevelFor,
   effortVerdictFresh,
+  EFFORT_READING,
   EFFORT_TTL_MS,
   reachAllowsAttempt,
   nextReachAttempt,
@@ -639,8 +640,8 @@ test('effort samples persist so a restart does not restart the count', async () 
       fetchedAt: 1,
       models: {},
       probes: {
-        'flip-free': { verdict: 'ok', at: 1, effortSamples: ['none-works', 'none-works'] },
-        'bad-free': { verdict: 'ok', at: 1, effortSamples: ['none-works', 7, null] },
+        'flip-free': { verdict: 'ok', at: 1, effortReading: EFFORT_READING, effortSamples: ['none-works', 'none-works'] },
+        'bad-free': { verdict: 'ok', at: 1, effortReading: EFFORT_READING, effortSamples: ['none-works', 7, null] },
         'absent-free': { verdict: 'ok', at: 1 },
       },
       lastProbeAt: 0,
@@ -652,6 +653,11 @@ test('effort samples persist so a restart does not restart the count', async () 
   assert.deepEqual(read.probes['bad-free'].effortSamples, ['none-works']);
   // A cache written before this field existed reads as "never sampled", which
   // is exactly right and self-heals on the next round.
+  //
+  // The same is true of a record from an OLDER INSTRUMENT, and deliberately so:
+  // those samples were written by a probe that never read the reasoning count,
+  // so they are all zero — and one stored zero keeps the median at zero for
+  // ever. `absent-free` stands for both cases.
   assert.equal(read.probes['absent-free'].effortSamples, undefined);
   await rm(dir, { recursive: true, force: true });
 })
@@ -1780,7 +1786,10 @@ test('GUARD: three refusals of the same spelling end at no Off row, never a wron
         fetchedAt: 1_000_000,
         models: { 'space-bunny-free': modelsDict()['space-bunny-free'] },
         probes: {
-          'space-bunny-free': { verdict: 'ok', at: 1_000_000, effortBaselineTokens: [35, 42, 55] },
+          // Stamped: this is what a record from the CURRENT instrument looks
+          // like. An unstamped one stands for the pre-fix instrument, whose
+          // samples were all zero — see the instrument-version test below.
+          'space-bunny-free': { verdict: 'ok', at: 1_000_000, effortReading: EFFORT_READING, effortBaselineTokens: [35, 42, 55] },
         },
         lastProbeAt: 1_000_000,
       }),
@@ -1805,6 +1814,64 @@ test('GUARD: three refusals of the same spelling end at no Off row, never a wron
     await catalog.forceRefresh();
     const model = catalog.current().models.find((m) => m.id === 'space-bunny-free');
     assert.equal(model?.thinkingLevelMap?.off, null, 'so the model gets no Off row rather than a lying one');
+  })
+})
+
+test('GUARD: samples from an older instrument are re-measured, not judged', async () => {
+  // The first release of the effort axis never read `usage.reasoning`, so every
+  // sample it wrote was a hard 0. Those zeros cannot be told apart from real
+  // ones by value — a model asked for `low` may genuinely report zero — so they
+  // are told apart by INSTRUMENT. Left in place they are worse than useless: one
+  // stored 0 alongside three real samples keeps `median(baseline)` at 0, which
+  // `effortVerdictFrom` reads as "no claim", and the axis never converges again.
+  await withTempDir(async (dir) => {
+    // Exactly what a poisoned deployment looks like: two baselines, both zero.
+    // The record needs this model's OWN id, or `derive` names it after the
+    // borrowed fixture's id and the catalogue prunes the probe as unknown.
+    const mimo = { ...modelsDict()['space-bunny-free'], id: 'mimo-v2.6-flash-free', name: 'Mimo V2.6 Flash Free' };
+    await writeFile(
+      join(dir, 'catalog.json'),
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000,
+        models: { 'mimo-v2.6-flash-free': mimo },
+        probes: {
+          'mimo-v2.6-flash-free': { verdict: 'ok', at: 1_000_000, effortBaselineTokens: [0, 0] },
+        },
+        lastProbeAt: 1_000_000,
+      }),
+      'utf8',
+    )
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'mimo-v2.6-flash-free': mimo }) }),
+      // Measured 2026-10-06: mimo-v2.6-flash-free reasons 37 when omitted and 0
+      // under `none`.
+      probe: async (_model, question) => {
+        asked.push(question);
+        return {
+          kind: 'ok',
+          api: 'openai-completions',
+          effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens: question === 'baseline' ? 37 : 0 },
+        }
+      },
+      listZenIds: async () => ['mimo-v2.6-flash-free'],
+    })
+    await catalog.forceRefresh();
+    for (let i = 0; i < 10; i += 1) {
+      pastProbeFloor(clock);
+      await catalog.forceProbes();
+    }
+    assert.ok(asked.includes('baseline'), 'the baseline is asked again rather than believed');
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'mimo-v2.6-flash-free');
+    assert.deepEqual(record.effortBaselineTokens, [37, 37, 37], 'the poisoned zeros are gone, not averaged with real samples');
+    assert.equal(record.effort?.kind, 'none-works', 'and the model still reaches a verdict');
+    await catalog.forceRefresh();
+    const model = catalog.current().models.find((m) => m.id === 'mimo-v2.6-flash-free');
+    assert.equal(model?.thinkingLevelMap?.off, 'none', 'so it gets the Off row the measurement always supported');
   })
 })
 
@@ -1958,6 +2025,7 @@ test('GUARD: a confirmed verdict names the level the probe actually asked', asyn
           'space-bunny-free': {
             verdict: 'ok',
             at: 1_000_000,
+            effortReading: EFFORT_READING,
             effortBaselineTokens: [35, 55, 42],
             effortDiscord: 1,
           },
