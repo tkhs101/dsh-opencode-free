@@ -1760,6 +1760,49 @@ test('GUARD: a refusal to the spelling we asked counts as a sample, not a silenc
   })
 })
 
+test('GUARD: a spelling that reduces nothing does not become an Off row', async () => {
+  // Live 2026-10-06: `longcat-2.5-preview-free` ended up with
+  // `level-works / minimal` while its OWN samples said the opposite —
+  // [1,36,36,36,36] against a [36,36,36] baseline, median 36 against a
+  // threshold of 15.48. Nothing was reduced, and the model was handed an Off row
+  // anyway.
+  //
+  // The verdict's KIND was being re-derived from the question spelling at
+  // confirmation ("were we asking about `none`, or about a level?") instead of
+  // taken from the sample that was actually confirmed — so every confirmed
+  // `noop` came back labelled `level-works`.
+  //
+  // A verdict that names a level it did not demonstrate is the one lie this
+  // axis cannot ship: it hands the user a control that changes nothing.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      // longcat's real numbers: the baseline is 36 and so is everything asked
+      // for, at the fallback level.
+      probe: async (_model, question) => ({
+        kind: 'ok',
+        api: 'openai-completions',
+        effort: { kind: question === 'baseline' ? 'baseline' : 'candidate', tokens: question === 'baseline' ? 36 : 36 },
+      }),
+      listZenIds: async () => ['space-bunny-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free');
+    assert.equal(record.effort?.kind, 'noop', 'the confirmed sample was "reduced nothing", so that is the verdict');
+    assert.equal(record.effort?.level, undefined, 'and it names no level');
+    await catalog.forceRefresh();
+    const model = catalog.current().models.find((m) => m.id === 'space-bunny-free');
+    assert.equal(model?.thinkingLevelMap?.off, null, 'so the user gets no Off row instead of one that does nothing');
+  })
+})
+
 test('GUARD: three refusals of the same spelling end at no Off row, never a wrong one', async () => {
   // The terminal case: when no spelling works, ADR 0004 §31 wants `off: null` —
   // an honest absence, not a control that does nothing. The refusal has to be

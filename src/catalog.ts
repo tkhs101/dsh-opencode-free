@@ -2704,7 +2704,9 @@ export async function runProbeRound(
       // taken on is a verdict `thinkingLevelMapFor` will refuse to apply.
       const channel = isMeasuredChannel(outcome.api) ? outcome.api : spellingRefused && isMeasuredChannel(model.api) ? model.api : undefined;
       const confirmed =
-        sample !== undefined && tally !== undefined && tally.kind === "confirmed" && channel !== undefined && rawById(model.id) !== undefined;
+        sample !== undefined && tally !== undefined && tally.kind === "confirmed" && channel !== undefined && rawById(model.id) !== undefined
+          ? sample
+          : undefined;
       // The record is REBUILT every round, so it starts from the previous one:
       // evidence this round does not re-derive — the other side of the effort
       // tally, a vocabulary a refusal enumerated, a measured window — is the
@@ -2764,12 +2766,24 @@ export async function runProbeRound(
         ...(confirmed && tally !== undefined && channel !== undefined
           ? {
               effort: {
-                // The fallback question's answer is a claim about the level it
-                // named, so it is recorded in those words rather than as a
-                // claim about `none`. A refusal names neither: it is about the
-                // spelling as such, and it carries no level.
-                kind: spellingRefused ? "rejected" : question === "none" ? "none-works" : "level-works",
-                ...(spellingRefused || question === "none" ? {} : { level: question }),
+                // The KIND is the confirmed sample, not the spelling we were
+                // asking about. Re-deriving it from `question` is how a
+                // confirmed `noop` became `level-works` on 2026-10-06:
+                // `longcat-2.5-preview-free` kept samples [1,36,36,36,36]
+                // against a baseline of [36,36,36] — median 36, threshold 15.48,
+                // so it reduced NOTHING — and was handed an Off row at
+                // `minimal` anyway. A verdict that names a level it did not
+                // demonstrate is the one kind of lie this axis cannot ship.
+                //
+                // `level-works` is the same verdict as `none-works`, spoken in
+                // the words of the level that was asked: the sample said the
+                // spelling WORKS, and the spelling was `minimal`.
+                kind: confirmed === "noop" || confirmed === "rejected"
+                  ? confirmed
+                  : question === "none"
+                    ? "none-works"
+                    : "level-works",
+                ...(confirmed === "noop" || confirmed === "rejected" || question === "none" ? {} : { level: question }),
                 fp: reasoningFingerprint({ ...rawById(model.id)!, id: model.id }),
                 api: channel,
                 at: stamp,
