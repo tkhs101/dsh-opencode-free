@@ -1808,6 +1808,57 @@ test('GUARD: three refusals of the same spelling end at no Off row, never a wron
   })
 })
 
+test('GUARD: the ask-again cadence survives a write and a restart', async () => {
+  // The read side knew how to restore `reach` (`readReach`, `adopt`) and
+  // `writeCacheAtomic` knew how to write it — but no call site passed it, so
+  // every write erased the schedule and the next boot started the backoff from
+  // zero. Measured 2026-10-06: ling-3.1-flash-free answered 429 seven times
+  // across hours, and the schedule that exists precisely to stop the eighth
+  // request died with the process that made it.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const path = join(dir, 'catalog.json')
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async () => ({ kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' }),
+      listZenIds: async () => ['space-bunny-free'],
+    })
+    await catalog.forceRefresh()
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    const afterRound = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(afterRound.reach?.['space-bunny-free']?.misses, 1, 'a round persists the cadence it just set');
+
+    // A sync is not a round, but its write replaces the whole record: omitting
+    // the field here deleted the report for the same reason.
+    clock.t += 1_000;
+    await catalog.forceRefresh();
+    const afterSync = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(afterSync.reach?.['space-bunny-free']?.misses, 1, 'a catalogue sync carries it rather than erasing it');
+
+    // And a fresh process over the same file honours it: the next attempt is
+    // still six hours out, so a restart does not spend the shared bucket again.
+    let asked = 0;
+    const second = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'space-bunny-free': modelsDict()['space-bunny-free'] }) }),
+      probe: async () => {
+        asked += 1;
+        return { kind: 'inconclusive', code: 'quota-exhausted', http: 429, reason: 'free tier quota' };
+      },
+      listZenIds: async () => ['space-bunny-free'],
+    });
+    await second.forceRefresh();
+    pastProbeFloor(clock);
+    await second.forceProbes();
+    assert.equal(asked, 0, 'a restarted process does not re-ask a model inside its backoff window');
+  })
+})
+
 test('GUARD: an answer resets the ask-again cadence', async () => {
   // `UNREACHABLE_BACKOFF_MS` is indexed by the miss count, so a counter that only
   // climbs is a one-way ratchet: two failures and one recovery used to leave the

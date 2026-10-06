@@ -2071,6 +2071,7 @@ async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
         fetchedAt: stamp,
         models: state.cache.models,
         probes: state.probes,
+        reach: state.reach,
         lastProbeAt: state.lastProbeAt,
         // Carried, not re-derived: a catalogue revalidation is not a probe
         // round and has nothing new to report, but DROPPING it would delete
@@ -2093,14 +2094,15 @@ async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
   // the opposite of what the code did. Reproduced 2026-09-30: a second full
   // sync after a round left `lastRound` absent.
   const previousRound = state.cache?.lastRound;
-  const previousReach = state.cache?.reach;
   state.cache = {
     version: CACHE_VERSION,
     etag: result.etag,
-    ...(previousReach !== undefined && Object.keys(previousReach).length > 0 ? { reach: previousReach } : {}),
     fetchedAt: stamp,
     models: result.section,
     probes: state.probes,
+    // The live cadence, not the one this record was read with: `state.reach` is
+    // the only copy a round has been writing to.
+    reach: state.reach,
     lastProbeAt: state.lastProbeAt,
     lastRound: previousRound,
   };
@@ -2113,6 +2115,7 @@ async function sync(state: CatalogState, deps: CatalogDeps): Promise<void> {
     fetchedAt: stamp,
     models: result.section,
     probes: state.probes,
+    reach: state.reach,
     lastProbeAt: state.lastProbeAt,
     lastRound: previousRound,
   });
@@ -2485,6 +2488,11 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
     fetchedAt: state.cache?.fetchedAt ?? 0,
     models: state.cache?.models ?? {},
     probes: state.probes,
+    // The cadence, not just this round's outcome. The read side already knew
+    // how to restore it (`readReach`, `adopt`) and `writeCacheAtomic` already
+    // knew how to write it — but no call site passed it, so every write erased
+    // the ask-again schedule and the next boot started the backoff from zero.
+    reach: state.reach,
     lastProbeAt: state.lastProbeAt,
     // The report, so the panel's progress area survives a restart.
     lastRound: report,
