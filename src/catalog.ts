@@ -136,13 +136,82 @@ function reasoningOptionTypes(record: CatalogRecord): string[] {
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /**
- * `getSupportedThinkingLevels` treats `xhigh` and `max` as opt-in — absent from
- * the map means NOT offered — but includes `off`/`minimal`/`low`/`medium`/`high`
- * unless they are explicitly mapped to `null`. A faithful map therefore has to
- * null out the ones models.dev does not publish; leaving them absent would
- * offer a level the model rejects.
+ * models.dev effort spellings that pi-ai's vocabulary lacks, and what they mean.
+ *
+ * `"none"` is the one that occurs: `north-mini-code-free` publishes
+ * `["none","high"]`. The old membership test discarded it as "not a level",
+ * which removed that model's only off member. Adding a spelling here is a
+ * one-line change; the same filter used to make it vanish silently.
  */
-const OPT_IN_THINKING_LEVELS = new Set<string>(["xhigh", "max"]);
+export const FOREIGN_EFFORT_SPELLINGS: Record<string, string> = { none: "off" };
+
+/**
+ * What was MEASURED about one model's Off control, on one channel.
+ *
+ * `"none-works"` — `reasoning_effort:"none"` reached zero reasoning tokens.
+ * `"level-works"` — `none` is unusable here but a named level is: big-pickle
+ *   honours `minimal` (0/8 across six samples) while rejecting `none` outright;
+ *   space-bunny and both muse-spark models honour their lowest declared level at
+ *   ~4.6-4.9x less reasoning than omission.
+ * `"noop"` — accepted with HTTP 200, reasoning still present (longcat).
+ * `"rejected"` — HTTP 400.
+ *
+ * `api` is what makes a stale measurement detectable rather than permanent: Off
+ * is `reasoning_effort` on completions and `reasoning.effort` on responses, and a
+ * measurement of one is evidence about the other only by coincidence.
+ */
+export interface MeasuredEffort {
+  readonly kind: "none-works" | "level-works" | "noop" | "rejected";
+  /** The level name when `kind === "level-works"`; omitted otherwise. */
+  readonly level?: string | undefined;
+  /** Fingerprint of the record's `reasoning_options`, so a revision voids it. */
+  readonly fp: string;
+  /** Channel it was measured on. */
+  readonly api: string;
+  readonly at: number;
+}
+
+/**
+ * The shape of `reasoning_options`, reduced.
+ *
+ * Exported for diagnostics only — the Off rule must never consult it. Measured on
+ * the live set: `[]` contained three models that accepted `none` and one that
+ * rejected it; `[{type:"toggle"}]` contained one that honoured it and one that
+ * ignored it. The shape carries no predictive power, so deriving an Off value from
+ * it is a guess with no evidence behind it.
+ */
+export function reasoningControlShape(record: CatalogRecord): "effort" | "empty" | "toggle" | "silent" {
+  const options = record.reasoning_options;
+  if (!Array.isArray(options)) return "silent";
+  let sawEffort = false;
+  let sawToggle = false;
+  for (const option of options) {
+    if (!isPlainObject(option)) continue;
+    if (option.type === "effort") sawEffort = true;
+    else if (option.type === "toggle") sawToggle = true;
+  }
+  if (sawEffort) return "effort";
+  if (sawToggle) return "toggle";
+  return options.length === 0 ? "empty" : "silent";
+}
+
+/** Stable fingerprint of exactly what an effort measurement is about. */
+export function reasoningFingerprint(record: CatalogRecord): string {
+  const options = Array.isArray(record.reasoning_options) ? record.reasoning_options : null;
+  return `${record.reasoning === false ? "no" : "yes"}:${options === null ? "absent" : JSON.stringify(options)}`;
+}
+
+/** Defensive read of a persisted effort measurement, in `isMeasuredChannel`'s style. */
+export function isMeasuredEffort(value: unknown): value is MeasuredEffort {
+  if (!isPlainObject(value)) return false;
+  if (value.kind !== "none-works" && value.kind !== "level-works" && value.kind !== "noop" && value.kind !== "rejected") {
+    return false;
+  }
+  if (typeof value.fp !== "string" || typeof value.at !== "number" || !isMeasuredChannel(value.api)) return false;
+  if (value.kind !== "level-works") return true;
+  return typeof value.level === "string" && (THINKING_LEVELS as readonly string[]).includes(value.level);
+}
+
 
 /**
  * D6: the thinking levels models.dev publishes for this model, as pi-ai's
@@ -167,30 +236,67 @@ const OPT_IN_THINKING_LEVELS = new Set<string>(["xhigh", "max"]);
  * offer levels upstream rejects, which surfaces as an
  * `UNSUPPORTED_REASONING_EFFORT` failure rather than as a clamp.
  */
-export function thinkingLevelMapFor(record: CatalogRecord): Record<string, string | null> | undefined {
-  const options = record.reasoning_options;
-  if (!Array.isArray(options)) return undefined;
+export function thinkingLevelMapFor(
+  record: CatalogRecord,
+  channel: Api,
+  measured?: MeasuredEffort,
+): Record<string, string | null> | undefined {
+  // R0 — no reasoning claim: say nothing at all. An ABSENT `reasoning` is as
+  // little a claim as `false` is, and `getSupportedThinkingLevels` already
+  // answers ["off"] for a non-reasoning model, so a map here would be decoration.
+  if (record.reasoning !== true) return undefined;
+
   const published = new Set<string>();
-  for (const option of options) {
-    if (!isPlainObject(option) || option.type !== "effort") continue;
-    const values = option.values;
-    if (!Array.isArray(values)) continue;
-    for (const value of values) {
-      if (typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value)) {
-        published.add(value);
+  let hasLadder = false;
+  const options = record.reasoning_options;
+  if (Array.isArray(options)) {
+    for (const option of options) {
+      if (!isPlainObject(option) || option.type !== "effort") continue;
+      hasLadder = true;
+      const values = option.values;
+      if (!Array.isArray(values)) continue;
+      for (const value of values) {
+        if (typeof value !== "string") continue;
+        // Foreign spellings are DATA, not filtered out. Dropping "none" here is
+        // what silently discarded north-mini-code-free's only off member.
+        if ((THINKING_LEVELS as readonly string[]).includes(value)) published.add(value);
+        else if (FOREIGN_EFFORT_SPELLINGS[value] !== undefined) {
+          published.add(FOREIGN_EFFORT_SPELLINGS[value]);
+        }
       }
     }
   }
-  if (published.size === 0) return undefined;
+
+  // ALWAYS a map for a reasoning model. Returning `undefined` is NOT "no claim" —
+  // pi-ai reads an absent map as "offer everything", which is how seven live
+  // models were offered four levels models.dev publishes nothing for.
   const map: Record<string, string | null> = {};
+
+  // The single Off rule. `shape` is deliberately never consulted: measured on the
+  // live set, two models with the identical `[{type:"toggle"}]` shape behaved
+  // oppositely, and three of four `reasoning_options: []` models accepted "none"
+  // while the fourth rejected it with a hard 400.
+  if (published.has("off")) {
+    // R1 — the published vocabulary HAS an off member and names it.
+    map.off = "none";
+  } else if (measured !== undefined && measured.api === channel) {
+    // R3 — measured on THIS channel to reach zero.
+    map.off =
+      measured.kind === "none-works"
+        ? "none"
+        : measured.kind === "level-works" && measured.level !== undefined
+          ? measured.level
+          : null;
+  } else {
+    // Unmeasured, or measured on the other channel: no claim.
+    map.off = null;
+  }
+
   for (const level of THINKING_LEVELS) {
-    // `off` stays absent (offered) rather than nulled: the user asked to keep
-    // it as an explicit choice. The placeholder effort this would otherwise
-    // put on the wire is stripped back to "no reasoning object" by the
-    // plugin's onPayload guard (see zen-provider.ts), so offering it is safe.
     if (level === "off") continue;
-    if (published.has(level)) map[level] = level;
-    else if (!OPT_IN_THINKING_LEVELS.has(level)) map[level] = null;
+    // Every level we did not see published is nulled, INCLUDING xhigh/max whose
+    // absent-means-offered rule is the subtle one.
+    map[level] = published.has(level) ? level : null;
   }
   return map;
 }
@@ -219,6 +325,11 @@ export interface DeriveOptions {
   readonly knownApis?: ReadonlyMap<string, Api>;
   /** An already identity-mapped record supplying the fallback field values. */
   readonly template: Model<Api>;
+  /**
+   * Per-model Off evidence, keyed by model id. Supplied rather than read from
+   * state so `derive()` stays pure and fixture-testable.
+   */
+  readonly measuredEffort?: ReadonlyMap<string, MeasuredEffort>;
 }
 
 export interface DerivedCatalog {
@@ -246,6 +357,7 @@ function buildModel(
   record: CatalogRecord,
   template: Model<Api>,
   knownApis?: ReadonlyMap<string, Api>,
+  measured?: MeasuredEffort,
 ): Model<Api> {
   const id = typeof record.id === "string" && record.id !== "" ? record.id : "";
   const api = channelFor(record, knownApis);
@@ -254,14 +366,18 @@ function buildModel(
   const declaredInput = Array.isArray(modalities.input)
     ? modalities.input.filter((entry): entry is "text" | "image" => entry === "text" || entry === "image")
     : [];
-  const levels = thinkingLevelMapFor(record);
+  const levels = thinkingLevelMapFor(record, api, measured);
   return {
     ...template,
     id,
     name: typeof record.name === "string" && record.name !== "" ? record.name : id,
     api,
-    reasoning: typeof record.reasoning === "boolean" ? record.reasoning : template.reasoning,
-    input: declaredInput.length > 0 ? declaredInput : template.input,
+    // Absence is NOT `true`. The template resolves to mimo-v2.6-flash-free
+    // (reasoning true, input text+image), so inheriting it answered "models.dev
+    // did not tell us" with "inherit the most capable thing we know" — the same
+    // error as an undefined map, one field over.
+    reasoning: record.reasoning === true,
+    input: declaredInput.length > 0 ? declaredInput : ["text"],
     // Free by construction here (isFree already proved it); stated explicitly
     // so a stray inherited tier cannot reintroduce a non-zero rate.
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -296,7 +412,7 @@ export function derive(section: CatalogRecord, options: DeriveOptions): DerivedC
     if (!isFree(record)) continue;
     // D1: `deprecated` is kept (a probe judges it); anything else is discarded.
     if (!isCatalogueStatus(record)) continue;
-    candidates.push(buildModel(record, options.template, options.knownApis));
+    candidates.push(buildModel(record, options.template, options.knownApis, options.measuredEffort?.get(id)));
   }
   // Sorted HERE, at the one place the list is born, so the snapshot, the
   // visible set and the picker all inherit the same order instead of each
@@ -483,6 +599,14 @@ export interface ProbeRecord {
    * carries one — a refusal says nothing about which channel would have worked.
    */
   readonly api?: string;
+  /**
+   * What was MEASURED about this model's Off control, if anything has been.
+   *
+   * Absent means "unmeasured", which is NOT the same as "measured negative" —
+   * conflating those two is the bug this whole axis exists to fix. `fp` and `api`
+   * are what make a stale measurement detectable rather than permanent.
+   */
+  readonly effort?: MeasuredEffort;
 }
 
 export type ProbeMap = Record<string, ProbeRecord>;
@@ -508,6 +632,52 @@ export function applyMeasuredChannel(models: readonly Model<Api>[], probes: Prob
     if (measured === undefined || measured === model.api) continue;
     (model as { api: Api }).api = measured;
   }
+}
+
+/**
+ * The evidence a model's Off row is allowed to rest on.
+ *
+ * A record is dropped when its fingerprint or its channel no longer matches: the
+ * measurement is OF a claim, and if the claim changed or was made on another
+ * channel, the answer is about a question no longer being asked. Dropping it
+ * leaves the derived map in its unmeasured state, which is the honest default —
+ * an unmatched measurement must never widen what is offered.
+ *
+ * Two callers, one rule: the round when it records the answer, and the warm read
+ * when it adopts a cache that already holds one. Without both, the measurement is
+ * on disk and ignored — the exact failure `applyMeasuredChannel`'s comment warns of.
+ */
+export function measuredEffortFor(model: Model<Api>, probes: ProbeMap): MeasuredEffort | undefined {
+  const effort = probes[model.id]?.effort;
+  if (effort === undefined) return undefined;
+  if (effort.api !== model.api) return undefined;
+  return effort;
+}
+
+/**
+ * Collect the per-model evidence `derive()` needs, in one pass.
+ *
+ * `section` is the raw models dictionary rather than the derived list, because
+ * the fingerprint is computed from the record as models.dev publishes it — the
+ * thing the measurement is actually about.
+ */
+export function measuredEffortMap(
+  models: readonly Model<Api>[],
+  section: CatalogRecord,
+  probes: ProbeMap,
+): Map<string, MeasuredEffort> {
+  const out = new Map<string, MeasuredEffort>();
+  for (const model of models) {
+    const effort = measuredEffortFor(model, probes);
+    if (effort === undefined) continue;
+    const raw = section[model.id];
+    // The fingerprint guard: an older measurement about a revised declaration is
+    // discarded rather than applied.
+    if (!isPlainObject(raw)) continue;
+    if (effort.fp !== reasoningFingerprint({ ...raw, id: model.id })) continue;
+    out.set(model.id, effort);
+  }
+  return out;
 }
 
 /**
@@ -553,6 +723,7 @@ function readProbes(value: unknown): ProbeMap {
       ...(typeof entry.reason === "string" && entry.reason !== "" ? { reason: entry.reason } : {}),
       ...(entry.swept === true ? { swept: true } : {}),
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
+      ...(isMeasuredEffort(entry.effort) ? { effort: entry.effort } : {}),
     };
   }
   return probes;
@@ -1177,7 +1348,16 @@ function adopt(
   // catalogue and the verdicts; it has nothing to say about a round in flight.
   restoreRound = false,
 ): void {
-  const derived = derive(record.models, { knownApis: deps.knownApis, template: deps.template });
+  // The Off evidence a previous process MEASURED, threaded into the derivation
+  // itself rather than patched onto the result: the map is a function of the
+  // record plus the evidence, so patching afterwards would leave two places that
+  // decide `off` — which is how the two authorities drifted apart before.
+  const base = derive(record.models, { knownApis: deps.knownApis, template: deps.template });
+  const evidence = measuredEffortMap(base.candidates, record.models, record.probes);
+  const derived =
+    evidence.size === 0
+      ? base
+      : derive(record.models, { knownApis: deps.knownApis, template: deps.template, measuredEffort: evidence });
   // An empty state.models dictionary is NOT a catalogue — it is a fetch that failed
   // and got persisted anyway (a round writes one when the catalogue fetch
   // never succeeded, see runProbeRound). Adopting it empties the picker on
@@ -1190,6 +1370,7 @@ function adopt(
     state.source = "models.dev";
     state.updatedAt = record.fetchedAt;
   }
+
   if (Object.keys(record.probes).length > 0) state.probes = { ...record.probes };
   // A channel a previous process MEASURED, re-applied. Without this the
   // measurement is on disk and ignored, so a restart silently reverted every

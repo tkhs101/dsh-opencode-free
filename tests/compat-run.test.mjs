@@ -65,7 +65,14 @@ function world({
 }
 
 function free(extra = {}) {
-  return { cost: { input: 0, output: 0 }, ...extra }
+  // models.dev publishes `reasoning` explicitly; a record with reasoning_options
+  // but no flag claims nothing, and the derivation now takes that at face value.
+  const reasoning_options = extra.reasoning_options;
+  return {
+    cost: { input: 0, output: 0 },
+    ...(reasoning_options === undefined ? {} : { reasoning: true }),
+    ...extra,
+  }
 }
 function ok(stdout = 'OK\n') {
   return { stdout, stderr: '', exitCode: 0 }

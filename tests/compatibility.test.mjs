@@ -1064,34 +1064,23 @@ test('GUARD: every channel saying dead still removes the model', async () => {
   assert.equal(outcome.http, 404)
 })
 
-test('GUARD: placeholder efforts never reach the wire', async () => {
-  // "off" is offered as an explicit level, but pi-ai renders it as
-  // `reasoning: { effort: "none" }` when nothing is chosen and as
-  // `effort: "off"` when it is explicitly chosen on the responses channel.
-  // Neither value is ever sent by pi-ai's own records or by OpenCode, so the
-  // request path strips exactly those two back to "no reasoning object".
-  // Real levels pass through untouched.
+test('GUARD: the guard mirrors the map on both channels', async () => {
+  // The map is the single authority on what Off puts on the wire. The old guard
+  // was a SECOND authority, and the two disagreed: selecting Off on
+  // muse-spark-1.3-contributor-free removed the reasoning object, upstream
+  // accepted it, and the model reasoned 360 tokens — the MAXIMUM — with nothing
+  // reporting a problem. Measured 2026-10-06, `none` is refused there outright,
+  // so that guard was turning a loud refusal into silence.
   const p = plugin.zenProvider(
     () => 's',
     () => undefined,
   )
   const base = p.getModels().find((m) => m.api === 'openai-responses')
-  // A map with `off` absent (offered), like every derived record carries —
-  // and an id outside the muse-spark xhigh default, so nothing is chosen.
-  const { off: _dropped, ...rest } = base.thinkingLevelMap ?? {}
-  const model = { ...base, id: 'probe-responses-free', thinkingLevelMap: rest }
-  const ctx = { messages: [{ role: 'user', content: 'hi', timestamp: 1 }] }
-  // Run each case and read the captured body. The stub answers 400 so the
-  // stream settles immediately; onPayload has already run by then.
-  const bodies = {}
-  for (const [key, opts] of [
-    ['default', {}],
-    ['explicit-off', { reasoning: 'off' }],
-    ['real-level', { reasoning: 'low' }],
-  ]) {
+
+  const capture = async (model, opts) => {
     let body
     await p
-      .streamSimple(model, ctx, {
+      .streamSimple(model, { messages: [{ role: 'user', content: 'hi', timestamp: 1 }] }, {
         ...opts,
         maxRetries: 0,
         fetch: async (_url, init) => {
@@ -1100,11 +1089,39 @@ test('GUARD: placeholder efforts never reach the wire', async () => {
         },
       })
       .result()
-    bodies[key] = body
+    return body
   }
-  assert.equal(bodies.default.reasoning, undefined, 'no effort chosen sends no reasoning object')
-  assert.equal(bodies['explicit-off'].reasoning, undefined, 'explicit "off" sends no reasoning object')
-  assert.equal(bodies['real-level'].reasoning?.effort, 'low', 'a real level passes through')
+
+  // 1. map says `none` works -> the real value MUST survive. Asserting the map's
+  //    SHAPE instead would pass on both paths and prove nothing: this asserts the
+  //    outgoing bytes, which is the only thing that distinguishes them.
+  const honoured = { ...base, id: 'none-works-free', thinkingLevelMap: { ...base.thinkingLevelMap, off: 'none' } }
+  const withNone = await capture(honoured, { reasoning: 'off' })
+  assert.equal(withNone.reasoning?.effort, 'none', 'a measured "none" reaches the wire')
+
+  // 2. map claims no off, and the model HAS a published ladder: an unavailable
+  //    "off" is clamped by pi-ai to the least reasoning that does exist, rather
+  //    than silently becoming "send nothing". Verified separately that
+  //    clampThinkingLevel(space-bunny-free, 'off') === 'low'.
+  const unmeasured = { ...base, id: 'unmeasured-free', thinkingLevelMap: { ...base.thinkingLevelMap, off: null } }
+  const clamped = await capture(unmeasured, { reasoning: 'off' })
+  assert.equal(
+    clamped.reasoning?.effort,
+    'minimal',
+    'a stale off preference lands on the least reasoning the model publishes',
+  )
+
+  // 3. With `off: null`, pi-ai does not emit the placeholder AT ALL when
+  //    nothing is chosen (openai-responses.js:259 gates on `off !== null`), so
+  //    there is nothing for the guard to strip. `null` suppresses at the source;
+  //    the guard is a backstop for the explicit-choice path, not the mechanism.
+  const declared = { ...base, id: 'declared-free', thinkingLevelMap: { ...base.thinkingLevelMap, off: null } }
+  const suppressed = await capture(declared, {})
+  assert.equal(suppressed.reasoning, undefined, 'off:null suppresses the placeholder at the source')
+
+  // 4. A real level passes through untouched on both shapes.
+  const real = await capture(honoured, { reasoning: 'low' })
+  assert.equal(real.reasoning?.effort, 'low', 'a real level passes through')
 })
 
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
