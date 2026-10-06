@@ -933,6 +933,13 @@ export interface ProbeDeps {
    * of the shared bucket, so nothing in `index.ts` passes this.
    */
   readonly maxTokens?: number | undefined;
+  /**
+   * Which Off spelling to ask about. `"minimal"` is the fallback for a model
+   * whose `none` never accumulates agreeing samples; it costs nothing extra
+   * because the round changes what its existing request asks rather than
+   * adding one.
+   */
+  readonly question?: "none" | "minimal" | undefined;
   readonly now?: (() => number) | undefined;
 }
 
@@ -1130,9 +1137,8 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
         const gated = enforceAnonymousTools(payload);
         const body = gated as Record<string, unknown>;
         const responses = (sent as { api?: string } | undefined)?.api === "openai-responses";
-        return responses
-          ? { ...body, reasoning: { effort: "none" } }
-          : { ...body, reasoning_effort: "none" };
+        const spelling = deps.question === "minimal" ? "minimal" : "none";
+        return responses ? { ...body, reasoning: { effort: spelling } } : { ...body, reasoning_effort: spelling };
       },
       // A probe must not spend a second call confirming anything: without this
       // a 429 costs three requests instead of one, because the SDK's default

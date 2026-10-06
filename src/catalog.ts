@@ -220,6 +220,27 @@ export const EFFORT_CONCORDANCE = 3;
 export type EffortSamples = readonly MeasuredEffort["kind"][];
 
 /**
+ * Which spelling the probe is currently asking about.
+ *
+ * The round does not ADD a probe when `none` proves unusable — it changes what
+ * the request it was already making asks. Measured 2026-10-06, big-pickle never
+ * accumulates three agreeing samples for `none`, so it would sit unmeasured
+ * forever and the user would never get the Off row that `minimal` demonstrably
+ * provides (0 reasoning tokens across six samples). One request per round either
+ * way; only the question changes.
+ */
+export type EffortQuestion = "none" | "minimal";
+
+/** Discordant rounds before the probe stops asking about `none`. */
+export const EFFORT_FALLBACK_AFTER = 3;
+
+/** Which spelling to ask about next, given what the record has seen. */
+export function nextEffortQuestion(record: ProbeRecord | undefined): EffortQuestion {
+  if (record?.effortQuestion === "minimal") return "minimal";
+  return (record?.effortDiscord ?? 0) >= EFFORT_FALLBACK_AFTER ? "minimal" : "none";
+}
+
+/**
  * Whether a fresh sample agrees with what came before.
  *
  * A sample that DISAGREES resets the tally rather than being averaged or
@@ -665,6 +686,10 @@ export interface ProbeRecord {
    * still unconfirmed.
    */
   readonly effortSamples?: EffortSamples;
+  /** Which spelling the probe is currently asking about. */
+  readonly effortQuestion?: EffortQuestion;
+  /** Discordant rounds seen on the current question; drives the fallback. */
+  readonly effortDiscord?: number;
   /**
    * Consecutive clamp observations seen since the last write. In-memory only,
    * like the liveness round's counters: it is a confidence gauge, not a verdict,
@@ -797,6 +822,12 @@ function readProbes(value: unknown): ProbeMap {
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
       ...(Array.isArray(entry.effortSamples)
         ? { effortSamples: entry.effortSamples.filter((k) => typeof k === "string") as EffortSamples }
+        : {}),
+      ...(entry.effortQuestion === "minimal" || entry.effortQuestion === "none"
+        ? { effortQuestion: entry.effortQuestion }
+        : {}),
+      ...(typeof entry.effortDiscord === "number" && Number.isFinite(entry.effortDiscord)
+        ? { effortDiscord: entry.effortDiscord }
         : {}),
     };
   }
@@ -1032,7 +1063,7 @@ export interface CreateCatalogOptions {
    * this module keeps no transport dependency; when absent, probing is simply
    * unavailable and every probe entry point is a no-op.
    */
-  readonly probe?: ((model: Model<Api>) => Promise<ProbeResult>) | undefined;
+  readonly probe?: ((model: Model<Api>, question?: EffortQuestion) => Promise<ProbeResult>) | undefined;
   /**
    * The ids Zen currently serves, from one `GET /zen/v1/models` — the same cheap
    * availability check 9router performs for its free provider, and the reason
@@ -1829,7 +1860,7 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
       const started = deps.now();
       let outcome: ProbeResult;
       try {
-        outcome = await probe!(model);
+        outcome = await probe!(model, nextEffortQuestion(state.probes[model.id]));
       } catch {
         untrusted = true;
         state.probeRun.results[model.id] = {
@@ -1858,12 +1889,24 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         continue;
       }
       const prior = state.probes[model.id];
+      const question = nextEffortQuestion(prior);
       // The Off verdict the same request observed, held back until it agrees
       // with what came before. `big-pickle` accepted `none` on six of nine
       // identical requests and 400'd the rest while its liveness stayed `ok`, so
       // a single sample would persist the wrong row a third of the time with
       // nothing downstream able to notice.
-      const sample = outcome.kind === "ok" ? outcome.effort?.kind : undefined;
+      const sample =
+        outcome.kind !== "ok"
+          ? undefined
+          : question === "none"
+            ? outcome.effort?.kind
+            : // The fallback question's answer is a claim about `minimal`, not
+              // about `none`, so it is recorded in those words.
+              outcome.effort?.kind === "none-works"
+              ? "level-works"
+              : outcome.effort?.kind === "noop"
+                ? "noop"
+                : undefined;
       const tally = sample === undefined ? undefined : effortVerdict(prior?.effortSamples, sample);
       const confirmed =
         sample !== undefined &&
@@ -1886,16 +1929,25 @@ export async function runProbeRound(state: CatalogState, deps: CatalogDeps): Pro
         ...(tally !== undefined ? { effortSamples: tally.kind === "confirmed" ? [] : tally.samples } : {}),
         // Written ONLY on agreement. A disagreement empties the tally and leaves
         // the map unmeasured, which offers no Off row rather than a wrong one.
+        // The fallback question stays put: it answered the question, so
+        // switching back would re-open a settled matter.
+        ...(tally !== undefined ? { effortQuestion: question } : {}),
         ...(confirmed && tally !== undefined && isMeasuredChannel(outcome.api)
           ? {
               effort: {
-                kind: outcome.effort!.kind === "none-works" ? "none-works" : "noop",
+                kind: sample === "level-works" ? "level-works" : sample === "none-works" ? "none-works" : "noop",
+                // The measured level name travels with the verdict, so the map
+                // can name it rather than guess which rung was meant.
+                ...(sample === "level-works" ? { level: "minimal" } : {}),
                 fp: reasoningFingerprint({ ...rawById(model.id)!, id: model.id }),
                 api: outcome.api,
                 at: stamp,
               },
+              effortDiscord: 0,
             }
-          : {}),
+          : tally !== undefined && tally.kind === "discord"
+            ? { effortDiscord: (prior?.effortDiscord ?? 0) + 1 }
+            : {}),
       };
       // Applied HERE, not when the round ends. A row is painted the moment its
       // verdict lands, so a model shown as working must already be routed the
