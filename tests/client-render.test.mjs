@@ -471,6 +471,11 @@ test('a finished round stays on screen: tally, per-row reasons, and the dead mod
   let postResolve = null
   const finished = {
     running: false,
+    // The round's COST, which is not its model tally: a round may take several
+    // samples of one model, and someone who presses "Probe now" is spending the
+    // shared anonymous bucket.
+    requests: 11,
+    pending: ['longcat-2.5-preview-free'],
     total: 3,
     done: 3,
     current: null,
@@ -525,6 +530,18 @@ test('a finished round stays on screen: tally, per-row reasons, and the dead mod
     assert.ok(
       end.texts.some((t) => t.includes('探测完成')),
       'the capsule reads as finished',
+    )
+    // The COST, beside the tally: `done/total` counts models, this counts what
+    // the shared bucket paid. The card's own translator is in play here, so the
+    // tree carries real wording with the numbers interpolated — which is what a
+    // user actually reads.
+    assert.ok(
+      end.texts.some((x) => String(x).includes('11') && String(x).includes('次请求')),
+      "the round's bill is rendered with the request count: " + JSON.stringify(end.texts),
+    )
+    assert.ok(
+      end.texts.some((x) => String(x).includes('1 个待测')),
+      'and how many models still owe samples',
     )
     assert.ok(
       end.texts.some((t) => t.includes('1')),

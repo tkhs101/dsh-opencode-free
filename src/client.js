@@ -93,6 +93,7 @@ window.__ModuleLoader__.load({
 			"probing.roundRefused": "本轮没能测到这些模型",
 			"probing.notModelFault": "这是上游当时的回应，不是该模型的结论",
 			"probing.retryHint": "点「立即探测」可重测",
+			"probing.bill": "{requests} 次请求 · {pending} 个待测",
 			"reason.dead": "已下架",
 			"reason.notlisted": "Zen 未提供",
 			"reason.timeout": "探测超时",
@@ -151,6 +152,7 @@ window.__ModuleLoader__.load({
 			"probing.roundRefused": "These models could not be measured this round",
 			"probing.notModelFault": "that was the upstream's answer at the time, not a verdict on the model",
 			"probing.retryHint": "press “Probe now” to retry",
+			"probing.bill": "{requests} requests · {pending} still to measure",
 			"reason.dead": "Gone",
 			"reason.notlisted": "Not offered",
 			"reason.timeout": "Timed out",
@@ -635,6 +637,8 @@ window.__ModuleLoader__.load({
 					? payload.targets.filter((id) => typeof id === "string")
 					: null,
 				startedAt: typeof payload.startedAt === "number" ? payload.startedAt : 0,
+				requests: typeof payload.requests === "number" ? payload.requests : 0,
+				pending: Array.isArray(payload.pending) ? payload.pending.filter((id) => typeof id === "string") : null,
 			};
 		}
 
@@ -1380,6 +1384,20 @@ window.__ModuleLoader__.load({
 								t("probing.reconfirmed") + " " + String(reconfirmedCount))
 							: null);
 				}
+			}
+
+			/* What the round COST. A round may take several samples of one model, so
+			   the model tally is not the bill: someone who presses "Probe now" is
+			   spending the shared anonymous bucket and is entitled to see what it
+			   bought and what it still owes. */
+			if (capsule !== null && progress !== null && progress.running !== true && progress.requests > 0) {
+				capsule = E("span", { className: "opf-capsule" },
+					capsule,
+					E("span", { className: "opf-capsule-skip" },
+						t("probing.bill", {
+							requests: progress.requests,
+							pending: progress.pending === null ? 0 : progress.pending.length,
+						})));
 			}
 
 			/* When the tier refused, said the quota was gone, or rejected the key,
