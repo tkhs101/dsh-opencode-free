@@ -1157,19 +1157,28 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
       onPayload: (payload: unknown, sent: unknown) => {
         const gated = enforceAnonymousTools(payload);
         const body = gated as Record<string, unknown>;
-        // Whether this request actually carries a reasoning parameter is a
-        // property of the BYTES, not of the question we meant to ask: on a
-        // no-ladder model the liveness probe's hardcoded `low` clamps to
-        // omission, which makes that very request the omitted baseline. Reading
-        // it here is what lets the baseline cost no extra quota.
-        const sent0 = body.reasoning_effort !== undefined || body.reasoning !== undefined;
-        injected.reasoning = deps.question !== "baseline" && !sent0;
+        // Which question this request asks, decided ONCE: the early return below
+        // and the sample's bucket must agree, or the round files a candidate
+        // reading as a baseline and compares nothing.
+        //
+        // The bucket is decided by whether THIS PROBE put a spelling on the wire,
+        // not by whether the body happened to be empty before it did. The
+        // liveness request always carries `reasoning_effort: "low"` for a model
+        // with a ladder, and this plugin hands every reasoning model the default
+        // ladder — so "the body was empty" was never true on the models that
+        // matter, and every candidate sample was filed as a baseline.
+        //
+        // A no-ladder model really does clamp the hardcoded `low` to omission, and
+        // that request is genuinely the omitted baseline — which is exactly the
+        // question the round asked in that case, so it needs no extra rule.
+        const asks = deps.question !== undefined && deps.question !== "baseline" && deps.question !== "settled";
+        injected.reasoning = asks;
         // The baseline round sends nothing at all: it is the same request the
         // liveness probe was already making, so asking for the model's own
         // default costs no extra quota.
         // `settled` means the model already has a standing verdict: send the plain
         // liveness request and measure nothing.
-        if (deps.question === undefined || deps.question === "baseline" || deps.question === "settled") return body;
+        if (!asks) return body;
         const responses = (sent as { api?: string } | undefined)?.api === "openai-responses";
         // Whatever level the round decided to ask about. `deps.question` is
         // `none`, a baseline marker, or a specific level name.

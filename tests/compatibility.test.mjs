@@ -1219,6 +1219,41 @@ test('GUARD: the probe records the reasoning count upstream actually reported', 
   assert.deepEqual(candidate.usage?.reasoning, 0, 'an exact zero must be told apart from "not reported"');
 });
 
+test('GUARD: a probe that injects a spelling files the sample as a CANDIDATE', async () => {
+  // What decides the bucket is whether THIS probe put a spelling on the wire,
+  // not whether the body happened to be empty before it did. The liveness
+  // request always carries `reasoning_effort: "low"` for a model with a ladder
+  // — the plugin hands every reasoning model the default ladder — so "was it
+  // empty" was never true, and every candidate reading was filed as a
+  // baseline. `effortTokens` then stayed empty forever and the round could not
+  // compare anything, no matter how many rounds ran.
+  //
+  // Asserting the outgoing field alone would pass either way (both paths send
+  // `none`); the bucket is the thing under test.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  const read = async (question) =>
+    await probeModel(model, {
+      provider: p,
+      apiKey: 'public',
+      question,
+      fetchImpl: async () => sseWithReasoning(question === 'none' ? 0 : 55),
+    });
+
+  // The round's own liveness request is the baseline — nothing was asked for.
+  const baseline = await read('baseline');
+  assert.equal(baseline.effort?.kind, 'baseline', 'an un-asked round is the omitted baseline');
+
+  // A spelling this probe injected, on a body that already carried `low`.
+  const candidate = await read('none');
+  assert.equal(candidate.effort?.kind, 'candidate', 'an injected spelling is a candidate sample');
+
+  // A fallback level is a candidate too, and it is a LEVEL answer rather than a
+  // `none` answer — the round names the level it asked about.
+  const level = await read('low');
+  assert.equal(level.effort?.kind, 'candidate', 'a fallback level is a candidate sample');
+});
+
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
     () => 'probe-session',
