@@ -1103,6 +1103,26 @@ function usageOf(result: Record<string, unknown> | undefined): ProbeUsage | unde
 }
 
 /**
+ * What a failure MEANS depends on WHICH credential was sent.
+ *
+ * With no Zen key configured this plugin sends the literal string `public`, so a
+ * 401 from upstream is not a bad key — there is no key. It is the free tier
+ * being refused, and the `bad-key` guidance ("check that your key is correct,
+ * expired or revoked") points at something the user never did.
+ *
+ * Measured 2026-10-06 on an anonymous deployment: space-bunny-free came back
+ * 401 and the panel said "key 无效" while no key existed. The two kinds also
+ * lead somewhere different — `bad-key` invites a configuration change, while
+ * `anon-gated` says the anonymous admission itself failed.
+ */
+function failureKindFor(status: number, body: string, apiKey: string | undefined): ZenFailureKind {
+  const kind = classifyZenFailure(status, body);
+  if (kind !== "bad-key") return kind;
+  const sent = typeof apiKey === "string" ? apiKey.trim() : "";
+  return sent === "" || sent === ANONYMOUS_KEY ? "anon-gated" : kind;
+}
+
+/**
  * Send one minimal request to `model` on its current channel and classify it.
  *
  * Never throws: a probe that cannot reach a conclusion returns
@@ -1280,11 +1300,10 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
       http: status,
     };
   }
+  const kind = failureKindFor(status, body, deps.apiKey);
   if (status === 0) {
-    const kind = classifyZenFailure(status, body);
     return { kind: "inconclusive", reason: kind, code: kind, http: 0, marker: anonGateMarker(body) };
   }
-  const kind = classifyZenFailure(status, body);
   return {
     kind: "inconclusive",
     reason: `${kind}（HTTP ${status}）`,

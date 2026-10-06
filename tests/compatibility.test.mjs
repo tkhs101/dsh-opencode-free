@@ -982,7 +982,10 @@ test('GUARD: a gate or a quota wall is never retried on another channel', async 
     let calls = 0
     const outcome = await probeModel(model, {
       provider: p,
-      apiKey: 'public',
+      // A REAL key on purpose: a 401 under the anonymous credential is not a
+      // bad key — there is no key — and re-reads as the free tier refusing. That
+      // remapping has its own test; this one is about the channel sweep.
+      apiKey: 'zen_live_a_real_key',
       fetchImpl: async () => {
         calls += 1
         return new Response(body, { status, headers: { 'Content-Type': 'application/json' } })
@@ -1253,6 +1256,30 @@ test('GUARD: a probe that injects a spelling files the sample as a CANDIDATE', a
   const level = await read('low');
   assert.equal(level.effort?.kind, 'candidate', 'a fallback level is a candidate sample');
 });
+
+test('GUARD: a 401 with no key configured is the free tier refusing, not a bad key', async () => {
+  // There is no key on an anonymous deployment: the plugin sends the literal
+  // `public`. Live 2026-10-06 a 401 reached the panel as "key 无效" — advice to
+  // check something the user never configured. The two kinds also lead
+  // somewhere different: one invites a configuration change, the other says the
+  // anonymous admission failed.
+  const p = plugin.zenProvider(() => 's', () => undefined);
+  const model = p.getModels().find((m) => m.api === 'openai-completions');
+  const probeWith = (apiKey) =>
+    probeModel(model, {
+      provider: p,
+      apiKey,
+      fetchImpl: async () => new Response('{"error":{"message":"invalid api key"}}', { status: 401 }),
+    });
+
+  assert.equal((await probeWith('public')).code, 'anon-gated', 'the anonymous credential cannot be a bad key');
+  assert.equal((await probeWith(undefined)).code, 'anon-gated', 'and neither can an absent one');
+  assert.equal(
+    (await probeWith('zen_live_a_real_key')).code,
+    'bad-key',
+    'a 401 with a real key really is about that key',
+  );
+})
 
 test('probe verdicts: a text reply is ok, only a positive signal is dead', async () => {
   const p = plugin.zenProvider(
