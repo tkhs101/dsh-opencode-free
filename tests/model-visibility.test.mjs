@@ -384,10 +384,17 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
     // claim on screen to verify.
     assert.equal(pickle.declaredContext, 200000)
     assert.equal(pickle.declaredOutput, 32000)
-    assert.equal(pickle.contextWindow, 1048576)
+    // The context seed for this model was WITHDRAWN on 2026-10-07: it rested on
+    // an acceptance, and the same endpoint has since named its own maximum as
+    // 262,139 while refusing requests as small as 210,000. Shipping 1,048,576
+    // would have advertised four times the model's real ceiling.
+    assert.equal(pickle.contextWindow, 200000, 'an acceptance is not a measurement; the declaration ships')
     assert.equal(pickle.outputBudget, 48000, 'watched producing 48,000 of a declared 32,000')
     assert.equal(pickle.observedOutput, 48000)
-    assert.deepEqual(pickle.measured, { context: true, output: true, vision: false, tools: true })
+    // Context reads UNMEASURED for the same reason the window is the declaration:
+    // nothing has been established about this model's ceiling that survives the
+    // endpoint naming a different one.
+    assert.deepEqual(pickle.measured, { context: false, output: true, vision: false, tools: true })
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]

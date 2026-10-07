@@ -70,6 +70,17 @@ cost. Behaviour below is what a user can observe change.
   answers `Model is unavailable.` on the channel it actually serves is removed.
 - **A restored cache report can no longer overwrite a round that is running**,
   which made the panel sit still while the round you started ran on invisibly.
+- **A measured context window that was an acceptance has been withdrawn.**
+  `big-pickle`'s 1,048,576 came from "accepted, and refused at 1.5M and 2M" —
+  refusals that named nothing. Hours later the same endpoint, asked for 2,000,000,
+  said outright that its maximum context length is **262,139**, and by the next
+  probe it was refusing requests as small as 210,000 while still answering 200,000
+  a few minutes earlier. Advertising 1,048,576 meant DSH would compact at roughly
+  839K estimated tokens and every request past the real ceiling would be
+  refused — a model that looks like it broke, with nothing anywhere saying why.
+  Its declaration ships again. The rule this earns: **seed a window only from a
+  number the endpoint states about itself.** A refusal costs zero output tokens
+  and returns a number; an acceptance costs nothing and returns nothing.
 - **Measured context windows are used.** Where the endpoint has stated its own
   limit, that value is offered instead of models.dev's declaration, and a
   changed declaration discards it. A stated verdict keeps the samples behind

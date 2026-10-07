@@ -2030,9 +2030,25 @@ export const CLAMP_RAISE_CEILING = 1_048_576;
  *     is why the decimal-vs-binary heuristic was thrown out and the table is
  *     keyed by id.
  *
- *   big-pickle — 1048576 accepted, 1572864 and 2097152 refused, all with a
- *     generic `invalid_request_error` that names nothing. Only a lower bound
- *     exists, so its entry is the C4 cap, which is deliberately under the truth.
+ *   big-pickle — **WITHDRAWN 2026-10-07.** This entry existed on an ACCEPTANCE
+ *     ("1048576 accepted, 1572864 and 2097152 refused, all generic") and was
+ *     read as a lower bound worth shipping. Four hours later the same endpoint,
+ *     asked for 2,000,000, said it outright:
+ *       `[invalid_request_error] Requested token count exceeds the model's
+ *        maximum context length of 262139 tokens.`
+ *     and by the next probe it was refusing requests as small as 210,000 while
+ *     still answering 200,000 a few minutes earlier. So the acceptance was one
+ *     lucky sample from an unstable route, and shipping it advertised a window
+ *     up to FOUR TIMES the model's own — which is not a mild overstatement: DSH
+ *     would compact at ~839K estimated tokens and every request past the real
+ *     ceiling would be refused. An acceptance is not a measurement, on either
+ *     axis. The entry is gone, and the declaration ships.
+ *
+ *     The general rule this earns: **seed a window from a number the endpoint
+ *     STATES about itself, or do not seed it.** Refusals name limits for free
+ *     (they cost zero output tokens and return a number); acceptances name
+ *     nothing, and a route that is quietly failing will happily accept a few
+ *     times before it stops.
  *
  * `clampProposalFor` caps every entry, so a stale table can never advertise more
  * than four times what models.dev claims; a raised window that is too large
@@ -2045,11 +2061,12 @@ export const CLAMP_RAISE_CEILING = 1_048_576;
  * else — the same rule the live measurements obey.
  */
 const SEED_CONTEXT: Readonly<Record<string, { readonly declared: number; readonly measured: number }>> = {
+  // Every entry below is a number the endpoint STATED about itself in a refusal.
+  // `big-pickle` was here on an acceptance and was withdrawn the same day — see
+  // the table's own documentation, which is the shortest post-mortem this repo has.
   "mimo-v2.6-flash-free": { declared: 200000, measured: 1048576 },
   "mimo-v2.5-free": { declared: 200000, measured: 1048576 },
   "nemotron-3.5-lightning-free": { declared: 262144, measured: 1000000 },
-  // Only a lower bound was ever observed; the cap is the honest value.
-  "big-pickle": { declared: 200000, measured: 1048576 },
 };
 
 /** The seed for one model, or undefined when it declares something else now. */
