@@ -57,6 +57,21 @@ cost. Behaviour below is what a user can observe change.
   footer legend now states the one genuinely special thing about tools here, once
   instead of per row: the free tier admits nothing unless the request carries
   `read` and `bash`, which is why the plugin adds them to every request.
+- **The panel names WHICH source each number came from.** It carried four
+  booleans computed as "differs from what models.dev published", so a ceiling the
+  ROUTE stated in its own refusal, a figure a VENDOR published on its model page,
+  a reply somebody watched finish, and a raise inferred from a clamp signature all
+  rendered as the same word — "measured". That ambiguity is what produced "一百万输出
+  明显不对", and it was ours. The card now says which, per axis: an unchanged
+  number reads `declared`, and anything else names its source. No number changes;
+  the sentence about it does.
+- **The daily round learns each route's ceiling on its own.** The harvest ran only
+  in a manual round — the capability questions shared the EFFORT axis's budget, and
+  the daily round runs that at one — so a new model, or an upstream limit that
+  changed, was only ever learned when the reader remembered to click. The two axes
+  now have separate budgets. The declared-capability questions (vision, tools) stay
+  on the manual round: they cost real output tokens, and the daily round covers
+  models the user has switched off, which is not a bill worth paying daily.
 - **The panel row reports the limits the request actually uses, and says which
   of them were measured.** A row now shows the context window and the maximum
   output pi-ai clamps with, plus vision, thinking and tool-call badges — and a
