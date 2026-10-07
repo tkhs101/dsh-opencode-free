@@ -1975,6 +1975,13 @@ function compatRequestOptions<T extends StreamOptions>(
             ? body.max_tokens
             : undefined;
       if (outcome !== undefined) outcome.clampEmitted = emitted;
+      // The REQUESTED value (from shapeSummary above) and the EMITTED value (here)
+      // are the two numbers that separate this lane's two causes for one opaque
+      // 400 — measured 2026-10-08: `max_tokens` above 524288 and an input above the
+      // context window both answer with the identical body, so nothing else in the
+      // log can tell them apart. Before this line, `shapeSummary` read `maxTokens`
+      // and never printed it, and the failure was undiagnosable after the fact.
+      if (emitted !== undefined) debugLog(`emitted max_tokens=${emitted}`);
       const map = (model as { thinkingLevelMap?: Record<string, string | null> } | undefined)?.thinkingLevelMap;
       // `"none"` is a REAL wire value wherever a measurement said it stops
       // reasoning; it must survive. Everywhere else it is pi-ai's placeholder.
@@ -2141,7 +2148,7 @@ function shapeSummary(context: unknown, options: unknown): string {
     const tools = Array.isArray(ctx.messages)
       ? getCurrentTools(ctx.messages as Parameters<typeof getCurrentTools>[0]).length
       : 0;
-    return `msgs=${Array.isArray(ctx.messages) ? ctx.messages.length : "?"} chars~${chars} tools=${tools} reasoning=${String(opt.reasoning ?? "(default)")}`;
+    return `msgs=${Array.isArray(ctx.messages) ? ctx.messages.length : "?"} chars~${chars} tools=${tools} reasoning=${String(opt.reasoning ?? "(default)")} maxTokens=${String(opt.maxTokens ?? "(unset→model default)")}`;
   } catch {
     return "shape=(unavailable)";
   }
