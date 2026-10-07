@@ -158,18 +158,18 @@ and they are two different kinds of number, which the picker labels separately.
 Flash declares 200,000 and its endpoint says its maximum is 1,048,576. That one
 is a capability, and it is what decides when the conversation is compacted.
 
-**Output budget** is not a capability. It is the largest `max_tokens` the route
-will accept without refusing, and it is enforced — asked for 8 with a prompt
-that wanted thousands, the models that answered all stopped at exactly 8 with
-`finish_reason: "length"`. So the budget is worth raising when the declaration is
-stale: a budget that is too small silently cuts a real reply at
-`finish_reason: "length"` with nothing reporting it. It is **not** a claim that
-any model writes that much, and no model here has been seen to.
-
-What a model has actually been seen to write is a separate number, shown only
-where one exists: Mimo V2.6 Flash produced 40,000 output tokens when asked for
-40,000. For every other model there is no such figure, because no generation has
-been watched — and the row says nothing rather than filling the gap.
+**Output budget** follows models.dev — with one exception. The route enforces
+`max_tokens` (asked for 8 with a prompt that wanted thousands, the models that
+answered all stopped at exactly 8 with `finish_reason: "length"`), so a
+declaration that is too low really does cut a reply at the declaration with
+nothing reporting it. But that only proves the field is enforced, not that a
+model writes what it is given: on 2026-10-07 every route accepted budgets up to
+1,040,384, and no model has ever been seen writing anything like it. So the rule
+is that **only a watched generation moves this number** — and one has been
+watched: Mimo V2.6 Flash produced 40,000 output tokens when asked for 40,000, so
+its budget ships at 40,000 rather than the declared 32,000. Every other model's
+budget is exactly what models.dev says, and the row shows an arrow only where
+that is not true.
 
 Time is the ceiling nobody sees. Mimo V2.6 Flash writes at about 150 tokens a
 second, so a single reply ends at roughly 90,000 tokens when the 10-minute

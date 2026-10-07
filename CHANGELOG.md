@@ -82,17 +82,17 @@ cost. Behaviour below is what a user can observe change.
   At that rate 180s bought roughly 27,000 tokens — less than the plugin used to
   advertise. The host profile's copy was the one that won, so both are now 600s,
   matching the profile's own stream idle timeout. Short replies are unaffected.
-- **The output budget is measured and used.** `limit.output` was never checked,
-  and it is the number every reply is cut at: a model whose route takes far more
-  was silently stopping at the declaration, with `finish_reason: "length"` and
-  nothing in the panel to say so. Measured 2026-10-07 — Mimo V2.6 Flash was being
-  held to 32,000 while accepting 1,040,384, Muse Spark and Fledge Alpha to
-  131,072 while accepting 1,040,384, Nemotron 3.5 Lightning to 262,144 while
-  accepting 991,808, Nemotron 3 Ultra to 128,000 while accepting 991,808,
-  Longcat to 131,072 while accepting 262,144, Big Pickle to 32,000 while
-  accepting 128,000. Space Bunny Free measured correct at 524,288
-  and is used as declared. A changed declaration discards the measurement, and a
-  budget is never sent above the context window it has to fit inside.
+- **The output budget now follows models.dev, except where a generation was
+  watched.** `limit.output` is the number every reply is cut at, and the route
+  enforces it — so a declaration that is too low silently truncates a real reply
+  at `finish_reason: "length"` with nothing reporting it. But acceptance is not
+  capability: every route accepted budgets up to 1,040,384 on 2026-10-07 and no
+  model has ever been seen writing that, so those numbers ship nowhere. One model
+  has a watched generation — Mimo V2.6 Flash produced 40,000 output tokens when
+  asked for 40,000 — so only its budget differs from its declaration (32,000 →
+  40,000). The other seven are exactly what models.dev publishes, which is also
+  the smaller change for the user's shared quota: at most one reply per turn can
+  run 25% longer than before.
 - **And it is labelled as a budget, not as a capability.** The route enforces
   `max_tokens` — asked for 8 with a prompt that wanted thousands, every model
   that answered stopped at exactly 8 with `finish_reason: "length"` — so a budget

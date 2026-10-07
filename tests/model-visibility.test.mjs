@@ -377,14 +377,17 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
     const pickle = refreshed.body.models.find((m) => m.id === 'big-pickle')
     assert.equal(pickle.image, false)
     assert.equal(pickle.thinking, null)
-    // Declared 200000/32000; the measured window and ceiling replace both, and
-    // the flags are what say so. `vision` is false AND unmeasured: the model
-    // declares no image input, so there is no claim on screen to verify.
+    // Declared 200000/32000. The window is replaced by a measurement; the output
+    // budget is NOT, because no generation has been watched for this model — so
+    // the budget ships as models.dev declared it, and the row says so. `vision`
+    // is false AND unmeasured: the model declares no image input, so there is no
+    // claim on screen to verify.
     assert.equal(pickle.declaredContext, 200000)
     assert.equal(pickle.declaredOutput, 32000)
     assert.equal(pickle.contextWindow, 1048576)
-    assert.equal(pickle.outputBudget, 128000)
-    assert.deepEqual(pickle.measured, { context: true, output: true, vision: false, tools: true })
+    assert.equal(pickle.outputBudget, 32000)
+    assert.equal(pickle.observedOutput, undefined, 'nothing has been watched this model produce')
+    assert.deepEqual(pickle.measured, { context: true, output: false, vision: false, tools: true })
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]

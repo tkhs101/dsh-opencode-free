@@ -2095,58 +2095,41 @@ export function clampProposalFor(declared: number): number {
  *     exists for one model only: mimo, 40,000 tokens, `stopReason: "length"`,
  *     about 152 tokens/second.
  *
+ * What the 2026-10-07 acceptance sweep DID establish, kept here because it is the
+ * reason the declaration can be wrong at all: asked for `max_tokens: 8` with a
+ * prompt that wanted thousands, `mimo-v2.6-flash-free`, `space-bunny-free`,
+ * `longcat-2.5-preview-free`, `nemotron-3-ultra-free`, `big-pickle` and
+ * `nemotron-3.5-lightning-free` all returned exactly the number asked for with
+ * `finish_reason: "length"`. The route enforces this field, so a budget that is
+ * too low really does cut a reply at the declaration and nothing reports it.
+ *
+ * What it did NOT establish, and why it is not in the table: that any of those
+ * models writes a million tokens. Acceptance is a fact about the request. The
+ * sweep's own rows are in `.scratch/verify/output-ceiling2-results.txt`; the
+ * argument against shipping them is ADR 0004 §44.
+
  * Measured 2026-10-07 on the live set, one request per step, reading the number
  * off the outgoing body rather than off the declaration: the prompt is one word,
  * so the ask decides only the CEILING and each step costs ~30 output tokens.
  * Verbatim rows in `.scratch/verify/output-ceiling2-results.txt`:
  *
- *   mimo-v2.6-flash-free / muse-spark-1.2 / muse-spark-1.3 / fledge-alpha-free
- *     accepted `max_tokens` 1040384 — the largest value that fits inside their own
- *     advertised window — against declarations of 32000 and 131072.
- *   nemotron-3.5-lightning-free accepted 991808 against a declaration of 262144.
- *   nemotron-3-ultra-free accepted 991808 against a declaration of 128000, on a
- *     second run after the first was answered by an overloaded upstream.
- *   big-pickle accepted 128000 (1040384 → HTTP 500, which concludes nothing).
- *   longcat-2.5-preview-free accepted 262144 and refused 393216 with the generic
- *     `invalid_request_error`; the bisection step at 262144 answered, so the
- *     refusal is monotone in the ask rather than incidental.
+ * pi-ai clamps what it sends with `min(maxTokens, context − estimate − 4096)`, so
+ * the bytes never carry more than this function returns: a conversation with room
+ * asks for the whole budget, and a long one automatically asks for less.
  *
- * `space-bunny-free` is deliberately ABSENT: it accepted 524288, which is what
- * models.dev declares, and refused 782336 — the one live model whose declaration
- * is right, and the reason this table is a measurement table and not a rule.
- * `ling-3.1-flash-free` (429) and `ling-3.0-flash-fin-free` (an endpoint that has
- * answered `Endpoint is unavailable.` on every attempt since 2026-10-06) learned
- * nothing and are absent too: their declarations stand, unverified, exactly as
- * before.
- *
- * Each entry is the largest budget the route ACCEPTED, never a number inferred
- * from one, and never more than the window this plugin advertises for the same
- * model — a budget larger than the context it has to fit in is a fiction. pi-ai
- * clamps with `min(maxTokens, context − estimate − 4096)`, so the bytes can never
- * carry more than the value recorded here: a conversation with room asks for it,
- * and a long one automatically asks for less.
- *
- * What this does NOT claim: that any model will write that much. The time is the
- * real ceiling — mimo writes about 152 tokens/second, so the ten-minute request
- * timeout ends the conversation at roughly 91,000 tokens whatever the budget
- * says. A budget above that is not wasted (it costs nothing, and pi-ai's clamp
- * lowers it as the conversation grows), but it must never be shown to a user as
- * an output length.
+ * What this does NOT claim: that any model writes that much. Time is the real
+ * ceiling — mimo writes about 152 tokens/second, so the ten-minute request
+ * timeout ends a reply near 91,000 tokens whatever the budget says.
  */
-const SEED_OUTPUT: Readonly<
-  Record<string, { readonly declared: number; readonly budget: number; readonly observed?: number }>
-> = {
-  // `observed` is the only field here that is a CAPABILITY: the largest reply
-  // this plugin has watched the model actually produce. It exists for exactly
-  // one model, and that is the honest state of the question.
-  "mimo-v2.6-flash-free": { declared: 32000, budget: 1040384, observed: 40000 },
-  "big-pickle": { declared: 32000, budget: 128000 },
-  "fledge-alpha-free": { declared: 131072, budget: 1040384 },
-  "longcat-2.5-preview-free": { declared: 131072, budget: 262144 },
-  "muse-spark-1.2-contributor-free": { declared: 131072, budget: 1040384 },
-  "muse-spark-1.3-contributor-free": { declared: 131072, budget: 1040384 },
-  "nemotron-3-ultra-free": { declared: 128000, budget: 991808 },
-  "nemotron-3.5-lightning-free": { declared: 262144, budget: 991808 },
+const SEED_OUTPUT: Readonly<Record<string, { readonly declared: number; readonly observed: number }>> = {
+  // DELIVERY evidence only. One model, because one generation has been watched.
+  //
+  // The 2026-10-07 acceptance sweep (every route taking `max_tokens` from 8 up to
+  // 1,040,384) is deliberately NOT here. It proved the route enforces the field —
+  // which is why a declaration that is too low really does cut a reply — but an
+  // accepted budget is not a thing any model was seen to write, and shipping it
+  // as one is the mistake this table was corrected for (ADR 0004 §44).
+  "mimo-v2.6-flash-free": { declared: 32000, observed: 40000 },
 };
 
 /**
@@ -2175,12 +2158,19 @@ export function observedOutputFor(
 }
 
 /**
- * The output ceiling to advertise for one model: the measured one when this exact
- * declaration was the one measured against, the declaration otherwise.
+ * The `max_tokens` budget to send: models.dev's declaration, raised only where a
+ * generation has been WATCHED reaching past it.
+ *
+ * The rule, in one line: **only delivery evidence moves this field.** An accepted
+ * budget does not, a refusal does not, and "the route would probably take more"
+ * does not — because none of those is a thing the model was seen to write, and a
+ * number this plugin cannot point at an observation for is a number it is making
+ * up. One model has such an observation today, and one model is therefore the one
+ * whose budget differs from its declaration.
  *
  * `window` is the window this plugin advertises for the same model, passed in
- * rather than read so the two numbers cannot disagree — a ceiling above the
- * context is unreachable by construction and would only look like a bigger one.
+ * rather than read so the two numbers cannot disagree — a budget above the
+ * context it has to fit in is unreachable by construction.
  */
 export function maxTokensFor(
   record: CatalogRecord,
@@ -2191,7 +2181,7 @@ export function maxTokensFor(
   if (declared === undefined) return declared;
   const seed = SEED_OUTPUT[id];
   if (seed === undefined || seed.declared !== declared) return declared;
-  const bounded = window === undefined ? seed.budget : Math.min(seed.budget, window);
+  const bounded = window === undefined ? seed.observed : Math.min(seed.observed, window);
   return bounded > declared ? bounded : declared;
 }
 

@@ -930,9 +930,9 @@ test('a derived record carries all four capabilities from models.dev', () => {
   const pickle = candidates.find((m) => m.id === 'big-pickle')
   assert.deepEqual(pickle.input, ['text'], 'text-only stays text-only')
   assert.equal(pickle.contextWindow, 200000)
-  // `limit.output` says 32000 and the route accepted 128000 (measured
-  // 2026-10-07), so the declaration is not what ships — see the guard below.
-  assert.equal(pickle.maxTokens, 128000)
+  // `limit.output` says 32000 and nothing has been WATCHED past it, so the
+  // declaration ships unchanged — see the guard below for the one model that has.
+  assert.equal(pickle.maxTokens, 32000)
   // A record that publishes NOTHING falls back to the template for the identity
   // and transport fields, but NOT for capability claims. `input` and `reasoning`
   // describe what the model can do; inheriting them from another model answers
@@ -2262,26 +2262,18 @@ test('GUARD: a measured context window is used, and a changed declaration discar
   );
 })
 
-test('GUARD: a measured output ceiling is used, and it never exceeds the advertised window', async () => {
-  // `limit.output` is the other half of the same declaration, and it is not
-  // decoration: pi-ai sends `options.maxTokens ?? model.maxTokens` and DSH sends
-  // no maxTokens for this provider, so this number IS where every reply is cut.
-  // When it is too low the reply just stops — `finish_reason: "length"`, no
-  // error, no row in the panel.
+test('GUARD: the output budget follows models.dev unless a generation was WATCHED past it', async () => {
+  // `limit.output` reaches the wire as `max_tokens`, and the route enforces it —
+  // asked for 8 with a prompt that wanted thousands, six models returned exactly
+  // 8 with `finish_reason: "length"` (measured 2026-10-07). So a declaration that
+  // is too low really does cut a reply, silently, at `finish_reason: "length"`.
   //
-  // Measured 2026-10-07 on the live set, one request per step with a one-word
-  // prompt so the ask decides only the CEILING, reading the number off the
-  // outgoing body:
-  //
-  //   mimo-v2.6-flash-free    declared   32000   accepted 1040384
-  //   fledge-alpha-free       declared  131072   accepted 1040384 (twice)
-  //   muse-spark-1.2/1.3      declared  131072   accepted 1040384
-  //   nemotron-3-ultra        declared  128000   accepted  991808 (on the rerun)
-  //   nemotron-3.5-lightning  declared  262144   accepted  991808
-  //   longcat-2.5-preview     declared  131072   accepted 262144, refused 393216
-  //   big-pickle              declared   32000   accepted  128000
-  //   space-bunny-free        declared  524288   accepted  524288  <- right
-  //   ling-3.1 / ling-3.0     declared   32768   nothing learned (429, endpoint down)
+  // But acceptance is a fact about the REQUEST. The same day every route accepted
+  // budgets up to 1,040,384, and no model was ever seen writing anything like it.
+  // Shipping those as "maximum output" is the mistake the operator caught (ADR
+  // 0004 §43) and this is the rule that replaces it: **only delivery evidence
+  // moves this field.** One model has such an observation, so one model's budget
+  // differs from its declaration, and the other six follow models.dev exactly.
   const section = (output) => ({
     'mimo-v2.6-flash-free': { ...modelsDict()['space-bunny-free'], id: 'mimo-v2.6-flash-free', name: 'Mimo', limit: { context: 200000, output } },
     'space-bunny-free': { ...modelsDict()['space-bunny-free'], id: 'space-bunny-free', name: 'Space Bunny', limit: { context: 1048576, output: 524288 } },
@@ -2294,43 +2286,39 @@ test('GUARD: a measured output ceiling is used, and it never exceeds the adverti
       .candidates.find((m) => m.id === id)
   }
 
-  const mimo = built('mimo-v2.6-flash-free', 32000)
-  assert.equal(mimo.maxTokens, 1040384, 'the measured BUDGET replaces a declaration 32x too low')
-  // The budget is not a capability claim, and the two are carried separately:
-  // 1040384 is what the route will take, 40000 is what the model was watched
-  // producing. Asserting them apart is what stops the first from being read as
-  // the second — the mistake this test exists for.
-  assert.equal(observedOutputFor(section(32000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 1040384), 40000)
+  // Watched producing 40,000 at a declared 32,000: the budget follows the
+  // observation, because that is the only evidence that exists.
+  assert.equal(built('mimo-v2.6-flash-free', 32000).maxTokens, 40000, 'a watched generation raises the budget')
   assert.equal(
-    observedOutputFor(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 1040384),
-    undefined,
-    'a changed declaration discards the observation too — it was measured about something else',
-  )
-  assert.equal(
-    observedOutputFor(section(32000)['space-bunny-free'], 'space-bunny-free', 524288),
-    undefined,
-    'no generation has been watched for this model, so there is nothing to claim',
-  )
-  assert.equal(mimo.contextWindow, 1048576, 'and the window it is bounded by is the measured one')
-  assert.ok(
-    mimo.maxTokens <= mimo.contextWindow,
-    'an output ceiling above the context it must fit inside is unreachable, not bigger',
+    built('longcat-2.5-preview-free', 131072).maxTokens,
+    131072,
+    "a route that ACCEPTED 262144 — with no generation watched — keeps models.dev's number",
   )
   assert.equal(
     built('space-bunny-free', 524288).maxTokens,
     524288,
-    'a model whose declaration measured right keeps it — the table is evidence, not a rule',
-  )
-  assert.equal(
-    built('longcat-2.5-preview-free', 131072).maxTokens,
-    262144,
-    'a measured REFUSAL bounds the raise from above: the largest budget the route accepted',
+    'and so does one whose declaration happens to be right',
   )
   assert.equal(
     built('mimo-v2.6-flash-free', 64000).maxTokens,
     64000,
-    'a CHANGED declaration discards the seed rather than keeping a number measured about something else',
+    'a CHANGED declaration discards the observation — it was watched about something else',
   )
+  // The observation is reported separately and only where it exists, so the row
+  // can never present a budget as something the model was seen to write.
+  assert.equal(observedOutputFor(section(32000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 40000), 40000)
+  assert.equal(
+    observedOutputFor(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 64000),
+    undefined,
+    'a changed declaration discards the observation too',
+  )
+  assert.equal(
+    observedOutputFor(section(131072)['longcat-2.5-preview-free'], 'longcat-2.5-preview-free', 131072),
+    undefined,
+    'no generation has been watched for this model, so there is nothing to claim',
+  )
+  const mimo = built('mimo-v2.6-flash-free', 32000)
+  assert.ok(mimo.maxTokens <= mimo.contextWindow, 'a budget above the context it must fit inside is unreachable')
 })
 
 test('GUARD: a round counts models, and a row reports what it learned about one', async () => {
