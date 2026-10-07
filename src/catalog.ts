@@ -3222,7 +3222,13 @@ export async function runProbeRound(
       // One row and one tally tick per MODEL, however many samples it takes.
       let okShots = 0;
       let elapsedTotal = 0;
+      // Requests spent on THIS model. `state.probeRun.requests` is the round's
+      // total, and comparing that against the per-model budget silently stopped
+      // asking the ceiling and capability questions after the round had spent
+      // nine requests anywhere — four models in, seven never heard the question.
+      let shots = 0;
       for (let shot = 1; shot <= samplesPerModel; shot += 1) {
+      shots += 1;
       state.probeRun.requests += 1;
       state.probeRun.current = model.id;
       const started = deps.now();
@@ -3522,10 +3528,11 @@ export async function runProbeRound(
       // anything this conversation could ask for.
       if (state.probes[model.id]?.limits === undefined) {
         for (const _attempt of [0]) {
-          if (state.probeRun.requests >= samplesPerModel) break;
+          if (shots >= samplesPerModel) break;
           if (state.probes[model.id]?.verdict !== "ok") break;
           const recordCeil = rawById(model.id);
           if (recordCeil === undefined) break;
+          shots += 1;
           state.probeRun.requests += 1;
           try {
             const ceilingOutcome = await probe!(model, "ceiling");
@@ -3542,7 +3549,14 @@ export async function runProbeRound(
                   : {
                       ...(stated.output === undefined ? {} : { output: stated.output }),
                       ...(stated.context === undefined ? {} : { context: stated.context }),
-                      fp: capabilityFingerprint(recordCeil),
+                      // `contextFingerprint`, NOT `capabilityFingerprint`: the two
+                      // are different strings ("1000000:131072" versus
+                      // "1000000:131072:text+image") and the check on the way
+                      // back in compares against this one. Storing the other meant
+                      // every harvested ceiling was silently dropped, and the
+                      // number in the panel came from the seed table instead —
+                      // which looks exactly like the mechanism working.
+                      fp: contextFingerprint(recordCeil),
                       at: deps.now(),
                     },
             };
@@ -3562,10 +3576,12 @@ export async function runProbeRound(
         }
       }
       for (const axis of axisQuestions) {
-        if (state.probeRun.requests >= samplesPerModel) break;
+        if (shots >= samplesPerModel) break;
         if (state.probes[model.id]?.verdict !== "ok") break;
+        if (shots >= samplesPerModel) break;
         const record1 = rawById(model.id);
         if (record1 === undefined) break;
+        shots += 1;
         state.probeRun.requests += 1;
         const askedAt = deps.now();
         try {

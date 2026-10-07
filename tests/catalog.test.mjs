@@ -5001,3 +5001,58 @@ test('GUARD: a capability question that taught nothing is not a verdict', async 
     assert.equal(card.contextWindow, 200000, 'the template floor still ships, unchanged by a failed measurement')
   })
 })
+
+test('GUARD: every model is asked for its ceiling, not only the first few', async () => {
+  // The round-wide request counter was compared against the PER-MODEL budget, so
+  // once the round had spent nine requests anywhere the ceiling and capability
+  // questions were skipped for the rest of the list — four models heard the
+  // question and seven did not, which looks exactly like "those routes state
+  // nothing" unless you read the counter. Live 2026-10-07: `longcat-2.5-preview-free`
+  // harvested its own 262,144 in that first batch and nobody else was asked.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const ids = SERVED
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBody() }),
+      probe: async (model, question) => {
+        asked.push(`${model.id}:${question ?? 'baseline'}`);
+        if (question === 'ceiling') return { kind: 'inconclusive', code: 'error', http: 400, reason: 'stub', ceilings: { output: 262144 } };
+        if (typeof question === 'string' && question.startsWith('capability:')) return { kind: 'ok', api: 'openai-completions', capability: { axis: question.slice(11), ok: true, detail: 'stub' } };
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };
+      },
+      listZenIds: async () => ids,
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    for (const id of ids) {
+      assert.ok(
+        asked.includes(`${id}:ceiling`),
+        `${id} was asked for its ceiling — every model gets the question, not the first four`,
+      );
+    }
+    // And the answer has to be USABLE: a stated ceiling must reach the advertised
+    // budget, which is the half that was silently broken by storing one
+    // fingerprint and checking another.
+    for (const id of ids) {
+      const record = await readProbeRecord(join(dir, 'catalog.json'), id);
+      assert.equal(record.limits?.output, 262144, `${id} recorded what the route named`);
+      assert.equal(typeof record.limits?.fp, 'string');
+      assert.ok(record.limits.fp !== '', 'and the fingerprint is the one the catalogue checks');
+    }
+    const card = catalog.current().capabilities.find((c) => c.id === 'muse-spark-1.3-contributor-free');
+    assert.equal(card.outputBudget, 262144, 'a harvested ceiling reaches the advertised budget')
+    assert.equal(card.stated?.output, 262144, 'and reaches the panel as the interval it is')
+    // …bounded by the window it has to fit inside, which is the other half of
+    // the rule and just as load-bearing: big-pickle declares a 200,000 window, so
+    // a 262,144 output ceiling is not reachable and the budget stops there.
+    const capped = catalog.current().capabilities.find((c) => c.id === 'big-pickle');
+    assert.equal(capped.outputBudget, 200000, 'and never exceeds the window it must fit in')
+    assert.equal(capped.stated?.output, 262144, 'while the panel still shows what the route said');
+  })
+})
