@@ -132,6 +132,7 @@ window.__ModuleLoader__.load({
 			"caps.detailTruncated": "真实回答被预算截断 {count} 次",
 			"caps.truncated": "被预算截断",
 			"caps.truncatedTitle": "真实会话中被 max_tokens 拦腰截断的次数（免费）",
+			"caps.firstToken": "首字约 {ms}ms",
 			"caps.statedTitle": "上游在拒绝正文里说出的它自己的上限",
 			"caps.observedTitle": "本插件实际看这个模型写出过的最长回答",
 			"caps.declared": "声明",
@@ -215,6 +216,7 @@ window.__ModuleLoader__.load({
 			"caps.detailObserved": "observed ≥{value}",
 			"caps.detailTruncated": "real replies cut off at the budget: {count}",
 			"caps.truncated": "cut off",
+			"caps.firstToken": "first token ~{ms}ms",
 			"caps.truncatedTitle": "times a real reply was cut off at max_tokens (free)",
 			"caps.statedTitle": "the ceiling the upstream stated about itself in a refusal",
 			"caps.observedTitle": "the longest reply this plugin has watched this model produce",
@@ -585,6 +587,7 @@ window.__ModuleLoader__.load({
 						observedOutput: typeof card.observedOutput === "number" && isFinite(card.observedOutput) ? card.observedOutput : null,
 						declaredContext: typeof card.declaredContext === "number" && isFinite(card.declaredContext) ? card.declaredContext : null,
 						declaredOutput: typeof card.declaredOutput === "number" && isFinite(card.declaredOutput) ? card.declaredOutput : null,
+						firstTokenMs: typeof card.firstTokenMs === "number" && isFinite(card.firstTokenMs) ? card.firstTokenMs : null,
 						evidence: {
 							context: typeof ev.context === "string" ? ev.context : "none",
 							output: typeof ev.output === "string" ? ev.output : "none",
@@ -1386,9 +1389,20 @@ window.__ModuleLoader__.load({
 						: "unprobed";
 					if (status === "ok") {
 						var ms = typeof verdict.ms === "number" && isFinite(verdict.ms) ? Math.max(0, Math.round(verdict.ms)) : null;
-						left.push(E("span", { key: "probe", className: "opf-probe opf-probe-ok" },
+						// Total latency alone cannot tell a model that is slow to
+						// START from one that simply writes a lot, and those feel
+						// completely different to wait for.
+						var ftft = card !== null && card.firstTokenMs !== null
+							? t("caps.firstToken", { ms: String(card.firstTokenMs) })
+							: "";
+						left.push(E("span", {
+							key: "probe",
+							className: "opf-probe opf-probe-ok",
+							title: ftft === "" ? undefined : ftft
+						},
 							checkIcon(),
-							E("span", { className: "opf-probe-ms" }, ms === null ? "" : ms + "ms")));
+							E("span", { className: "opf-probe-ms" }, ms === null ? "" : ms + "ms"),
+							ftft === "" ? null : E("span", { key: "ftft", className: "opf-probe-ms" }, " · " + ftft)));
 					} else if (status === "failed") {
 						if (CALLER_CODES[verdict.code] === true) {
 							/* Grey, never red: the round learned nothing about

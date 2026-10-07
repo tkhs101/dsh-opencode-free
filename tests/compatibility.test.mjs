@@ -21,6 +21,7 @@ import {
   PROBE_MAX_TOKENS,
   patchNodeHttpForZen,
   probeModel,
+  zenProvider,
   selfReportedLevels,
   ZEN_FAILURE_GUIDANCE,
   freeModels,
@@ -1933,4 +1934,60 @@ test('GUARD: a harvested ceiling survives a restart and dies with its declaratio
   assert.equal(maxTokensFor(record, 'longcat-2.5-preview-free', 1000000, { ...stated, fp: '9:9:text' }), 262144, 'falls back to the seed, which is keyed on the same declaration')
   assert.equal(maxTokensFor({ ...record, limit: { context: 1000000, output: 200000 } }, 'longcat-2.5-preview-free', 1000000, stated), 200000, 'a changed declaration discards the statement AND the seed')
   assert.ok(maxTokensFor(record, 'longcat-2.5-preview-free', 1000000, { output: 999999999, fp, at: 1 }) <= 1000000, 'and it can never exceed the window it has to fit inside')
+})
+
+test('GUARD: a real reply is observed through the ITERATOR, not only through result()', async () => {
+  // The fifth instance of the shape this repository keeps meeting, and the worst
+  // one: an observation that worked in every test and in every probe, and fired
+  // in no conversation. dsh-llm-pi-ai's `toStreamChunks` does
+  // `for await (const event of events)` and never calls `result()`, so the
+  // wrapper that carried the clamp observation, the truncation counter and the
+  // first-token timing sat on a method the host does not call. Everything the
+  // plugin claims to know about REAL traffic was measured on nothing.
+  //
+  // Driven through the public provider, because the wrapper is a nested helper
+  // inside `zenProvider` and testing it directly would test a thing the host
+  // never touches.
+  const seen = [];
+  const seedProvider = zenProvider(() => 'seed', () => undefined)
+  const seedModels = seedProvider.getModels()
+  const catalog = {
+    // `zenProvider` reads the catalogue to build its baseline, so the stub has to
+    // answer that much — a fake that only implements the two observers would be
+    // testing a provider that cannot start.
+    current: () => ({ models: seedModels, visible: seedModels.map((m) => m.id) }),
+    effectiveModels: () => seedModels,
+    observeClamp: (id, observation) => seen.push(['clamp', id, observation]),
+    observeFirstToken: (id, ms) => seen.push(['ftft', id, ms]),
+  };
+  const SEPARATOR = String.fromCharCode(10, 10)
+  const sse = [
+    'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":40,"total_tokens":50}}',
+    'data: [DONE]',
+    '',
+  ].join(SEPARATOR)
+  const provider = zenProvider(() => 'probe-session', () => undefined, { catalog })
+  const model = provider.getModels().find((m) => m.api === 'openai-completions')
+  const stream = provider.streamSimple(
+    model,
+    { messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }] },
+    {
+      apiKey: 'public',
+      maxTokens: 64,
+      reasoning: 'low',
+      maxRetries: 0,
+      fetch: async () => new Response(sse, { headers: { 'Content-Type': 'text/event-stream' } }),
+    },
+  )
+  const events = []
+  for await (const event of stream) events.push(event.type)
+  assert.ok(events.includes('done'), 'the iterator passes every event through untouched')
+  const clamps = seen.filter(([kind]) => kind === 'clamp')
+  const timings = seen.filter(([kind]) => kind === 'ftft')
+  assert.equal(clamps.length, 1, 'one observation from the path a conversation actually takes')
+  assert.equal(clamps[0][2].truncated, true, 'a reply cut on the budget is recognised')
+  assert.equal(clamps[0][2].starved, false, 'and not mistaken for a starved one — it did answer')
+  assert.equal(timings.length, 1, 'the first token was timed')
+  assert.ok(timings[0][2] >= 0, 'with a real elapsed measurement')
 })

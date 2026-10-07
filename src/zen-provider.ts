@@ -1874,6 +1874,16 @@ export interface RequestOutcome {
   stopReason?: string | undefined;
   /** Whether any usable content came back. */
   answered?: boolean;
+  /** Output tokens the upstream reported for this request. */
+  outputTokens?: number | undefined;
+  /**
+   * Milliseconds from sending to the FIRST stream event.
+   *
+   * The latency a person actually feels. Total latency mixes it with how long the
+   * model chose to write, and a slow start followed by a fast answer is not a
+   * slow model — which is the difference that decides whether you keep using it.
+   */
+  firstTokenMs?: number | undefined;
 }
 
 function compatRequestOptions<T extends StreamOptions>(
@@ -2608,7 +2618,7 @@ export function zenProvider(
  * — a clamp observation that acted on a merely-thinking reply would raise a
  * window for a request that was never starved.
  */
-function reportClamp<S extends { result(): Promise<{ stopReason?: unknown; content?: unknown }> }>(
+function observeFinishedRequest<S extends { result(): Promise<{ stopReason?: unknown; content?: unknown }> }>(
   model: Model<Api>,
   catalog: Catalog | null,
   processed: unknown,
@@ -2618,16 +2628,25 @@ function reportClamp<S extends { result(): Promise<{ stopReason?: unknown; conte
   const outcome = requestOutcomeOf(processed);
   if (outcome === undefined) return stream;
   const original = stream.result.bind(stream);
+  const startedAt = Date.now();
   let reported = false;
-  // Wrapped in place rather than re-wrapped: the host holds this object and may
-  // read other members of it, so replacing it with a narrower one would be a
-  // silent capability loss of the same kind this whole change set removes.
-  stream.result = async () => {
-    const result = await original();
-    if (reported) return result;
+  // ONE report, from whichever API the caller used. This used to hang off
+  // `result()` alone — and the host never calls it: dsh-llm-pi-ai's
+  // `toStreamChunks` does `for await (const event of events)`, so every
+  // production reply went past this wrapper and the clamp observation, the
+  // truncation counter and the first-token timing were all measured on nothing.
+  // A probe calls `result()`; a conversation iterates. Both must report, once.
+  const report = (result: {
+    stopReason?: unknown;
+    content?: unknown;
+    usage?: { output?: unknown; output_tokens?: unknown };
+  }): void => {
+    if (reported) return;
     reported = true;
     outcome.stopReason = typeof result.stopReason === "string" ? result.stopReason : undefined;
     outcome.answered = hasAnswer(result);
+    const output = result.usage?.output ?? result.usage?.output_tokens;
+    outcome.outputTokens = typeof output === "number" && Number.isFinite(output) ? output : undefined;
     catalog.observeClamp(model.id, {
       emitted: outcome.clampEmitted,
       // A reasoning model can spend its whole budget thinking and still count as
@@ -2640,8 +2659,53 @@ function reportClamp<S extends { result(): Promise<{ stopReason?: unknown; conte
       // budget binds in real use, and it rides on this request either way.
       truncated: outcome.stopReason === "length" && outcome.answered === true,
     });
+    if (typeof outcome.firstTokenMs === "number") catalog.observeFirstToken(model.id, outcome.firstTokenMs);
+  };
+  // Wrapped in place rather than re-wrapped: the host holds this object and may
+  // read other members of it, so replacing it with a narrower one would be a
+  // silent capability loss of the same kind this whole change set removes.
+  stream.result = async () => {
+    const result = await original();
+    report(result as { stopReason?: unknown; content?: unknown });
     return result;
   };
+  // The path a real conversation takes. Wrapped rather than replaced, and the
+  // events pass through untouched: the host iterates for its chunks and calls
+  // nothing else, so an observer attached to `result()` observes nothing at all.
+  const iterable = stream as unknown as Record<symbol, unknown>;
+  const originalIterator = (stream as unknown as Record<symbol, unknown>)[Symbol.asyncIterator] as
+    | (() => AsyncIterable<unknown>)
+    | undefined;
+  if (typeof originalIterator === "function") {
+    iterable[Symbol.asyncIterator] = async function* (this: unknown): AsyncGenerator<unknown> {
+      const inner = originalIterator.call(this ?? stream) as AsyncIterable<unknown>;
+      let first = true;
+      for await (const event of inner) {
+        if (first) {
+          first = false;
+          outcome.firstTokenMs = Date.now() - startedAt;
+        }
+        if (event !== null && typeof event === "object") {
+          const typed = event as {
+            type?: string;
+            reason?: string;
+            message?: { stopReason?: unknown; content?: unknown; usage?: { output?: unknown; output_tokens?: unknown } };
+          };
+          if (typed.type === "done") {
+            report({
+              stopReason: typed.reason ?? typed.message?.stopReason,
+              content: typed.message?.content,
+              usage: typed.message?.usage,
+            });
+          } else if (typed.type === "error") {
+            report({ stopReason: typed.reason ?? "error", content: [] });
+          }
+        }
+        yield event;
+      }
+      if (first) outcome.firstTokenMs = Date.now() - startedAt;
+    };
+  }
   return stream;
 }
 
@@ -2656,6 +2720,16 @@ function requestOptions<T extends StreamOptions>(
     // the result, so neither is reachable from the catalogue alone.
     const outcome: RequestOutcome = {};
     const processed = compatRequestOptions(options, getSessionId, fallbackSession, recorder, outcome);
+    // Without this line the outcome is created, filled by the payload hook, read by
+    // the stream wrapper — and never FOUND, because the only way to find it is a
+    // lookup keyed by the processed options. `attachOutcome` shipped WITH the clamp
+    // mechanism on 2026-10-06 and had no call site in that first commit, so
+    // `requestOutcomeOf` returned undefined and every observation on a real request
+    // returned early: no clamp signature, no truncation count, no first-token
+    // timing. All of it measured nothing, silently, while every test that exercised
+    // the catalogue directly kept passing — which is how a mechanism can be
+    // complete, documented and dead at the same time.
+    attachOutcome(processed, outcome);
     debugLog(
       `${identitySummary(new Headers(processed.headers as HeadersInit | undefined), "provider")} ${shapeSummary(context, options)}`,
     );
@@ -2704,7 +2778,7 @@ function requestOptions<T extends StreamOptions>(
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(toTranscript(context), key), key);
       const { processed, recorder, outcome } = requestOptions(options, gate.context);
-      return reportClamp(
+      return observeFinishedRequest(
         model,
         catalog,
         processed,
@@ -2715,7 +2789,7 @@ function requestOptions<T extends StreamOptions>(
       const key = (options as { apiKey?: unknown } | undefined)?.apiKey;
       const gate = applyAnonymousToolGate(swapCompactionPrompt(toTranscript(context), key), key);
       const { processed, recorder, outcome } = requestOptions(options, gate.context);
-      return reportClamp(
+      return observeFinishedRequest(
         model,
         catalog,
         processed,

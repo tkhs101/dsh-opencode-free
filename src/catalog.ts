@@ -1177,6 +1177,16 @@ export interface ProbeRecord {
    * free.
    */
   readonly budgetHits?: { readonly output?: number; readonly context?: number; readonly at?: number };
+  /**
+   * Milliseconds to the FIRST stream event on a real reply, newest first.
+   *
+   * Total latency says how long the model took to finish; this says how long you
+   * waited before it started. A model that thinks for four seconds and then
+   * answers in one is not slow to use — it is slow to start — and the panel can
+   * only say that if it measured the two separately. Free: the transport sees
+   * the first event on a request that was being made anyway.
+   */
+  readonly firstTokenMs?: readonly number[];
 }
 
 export type ProbeMap = Record<string, ProbeRecord>;
@@ -1440,6 +1450,9 @@ function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string
       // treating silence as a ceiling.
       ...(isMeasuredLimits(entry.limits) ? { limits: entry.limits } : {}),
       ...(readBudgetHits(entry.budgetHits) === undefined ? {} : { budgetHits: readBudgetHits(entry.budgetHits) }),
+      ...(Array.isArray(entry.firstTokenMs)
+        ? { firstTokenMs: entry.firstTokenMs.filter((n) => typeof n === "number" && Number.isFinite(n) && n >= 0).slice(0, 5) }
+        : {}),
       ...(Array.isArray(entry.selfReported)
         ? { selfReported: entry.selfReported.filter((level): level is string => typeof level === "string") }
         : {}),
@@ -1822,6 +1835,8 @@ export interface ModelCapability {
    * bought nothing, and the honest thing to say is that.
    */
   readonly truncated?: { readonly output?: number; readonly context?: number };
+  /** Median first-token latency over real replies, when any were recorded. */
+  readonly firstTokenMs?: number;
   /** Per axis: was this verified on the route, or copied from a declaration? */
   /**
    * Where each number on this row COMES FROM — which is not the same question as
@@ -1977,6 +1992,14 @@ export function contextEvidenceFor(
   return measured.source === "inferred" ? "inferred" : "route";
 }
 
+/** The median of a newest-first sample list, or undefined when there is none. */
+function firstTokenMedian(samples: readonly number[] | undefined): number | undefined {
+  if (samples === undefined || samples.length === 0) return undefined;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
 /** Project one effective record to the panel's capability card. */
 export function modelCapability(
   model: Model<Api>,
@@ -1992,6 +2015,8 @@ export function modelCapability(
     readonly budgetHits?: ProbeRecord["budgetHits"];
     /** Wall clock, so a verdict older than the TTL reads as unmeasured. */
     readonly now?: number;
+    /** Newest-first first-token samples from real replies. */
+    readonly firstTokenMs?: readonly number[] | undefined;
   },
 ): ModelCapability {
   const record = context?.record;
@@ -2036,6 +2061,11 @@ export function modelCapability(
             ...(context.budgetHits.context === undefined || context.budgetHits.context === 0 ? {} : { context: context.budgetHits.context }),
           },
         }),
+    // Median of the last few first-token samples: one cold request should not
+    // become a model's reputation, and a stale entry ages out on its own.
+    ...(firstTokenMedian(context?.firstTokenMs) === undefined
+      ? {}
+      : { firstTokenMs: firstTokenMedian(context?.firstTokenMs) }),
     evidence: {
       context: contextEvidenceFor(record, model.contextWindow, context?.measured),
       output: outputEvidenceFor(record, model.id, model.maxTokens, limits),
@@ -2736,6 +2766,14 @@ export interface Catalog {
    * rather than capability.
    */
   observeClamp(id: string, observation: ClampObservation): void;
+  /**
+   * Record how long this model's real replies took to produce their first token.
+   *
+   * Separate from {@link observeClamp} because it is a measurement, not a
+   * verdict: nothing branches on it, and the newest sample is kept alongside the
+   * last few so the panel can show a median instead of one unlucky request.
+   */
+  observeFirstToken(id: string, ms: number): void;
 }
 
 /**
@@ -4157,6 +4195,22 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       });
   }
 
+  function observeFirstToken(id: string, ms: number): void {
+    const record = state.probes[id];
+    const previous = record?.firstTokenMs ?? [];
+    state.probes = {
+      ...state.probes,
+      [id]: {
+        ...(record ?? { verdict: "ok", at: now() }),
+        // Newest first, five deep: enough to stop one cold request from becoming
+        // the model's reputation, and small enough that a stale entry expires on
+        // its own within a normal week of use.
+        firstTokenMs: [ms, ...previous].slice(0, 5),
+      },
+    };
+    persistCache();
+  }
+
   function observeClamp(id: string, observation: ClampObservation): void {
     const model = state.models.find((m) => m.id === id);
     if (model === undefined) return;
@@ -4220,6 +4274,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
 
   return {
     observeClamp,
+    observeFirstToken,
     current(): CatalogSnapshot {
       // One pass over the single effective list feeds both `visible` and
       // `capabilities`, so the ids and the cards can never disagree.
@@ -4257,6 +4312,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
             measuredEffort: efforts.get(model.id),
             limits: harvested.get(model.id),
             budgetHits: state.probes[model.id]?.budgetHits,
+            firstTokenMs: state.probes[model.id]?.firstTokenMs,
             now: Date.now(),
           });
         }),
