@@ -1445,9 +1445,10 @@ function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
       ...(readCapabilities(entry.capabilities) === undefined ? {} : { capabilities: readCapabilities(entry.capabilities) }),
       // A `fp: ""` entry is the recorded fact that the route named nothing when
-      // it was asked, and it is deliberately NOT read back as a measurement —
-      // `isMeasuredLimits` rejects it, so the next round asks again rather than
-      // treating silence as a ceiling.
+      // it was asked. It IS read back, so a restart does not re-ask, but it can
+      // never become a measurement: an empty fingerprint matches no
+      // `contextFingerprint`, so every ceiling check skips it, and the panel
+      // projection checks the empty string separately.
       ...(isMeasuredLimits(entry.limits) ? { limits: entry.limits } : {}),
       ...(readBudgetHits(entry.budgetHits) === undefined ? {} : { budgetHits: readBudgetHits(entry.budgetHits) }),
       ...(Array.isArray(entry.firstTokenMs)
@@ -2277,11 +2278,21 @@ function readBudgetHits(value: unknown): ProbeRecord["budgetHits"] | undefined {
   };
 }
 
-/** Defensive read of harvested ceilings; a partial one is no measurement. */
+/**
+ * Defensive read of harvested ceilings; a partial one is no measurement.
+ *
+ * A DATED silence is kept: "asked at T, the route named nothing" is a real fact
+ * about the route, and it is the only thing that stops the next round from
+ * paying for the same question again. It can never become a measurement — an
+ * empty fingerprint matches no `contextFingerprint`, so every consumer that
+ * applies a ceiling skips it — and the projection checks the empty string
+ * separately so it never reaches the panel as a number.
+ */
 export function isMeasuredLimits(value: unknown): value is MeasuredLimits {
   if (!isPlainObject(value)) return false;
-  if (typeof value.fp !== "string" || value.fp === "") return false;
+  if (typeof value.fp !== "string") return false;
   if (typeof value.at !== "number" || !Number.isFinite(value.at)) return false;
+  if (value.fp === "") return value.at > 0;
   const output = value.output;
   const context = value.context;
   const ok = (n: unknown): boolean => n === undefined || (typeof n === "number" && Number.isFinite(n) && n > 0);
@@ -3052,6 +3063,18 @@ export function probeRowFor(
  * re-published can come back at all.
  */
 export const DEAD_RECHECK_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * How long "asked, and the route named nothing" is worth keeping.
+ *
+ * A round used to ask every model for its ceiling and then DROP the silence on
+ * the next warm start, so every restart of DSH spent a request per model
+ * re-asking a question whose answer has been silence 10 times out of 11 — on a
+ * shared anonymous bucket, where the route's silence does not change because the
+ * process restarted. A day is long enough to catch an upstream that starts
+ * declaring a ceiling, and short enough that the daily round still means daily.
+ */
+export const CEILING_SILENCE_TTL_MS = 24 * 60 * 60_000;
 
 function isSettled(id: string, probes: ProbeMap, now: number): boolean {
   const record = probes[id];
@@ -3853,13 +3876,19 @@ export async function runProbeRound(
       // `longcat-2.5-preview-free` had been sitting in exactly that state, its
       // budget coming from the seed table while the panel showed no `stated`.
       //
-      // `fp: ""` is deliberately exempt: that is the record of "asked, and the
-      // route named nothing", and this session has already asked. It is dropped
-      // on the next warm start, so a new session asks again.
+      // `fp: ""` is the record of "asked, and the route named nothing". It is
+      // worth keeping for {@link CEILING_SILENCE_TTL_MS} — long enough that a
+      // restart does not re-pay for a question already answered in silence, short
+      // enough that an upstream which starts declaring a ceiling is noticed
+      // within a day.
       const storedLimits = state.probes[model.id]?.limits;
       const ceilingApplies =
         storedLimits !== undefined && storedLimits.fp !== "" && rawById(model.id) !== undefined && storedLimits.fp === contextFingerprint(rawById(model.id)!);
-      const ceilingAnswered = storedLimits !== undefined && storedLimits.fp === "";
+      const ceilingAnswered =
+        storedLimits !== undefined &&
+        storedLimits.fp === "" &&
+        storedLimits.at > 0 &&
+        deps.now() - storedLimits.at < CEILING_SILENCE_TTL_MS;
       if (storedLimits === undefined || (!ceilingApplies && !ceilingAnswered)) {
         for (const _attempt of [0]) {
           if (capabilityShots >= CAPABILITY_SAMPLE_BUDGET) break;
@@ -3878,8 +3907,10 @@ export async function runProbeRound(
               // no more" is what stops the next round from asking again, and it
               // is the honest state of a route that enforces nothing.
               limits:
+                // Dated, so it survives a warm start and the next round can
+                // tell "asked an hour ago" from "asked last week".
                 stated === undefined
-                  ? { fp: "", at: 0 }
+                  ? { fp: "", at: deps.now() }
                   : {
                       ...(stated.output === undefined ? {} : { output: stated.output }),
                       ...(stated.context === undefined ? {} : { context: stated.context }),

@@ -42,6 +42,8 @@ import {
   observedOutputIsStale,
   contextEvidenceFor,
   seededContextFor,
+  CEILING_SILENCE_TTL_MS,
+  isMeasuredLimits,
   DEAD_RECHECK_MS,
   CAPABILITY_TTL_MS,
   capabilityFingerprint,
@@ -5300,4 +5302,45 @@ test('GUARD: a swept death expires, and a stale capability verdict is asked agai
   const applied = seededContextFor(moved, 'mimo-v2.6-flash-free')
   assert.equal(applied?.source, 'inferred', 'a moved declaration turns first-party evidence into inferred')
   assert.equal(applied?.raisedTo, 1048576, 'and the number is still there — a typo fix must not erase it')
+})
+
+test('GUARD: a route that says nothing is asked once a day, not once a restart', async () => {
+  // Found live on 2026-10-07, right after the daily ceiling harvest went in: the
+  // round asked all eleven models for their ceiling and recorded "the route named
+  // nothing" as `fp: ""` with `at: 0` — and `isMeasuredLimits` rejected the empty
+  // fingerprint, so the record did not survive a warm start. Every restart of DSH
+  // would pay a request per model to hear the same silence, on a shared anonymous
+  // bucket, where a restart is not what changed the answer.
+  //
+  // A silence is now DATED and kept for a day. It still cannot become a
+  // measurement: an empty fingerprint matches no `contextFingerprint`, and the
+  // panel projection checks the empty string separately — so what changed is only
+  // whether the next round has to pay to hear it twice.
+  //
+  // Pinned here at the layer that decides it. The round-level path is covered by
+  // the ceiling-harvest tests above; this rule is a predicate and a clock, and
+  // testing it through a full round would have made the test depend on how many
+  // questions the effort axis happens to ask first.
+  assert.equal(CEILING_SILENCE_TTL_MS, 24 * 60 * 60_000, 'a day: long enough to survive a restart, short enough to still be daily')
+
+  const silence = { fp: '', at: 2_000_000 }
+  assert.equal(isMeasuredLimits(silence), true, 'a dated silence survives a warm start, so a restart does not re-ask')
+  assert.equal(isMeasuredLimits({ fp: '', at: 0 }), false, 'an undated one is not — it predates this rule and should be asked once more')
+
+  // What the round decides with it, spelled out because the arithmetic is the rule.
+  const stillWorthAsking = (stored, now) =>
+    stored !== undefined && stored.fp === '' && stored.at > 0 && now - stored.at < CEILING_SILENCE_TTL_MS
+  assert.equal(stillWorthAsking(silence, 2_000_000 + 60 * 60_000), true, 'an hour later: a restart pays nothing')
+  assert.equal(stillWorthAsking(silence, 2_000_000 + CEILING_SILENCE_TTL_MS), false, 'a day later: asked again, so an upstream that starts naming a ceiling is noticed')
+  assert.equal(stillWorthAsking(undefined, 2_000_000), false, 'and with nothing stored it is always asked')
+
+  // A silence must never reach the panel as a number. `fp: ""` matches no
+  // contextFingerprint, so the ceiling checks skip it — this is the same gate,
+  // asserted on the value that would be dangerous if it ever slipped through.
+  const record = { id: 'x-free', limit: { context: 1000, output: 500 } }
+  assert.notEqual(
+    silence.fp,
+    contextFingerprint(record),
+    'an empty fingerprint is never the fingerprint of a real record',
+  )
 })

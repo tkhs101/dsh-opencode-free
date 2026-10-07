@@ -92,6 +92,13 @@ cost. Behaviour below is what a user can observe change.
   the stream's iterator. So the "cut off" figure on a row was measuring nothing,
   and the first-token timing never existed. Both paths report now, and the count
   on screen means what it says.
+- **A route that names no ceiling is asked once a day, not once a restart.** The
+  harvest records "asked, and the route said nothing" so the next round knows it
+  does not have to ask — but the record was rejected on read-back, so every
+  restart spent a request per model to hear the same silence, on a shared
+  anonymous bucket where a restart is not what changed the answer. The silence is
+  now dated and kept for 24 hours. It still cannot become a measurement: an empty
+  fingerprint matches no record, and the panel never shows it as a number.
 - **A removal is final for a week, not for ever.** `nextProbeAt` was written into
   every `dead` record and never read, so a model retired on a wrong channel during
   an upstream outage stayed suppressed with no path back — and a name Zen
