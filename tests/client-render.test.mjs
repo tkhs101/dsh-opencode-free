@@ -1546,3 +1546,74 @@ test('a slow catalogue gate does not end the poll before the requested round sta
     mounted.dispose()
   }
 })
+
+test('GUARD: a click whose first progress read FAILS still waits for the round', async () => {
+  // Right after a restart is the case that breaks it. The card mounts and issues
+  // its first read; the plugin's route is not answering yet (or the read fails),
+  // so `loadProgress()` resolves to null and `pollRef.current.last` stays null.
+  // The reader clicks in that window, `saw` is null, and the click handler's own
+  // read takes the same branch:
+  //
+  //     if (reading === null || reading.running === true) { adopt(reading); return; }
+  //
+  // `adopt(null)` returns immediately, so the POLL CHAIN IS NEVER ARMED. Nothing
+  // is watching, the POST answers only when the round is over (29s measured), and
+  // the panel shows a button that blinked once and then nothing at all.
+  //
+  // No identity on screen means nothing can be ruled out, which is an argument for
+  // arming the poll, not for concluding. The grace still bounds it, so a backend
+  // that never starts the round still releases the button.
+  const OLD = 1759146617000
+  const previous = {
+    running: false,
+    total: 2,
+    done: 2,
+    current: null,
+    results: { 'big-pickle': { status: 'ok', ms: 90 } },
+    targets: null,
+    startedAt: OLD,
+  }
+  const live = {
+    running: true,
+    total: 3,
+    done: 1,
+    current: 'muse-spark-1.3-contributor-free',
+    results: { 'muse-spark-1.3-contributor-free': { status: 'ok', ms: 140 } },
+    startedAt: OLD + 5000,
+  }
+  let polls = 0
+  let clicked = false
+  const mounted = await renderCard({
+    hidden: [],
+    routes: ({ url, method }) => {
+      if (url.endsWith('/api/probe') && method === 'POST') {
+        clicked = true
+        return { ok: true, status: 202, json: async () => SNAPSHOT }
+      }
+      if (url.endsWith('/api/probe') && method === 'GET') {
+        // EVERY read before the click fails — the route is not up yet, which is
+        // what the window right after a restart looks like.
+        if (!clicked) return { ok: false, status: 503, json: async () => null }
+        polls += 1
+        return { ok: true, json: async () => (polls <= 1 ? previous : live) }
+      }
+      return { ok: true, json: async () => SNAPSHOT }
+    },
+  })
+  try {
+    mounted.findButton('立即探测').props.onClick()
+    // Each flush runs the promises armed by the previous one, so the chain needs
+    // a few ticks to reach the round that is really running.
+    await mounted.fireTimers()
+    await mounted.fireTimers()
+    await mounted.fireTimers()
+    await mounted.fireTimers()
+    assert.ok(polls >= 3, 'the poll chain is armed even though the first read failed')
+    assert.ok(
+      collect(mounted.rerender()).texts.some((t) => t.includes('探测中')),
+      'and the button stays busy, because nothing observed rules the stale reading out',
+    )
+  } finally {
+    mounted.dispose()
+  }
+})

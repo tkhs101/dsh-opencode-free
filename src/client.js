@@ -1006,7 +1006,15 @@ window.__ModuleLoader__.load({
 						   not been published yet. Without an identity the two are
 						   indistinguishable, and consuming `awaiting` on the earlier one is
 						   what ended the chain a tick early. */
-					reading.startedAt === pollRef.current.saw &&
+					/* `saw === null` means NOTHING was on screen when the button was
+					   pressed — the first read never landed — so there is no identity
+					   to compare against and nothing can be ruled out. That is an
+					   argument for keeping waiting, not for concluding the round is
+					   over: a finished reading whose stamp is a number can never
+					   equal null, so the test below would fail on every reading and
+					   hand the reader back a button for a round that is still
+					   running. */
+					(pollRef.current.saw === null || reading.startedAt === pollRef.current.saw) &&
 					Date.now() - pollRef.current.since < AWAIT_GRACE_MS
 				) {
 					/* `null`, deliberately: re-arming with the previous round's report
@@ -1049,13 +1057,25 @@ window.__ModuleLoader__.load({
 				pollRef.current.saw =
 					pollRef.current.last === null ? null : pollRef.current.last.startedAt;
 				loadProgress().then(function (reading) {
+					/* A NULL reading is not "nothing to show", it is "nothing to
+					   identify against". The route answers nothing at all in the
+					   window right after a restart, so `last` stays null and this
+					   branch used to `adopt(null)` and return — which armed NO poll
+					   chain at all. The POST only answers when the round is OVER
+					   (29s measured), so the card sat busy with nothing watching:
+					   a button that blinked once and then nothing. Arm the poll;
+					   `adopt()` applies the grace to whatever cannot be ruled out. */
+					if (reading === null) {
+						if (pollRef.current.awaiting) startPolling(null);
+						return;
+					}
 					/* A reading can already be finished — the round may not have
 					   started yet when this first poll lands, and the host answers
 					   `running: false` until it does. That is the PRE-round state,
 					   not a completed round, so it must not be read as the end of
 					   this one. The POST returning successfully is what confirms the
 					   round exists; until then the poll simply keeps going. */
-					if (reading === null || reading.running === true) {
+					if (reading.running === true) {
 						adopt(reading);
 						return;
 					}
