@@ -1127,6 +1127,20 @@ export interface ProbeRecord {
    * and losing the count would only ever repeat the observation.
    */
   readonly contextHits?: number;
+  /**
+   * Replies this model has had CUT OFF at the budget, counted from real traffic.
+   *
+   * `output` is the question the whole output axis turns on: the plugin sends a
+   * number, and this says whether a reply has ever wanted more of it. `context`
+   * is counted apart because it is a different event — the conversation ran out
+   * of room, which says nothing about the output budget being small.
+   *
+   * It costs nothing to keep: the transport sees `stopReason` on a request that
+   * was being sent anyway. The alternative is a synthetic generation, and those
+   * cost tens of thousands of tokens to answer a question real traffic answers for
+   * free.
+   */
+  readonly budgetHits?: { readonly output?: number; readonly context?: number; readonly at?: number };
 }
 
 export type ProbeMap = Record<string, ProbeRecord>;
@@ -1386,6 +1400,7 @@ function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string
       // `isMeasuredLimits` rejects it, so the next round asks again rather than
       // treating silence as a ceiling.
       ...(isMeasuredLimits(entry.limits) ? { limits: entry.limits } : {}),
+      ...(readBudgetHits(entry.budgetHits) === undefined ? {} : { budgetHits: readBudgetHits(entry.budgetHits) }),
       ...(Array.isArray(entry.selfReported)
         ? { selfReported: entry.selfReported.filter((level): level is string => typeof level === "string") }
         : {}),
@@ -1742,6 +1757,16 @@ export interface ModelCapability {
    * other the high bound — and a row that shows only the budget hides that.
    */
   readonly stated?: { readonly output?: number; readonly context?: number; readonly at: number };
+  /**
+   * Replies this model has had cut off at the budget, from REAL traffic.
+   *
+   * The whole output axis rests on a number nobody can verify by asking the
+   * model — whether a reply ever wants more than we send. This counts the times
+   * one did, for free, on requests that were happening anyway. Zero is the
+   * useful reading: it means the budget has not bound, so raising it would have
+   * bought nothing, and the honest thing to say is that.
+   */
+  readonly truncated?: { readonly output?: number; readonly context?: number };
   /** Per axis: was this verified on the route, or copied from a declaration? */
   readonly measured: {
     readonly context: boolean;
@@ -1821,6 +1846,8 @@ export function modelCapability(
     readonly measuredOutput?: boolean;
     readonly measuredEffort?: MeasuredEffort | undefined;
     readonly limits?: MeasuredLimits | undefined;
+    /** Truncation counters from real traffic, when the probe record has them. */
+    readonly budgetHits?: ProbeRecord["budgetHits"];
   },
 ): ModelCapability {
   const record = context?.record;
@@ -1853,6 +1880,16 @@ export function modelCapability(
             ...(limits.output === undefined ? {} : { output: limits.output }),
             ...(limits.context === undefined ? {} : { context: limits.context }),
             at: limits.at,
+          },
+        }),
+    // Absent unless something was actually cut off: a row that says "0 times"
+    // is a claim about traffic the panel has no other evidence of.
+    ...(context?.budgetHits === undefined || (context.budgetHits.output ?? 0) + (context.budgetHits.context ?? 0) === 0
+      ? {}
+      : {
+          truncated: {
+            ...(context.budgetHits.output === undefined || context.budgetHits.output === 0 ? {} : { output: context.budgetHits.output }),
+            ...(context.budgetHits.context === undefined || context.budgetHits.context === 0 ? {} : { context: context.budgetHits.context }),
           },
         }),
     measured: {
@@ -2048,6 +2085,21 @@ export interface MeasuredLimits {
   readonly context?: number;
   readonly fp: string;
   readonly at: number;
+}
+
+/** Defensive read of the truncation counters; a count is never inferred. */
+function readBudgetHits(value: unknown): ProbeRecord["budgetHits"] | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const count = (n: unknown): number | undefined =>
+    typeof n === "number" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+  const output = count(value.output);
+  const context = count(value.context);
+  if (output === undefined && context === undefined) return undefined;
+  return {
+    ...(output === undefined ? {} : { output }),
+    ...(context === undefined ? {} : { context }),
+    ...(typeof value.at === "number" && Number.isFinite(value.at) ? { at: value.at } : {}),
+  };
 }
 
 /** Defensive read of harvested ceilings; a partial one is no measurement. */
@@ -2296,6 +2348,12 @@ const SEED_OUTPUT: Readonly<
   "big-pickle": { declared: 32000, observed: 48000 },
   "longcat-2.5-preview-free": {
     declared: 131072,
+    // Watched 2026-10-07: asked for 64000, produced 64000 with `stopReason:
+    // "length"` in 947s (~67 tok/s). So the route names 262144 AND the model
+    // demonstrably writes 64000 — the budget does not move (the named ceiling is
+    // higher), but the panel can stop implying this model has never been watched
+    // writing a long reply.
+    observed: 64000,
     // The route, in its own words, 2026-10-07:
     //   "[invalid_parameter] 参数校验失败: /max_tokens: 995834 is not less or
     //    equal to 262144"
@@ -2410,6 +2468,17 @@ export interface ClampObservation {
   readonly emitted: number | undefined;
   /** `stopReason === "length"` with no usable content. */
   readonly starved: boolean;
+  /**
+   * `stopReason === "length"` WITH usable content: a reply that was cut off
+   * mid-answer.
+   *
+   * This is the only free measurement of whether the budget the plugin advertises
+   * is actually BINDING in real use — every synthetic probe either stops early
+   * or costs tens of thousands of tokens to find out, while this rides on a
+   * request that was being made anyway. Whether the budget or the CONTEXT clamp
+   * did the cutting is decided by comparing `emitted` with the model's own.
+   */
+  readonly truncated?: boolean;
 }
 
 /**
@@ -3833,10 +3902,63 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
   }
 
   /** Records one clamp observation and, once they agree, raises the window. */
+  /**
+   * Write the catalogue cache with whatever the state holds RIGHT NOW.
+   *
+   * Shared because the truncation counters are written from the request path,
+   * not from a round: they accumulate over days of ordinary use, and a counter
+   * that a restart erases cannot answer the question it exists to answer. The
+   * round's own write stays where it is — it is a milestone, this is not — but
+   * both go through here so the record they produce cannot differ.
+   *
+   * Fire-and-forget on purpose: a reply must never wait on bookkeeping, and the
+   * write is atomic, so the worst a crash costs is one increment.
+   */
+  function persistCache(): void {
+    if (state.cache === null) return;
+    const record = {
+      etag: state.cache.etag,
+      fetchedAt: state.cache.fetchedAt,
+      models: state.cache.models,
+      probes: state.probes,
+      lastProbeAt: state.lastProbeAt,
+      lastRound: state.cache.lastRound,
+    };
+    state.cache = { ...state.cache, lastRound: state.cache.lastRound };
+    void writeCacheAtomic(path, record).catch(() => undefined);
+  }
+
   function observeClamp(id: string, observation: ClampObservation): void {
     const model = state.models.find((m) => m.id === id);
-    if (model === undefined || !observation.starved) return;
+    if (model === undefined) return;
     const record = state.probes[id];
+    // Counted FIRST, and independent of `starved`: a reply cut off mid-answer is
+    // not the clamp signature (which needs an empty one), and it is the fact
+    // that says whether the advertised budget is too low. `emitted` below the
+    // model's own ceiling means the CONTEXT clamp cut it, which is a different
+    // question and is counted apart — a conversation running out of room is not
+    // an output budget that is too small.
+    if (observation.truncated === true) {
+      const byContext =
+        observation.emitted === undefined || observation.emitted < model.maxTokens;
+      const hits = record?.budgetHits ?? {};
+      state.probes = {
+        ...state.probes,
+        [id]: {
+          ...(record ?? { verdict: "ok", at: now() }),
+          budgetHits: {
+            ...hits,
+            ...(byContext ? { context: (hits.context ?? 0) + 1 } : { output: (hits.output ?? 0) + 1 }),
+            at: now(),
+          },
+        },
+      };
+      // Persisted, not held in memory: the answer this counts towards is "has a
+      // reply ever wanted more than we send", and a counter a restart erases
+      // cannot answer it — this session alone restarted six times.
+      persistCache();
+    }
+    if (!observation.starved) return;
     const verdict = clampVerdict(record, observation, model.contextWindow);
     if (verdict.kind === "none") return;
     if (verdict.kind === "hit") {
@@ -3905,6 +4027,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
             measuredOutput: declaredOutput !== undefined && model.maxTokens !== declaredOutput,
             measuredEffort: efforts.get(model.id),
             limits: harvested.get(model.id),
+            budgetHits: state.probes[model.id]?.budgetHits,
           });
         }),
         source: state.source,

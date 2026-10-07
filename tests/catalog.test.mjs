@@ -5096,3 +5096,50 @@ test('GUARD: a stored ceiling that cannot be applied is asked again, not trusted
     assert.equal(card.stated?.output, 262144, 'and it reaches the panel, which is the only way a silent drop is visible')
   })
 })
+
+test('GUARD: a reply cut off at the budget is counted, free, from real traffic', async () => {
+  // The whole output axis rests on a number nobody can verify by asking the
+  // model: does a reply ever want MORE than what we send? Synthetic generations
+  // answer it at tens of thousands of tokens each, and answer it unreliably —
+  // measured 2026-10-07, the same request produced 892 tokens once and 79,722
+  // the next. Real traffic already carries the answer in `stopReason`, on a
+  // request that was being sent anyway.
+  //
+  // The two kinds are counted apart, because they are different events: a reply
+  // cut at our output budget means the number is too small, while one cut by the
+  // CONTEXT clamp means the conversation ran out of room, which says nothing
+  // about the output budget.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const catalog = catalogWith({
+      dir,
+      clock,
+      fetchImpl: async () => fakeResponse({ body: apiBody() }),
+      listZenIds: async () => SERVED,
+    });
+    await catalog.forceRefresh();
+    const space = 'space-bunny-free'
+    // Our own output budget: what pi-ai sent equals the model's maxTokens.
+    catalog.observeClamp(space, { emitted: 524288, starved: false, truncated: true })
+    catalog.observeClamp(space, { emitted: 524288, starved: false, truncated: true })
+    // The context clamp: pi-ai lowered the budget because the conversation grew.
+    catalog.observeClamp(space, { emitted: 120000, starved: false, truncated: true })
+    // Not a cut at all.
+    catalog.observeClamp(space, { emitted: 524288, starved: false, truncated: false })
+    const card = catalog.current().capabilities.find((c) => c.id === space)
+    assert.deepEqual(card.truncated, { output: 2, context: 1 }, 'two kinds, counted apart')
+
+    // The write is fire-and-forget by design (a reply must never wait on
+    // bookkeeping), so the test waits for it rather than the other way round.
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const record = await readProbeRecord(join(dir, 'catalog.json'), space)
+    assert.equal(record.budgetHits?.output, 2)
+    assert.equal(record.budgetHits?.context, 1)
+    assert.equal(typeof record.budgetHits?.at, 'number')
+
+    // A model nothing has cut off says nothing at all, rather than claiming a
+    // count of zero the panel has no evidence for.
+    const untouched = catalog.current().capabilities.find((c) => c.id === 'big-pickle')
+    assert.equal(untouched.truncated, undefined)
+  })
+})

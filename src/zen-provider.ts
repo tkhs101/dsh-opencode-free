@@ -2617,6 +2617,10 @@ function reportClamp<S extends { result(): Promise<{ stopReason?: unknown; conte
       // reading is the honest one: an observation taken on a merely-thinking
       // reply would raise a window for a request that was never starved.
       starved: outcome.stopReason === "length" && outcome.answered !== true,
+      // A reply that ended on the budget but DID say something: cut off
+      // mid-answer. That is the free measurement of whether the advertised
+      // budget binds in real use, and it rides on this request either way.
+      truncated: outcome.stopReason === "length" && outcome.answered === true,
     });
     return result;
   };

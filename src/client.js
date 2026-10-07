@@ -75,6 +75,7 @@ window.__ModuleLoader__.load({
 			"probing": "探测中…",
 			"probeFailed": "探测请求失败，模型显示保持不变，可重试。",
 			"probeCooldown": "刚跑过一轮探测，约 {minutes} 分钟内不会重复请求（每轮都要花共享额度）。",
+			"probeCooldownSeconds": "刚跑过一轮探测，约 {seconds} 秒后可再次点击（每轮都要花共享额度）。",
 			"probeUntrusted": "本轮有模型没能测到（上游限流、匿名层被拒或网络异常），这些模型的显示保持不变。",
 			"probedAt": "上次探测",
 			"unknownFree": "另有模型 Zen 正在免费层供应、models.dev 却没有它们的资料：",
@@ -120,6 +121,8 @@ window.__ModuleLoader__.load({
 			"caps.out": "输出预算",
 			"caps.observed": "实测产出",
 			"caps.stated": "路由自述上限",
+			"caps.truncated": "被预算截断",
+			"caps.truncatedTitle": "真实会话中被 max_tokens 拦腰截断的次数（免费）",
 			"caps.statedTitle": "上游在拒绝正文里说出的它自己的上限",
 			"caps.observedTitle": "本插件实际看这个模型写出过的最长回答",
 			"caps.declared": "声明",
@@ -146,6 +149,7 @@ window.__ModuleLoader__.load({
 			"probing": "Probing…",
 			"probeFailed": "The probe request failed; visibility is unchanged. You can retry.",
 			"probeCooldown": "A round just ran; it will not run again for about {minutes} minutes — each round spends the shared quota.",
+			"probeCooldownSeconds": "A round just ran; try again in about {seconds} seconds — each round spends the shared quota.",
 			"probeUntrusted": "Some models could not be measured this round (upstream throttling, the anonymous tier refusing, or a network error); those models keep their current visibility.",
 			"probedAt": "Last probe",
 			"unknownFree": "Models Zen serves on the free tier that models.dev carries no metadata for:",
@@ -191,6 +195,8 @@ window.__ModuleLoader__.load({
 			"caps.out": "output budget",
 			"caps.observed": "observed",
 			"caps.stated": "route says",
+			"caps.truncated": "cut off",
+			"caps.truncatedTitle": "times a real reply was cut off at max_tokens (free)",
 			"caps.statedTitle": "the ceiling the upstream stated about itself in a refusal",
 			"caps.observedTitle": "the longest reply this plugin has watched this model produce",
 			"caps.declared": "declared",
@@ -540,7 +546,12 @@ window.__ModuleLoader__.load({
 					   the panel had no way to show a number it was not sent. */
 					var measured = card.measured !== null && typeof card.measured === "object" ? card.measured : {};
 					var stated = card.stated !== null && typeof card.stated === "object" ? card.stated : null;
+					var trunc = card.truncated !== null && typeof card.truncated === "object" ? card.truncated : null;
 					cards[card.id] = {
+						truncated:
+							trunc !== null && (typeof trunc.output === "number" || typeof trunc.context === "number")
+								? { output: typeof trunc.output === "number" ? trunc.output : 0, context: typeof trunc.context === "number" ? trunc.context : 0 }
+								: null,
 						stated:
 							stated !== null && (typeof stated.output === "number" || typeof stated.context === "number")
 								? { output: typeof stated.output === "number" ? stated.output : null, context: typeof stated.context === "number" ? stated.context : null }
@@ -1104,7 +1115,14 @@ window.__ModuleLoader__.load({
 						pollRef.current.awaiting = false;
 						pollRef.current.active = false;
 						stopPolling();
-						setProbeError(t("probeCooldown", { minutes: Math.max(1, Math.ceil(snapshot.cooldownMs / 60000)) }));
+						/* Under a minute left must not be rounded UP into the next
+						   minute: 60.7s said "about 2 minutes" and the reader
+						   waited out a minute for a button that still refused. */
+						setProbeError(
+							snapshot.cooldownMs < 60000
+								? t("probeCooldownSeconds", { seconds: Math.max(1, Math.round(snapshot.cooldownMs / 1000)) })
+								: t("probeCooldown", { minutes: Math.ceil(snapshot.cooldownMs / 60000) }),
+						);
 						setProbing(false);
 						return;
 					}
@@ -1292,6 +1310,14 @@ window.__ModuleLoader__.load({
 								className: "opf-caps",
 								title: t("caps.statedTitle")
 							}, t("caps.stated") + " ", E("b", null, countLabel(card.stated.output))));
+						}
+						if (card.truncated !== null) {
+							left.push(E("span", {
+								key: "trunc",
+								className: "opf-caps",
+								title: t("caps.truncatedTitle")
+							}, t("caps.truncated") + " ",
+								E("b", null, String(card.truncated.output + card.truncated.context))));
 						}
 						if (card.observedOutput !== null) {
 							left.push(E("span", {
