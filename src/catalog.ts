@@ -3526,7 +3526,23 @@ export async function runProbeRound(
       // tokens at all. A route that answers instead is recorded as having stated
       // nothing — which is itself the answer for a model whose ceiling is above
       // anything this conversation could ask for.
-      if (state.probes[model.id]?.limits === undefined) {
+      // Asked when there is nothing stored OR when what is stored cannot be
+      // applied. The second half is the one that matters: an entry written under
+      // the old fingerprint reads as a valid measurement (`isMeasuredLimits`
+      // only checks that `fp` is a non-empty string) and is then dropped by the
+      // fingerprint comparison on the way into the catalogue — so it would never
+      // be asked again and never be applied. A permanent silent drop, found live:
+      // `longcat-2.5-preview-free` had been sitting in exactly that state, its
+      // budget coming from the seed table while the panel showed no `stated`.
+      //
+      // `fp: ""` is deliberately exempt: that is the record of "asked, and the
+      // route named nothing", and this session has already asked. It is dropped
+      // on the next warm start, so a new session asks again.
+      const storedLimits = state.probes[model.id]?.limits;
+      const ceilingApplies =
+        storedLimits !== undefined && storedLimits.fp !== "" && rawById(model.id) !== undefined && storedLimits.fp === contextFingerprint(rawById(model.id)!);
+      const ceilingAnswered = storedLimits !== undefined && storedLimits.fp === "";
+      if (storedLimits === undefined || (!ceilingApplies && !ceilingAnswered)) {
         for (const _attempt of [0]) {
           if (shots >= samplesPerModel) break;
           if (state.probes[model.id]?.verdict !== "ok") break;

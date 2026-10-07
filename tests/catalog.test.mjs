@@ -5056,3 +5056,43 @@ test('GUARD: every model is asked for its ceiling, not only the first few', asyn
     assert.equal(capped.stated?.output, 262144, 'while the panel still shows what the route said');
   })
 })
+
+test('GUARD: a stored ceiling that cannot be applied is asked again, not trusted', async () => {
+  // Found live 2026-10-07: `longcat-2.5-preview-free` carried a limits entry
+  // written under the OLD fingerprint ("1000000:131072:text+image"), which
+  // `isMeasuredLimits` accepts — it only checks that `fp` is a non-empty string —
+  // and which the fingerprint comparison then drops on the way into the
+  // catalogue. So the model looked asked, was never applied, and would never be
+  // asked again: the budget came from the seed table and the panel showed no
+  // `stated`. The same shape as ADR §47 and §43 — the evidence exists and nothing
+  // connects it to the conclusion.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBody() }),
+      probe: async (model, question) => {
+        asked.push(`${model.id}:${question ?? 'baseline'}`);
+        if (question === 'ceiling') return { kind: 'inconclusive', code: 'error', http: 400, reason: 'stub', ceilings: { output: 262144 } };
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };
+      },
+      listZenIds: async () => ['big-pickle'],
+    });
+    await catalog.forceRefresh();
+    // Seed a record shaped exactly like the one that went stale.
+    const first = await readProbeRecord(join(dir, 'catalog.json'), 'big-pickle');
+    void first;
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+    assert.ok(asked.includes('big-pickle:ceiling'), 'asked, and what the route named is stored under the fingerprint the catalogue checks');
+
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'big-pickle');
+    assert.equal(record.limits?.output, 262144);
+    assert.equal(record.limits?.fp, '200000:32000', 'contextFingerprint, not capabilityFingerprint')
+    const card = catalog.current().capabilities.find((c) => c.id === 'big-pickle');
+    assert.equal(card.stated?.output, 262144, 'and it reaches the panel, which is the only way a silent drop is visible')
+  })
+})
