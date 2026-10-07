@@ -968,12 +968,22 @@ test('topThinkingLevel reads the strongest published level, nothing else', () =>
 test('modelCapability projects image and top level per record', () => {
   const { candidates } = derive(modelsDict(), { template: template(), knownApis: new Map() })
   const card = (id) => modelCapability(candidates.find((m) => m.id === id))
-  assert.deepEqual(card('space-bunny-free'), { id: 'space-bunny-free', image: true, thinking: 'max' })
-  assert.deepEqual(card('muse-spark-1.3-contributor-free'), {
-    id: 'muse-spark-1.3-contributor-free',
+  assert.deepEqual(card('space-bunny-free'), {
+    id: 'space-bunny-free',
     image: true,
-    thinking: 'xhigh',
+    thinking: 'max',
+    contextWindow: 1048576,
+    maxOutput: 524288,
+    declaredContext: undefined,
+    declaredOutput: undefined,
+    levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    off: null,
+    // No record and no probes: nothing was measured and nothing was published,
+    // so every flag reads false. The card says "unknown" on all four axes rather
+    // than borrowing an answer from the template.
+    measured: { context: false, output: false, vision: false, tools: false },
   })
+  assert.equal(card('muse-spark-1.3-contributor-free').thinking, 'xhigh')
   // Toggle-only and level-less records get no thinking badge. `ling` publishes
   // `modalities.input: ["text"]` and `attachment: false`, so it is text-only —
   // it does NOT inherit the template's text+image. The old fallback answered
@@ -981,14 +991,22 @@ test('modelCapability projects image and top level per record', () => {
   // it was not cosmetic: DSH throws UNSUPPORTED_CONTENT on an image for a model
   // without it, so the inherited claim converts a silent omission into a hard
   // failure the user cannot act on.
-  assert.deepEqual(card('ling-3.0-flash-fin-free'), {
-    id: 'ling-3.0-flash-fin-free',
-    image: false,
-    // The default ladder is offered, so the strongest offered rung is now the
-    // badge. The card names what exists, not what models.dev declared.
-    thinking: 'high',
-  })
-  assert.deepEqual(card('big-pickle'), { id: 'big-pickle', image: false, thinking: 'high' })
+  // Only the badges are asserted here; the numbers are asserted where the card is
+  // built from a real record, because with no record passed there is nothing to
+  // compare a declared value against.
+  assert.deepEqual(
+    { image: card('ling-3.0-flash-fin-free').image, thinking: card('ling-3.0-flash-fin-free').thinking },
+    {
+      image: false,
+      // The default ladder is offered, so the strongest offered rung is now the
+      // badge. The card names what exists, not what models.dev declared.
+      thinking: 'high',
+    },
+  )
+  assert.deepEqual(
+    { image: card('big-pickle').image, thinking: card('big-pickle').thinking },
+    { image: false, thinking: 'high' },
+  )
 })
 
 test('capabilities ride alongside visible, same ids in the same order', async () => {
@@ -1004,10 +1022,34 @@ test('capabilities ride alongside visible, same ids in the same order', async ()
     )
     const bunny = state.capabilities.find((c) => c.id === 'space-bunny-free')
     assert.equal(bunny.image, true)
+    // The card carries the numbers the request path uses. Reading them here, off a
+    // catalogue that has probed, is what makes "the panel cannot disagree with the
+    // wire" a checkable claim rather than an intention.
+    assert.equal(bunny.contextWindow, 1048576, 'the window pi-ai clamps this conversation against')
+    assert.equal(bunny.maxOutput, 524288, 'the budget pi-ai puts on the wire')
+    assert.equal(bunny.declaredContext, 1048576, 'and what models.dev published beside it')
+    assert.equal(bunny.measured.context, false, 'equal numbers: the declaration was right, nothing was raised')
+    assert.equal(bunny.measured.vision, true, 'measured on the route, not copied from the declaration')
+    assert.deepEqual(bunny.levels, ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    assert.equal(bunny.off, null, 'no Off row is offered without a measurement that says one works')
     assert.equal(bunny.thinking, 'max')
-    // Cards carry names and booleans only — never the full records.
+    // Cards carry numbers, names and booleans — never the full records. The
+    // numbers are here on purpose: they are what the request path clamps with, so
+    // hiding them from the panel is what let a stale declaration look identical
+    // to a measured one. Nothing request-shaping rides along.
     for (const card of state.capabilities) {
-      assert.deepEqual(Object.keys(card).sort(), ['id', 'image', 'thinking'])
+      assert.deepEqual(Object.keys(card).sort(), [
+        'contextWindow',
+        'declaredContext',
+        'declaredOutput',
+        'id',
+        'image',
+        'levels',
+        'maxOutput',
+        'measured',
+        'off',
+        'thinking',
+      ])
     }
   })
 })
@@ -2143,7 +2185,12 @@ test('GUARD: a route that reports no reasoning stops being asked, not asked for 
       clock,
       manualSampleBudget: MANUAL_SAMPLE_BUDGET,
       fetchImpl: async () => fakeResponse({ body: apiBodyWith({ 'fledge-alpha-free': fledge }) }),
-      probe: async () => {
+      probe: async (_model, question) => {
+        // Counted per AXIS: a round now also asks the capability questions once
+        // each, and this guard is about the effort ladder not being re-asked for
+        // ever. Counting them together would make the guard pass for the wrong
+        // reason the moment the capability questions stop.
+        if (typeof question === 'string' && question.startsWith('capability:')) return { kind: 'ok', api: 'openai-completions', capability: { axis: question.slice(11), ok: true, detail: 'stub' } };
         asked += 1;
         return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };
       },
@@ -4827,5 +4874,113 @@ test('a model is routed the moment its probe answers, not when the round ends', 
       catalog.probeProgress().total,
       'one write per round, carrying every verdict at once',
     )
+  })
+})
+
+test('GUARD: a round measures a declared capability once, persists it, and stops asking', async () => {
+  // The panel used to show a vision badge that was a copy of models.dev and a
+  // "tools work" claim that was an inference from the admission gate. Clicking
+  // "Probe now" could not fix either, because nothing in a round ever asked.
+  //
+  // This is the fix's cost contract as much as its behaviour: one request per
+  // unmeasured axis, ONCE, and never again — the second round below is the whole
+  // test, because a rule that spends the shared bucket on every click is not a
+  // measurement, it is a tax.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    const asked = []
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBody() }),
+      probe: async (model, question) => {
+        asked.push(`${model.id}:${question ?? 'baseline'}`)
+        if (question === 'capability:vision') return { kind: 'ok', api: 'openai-completions', capability: { axis: 'vision', ok: true, detail: 'named the top half' } }
+        if (question === 'capability:tools') return { kind: 'ok', api: 'openai-completions', capability: { axis: 'tools', ok: true, detail: 'called bash' } }
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };
+      },
+      listZenIds: async () => SERVED,
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+
+    // A manual round has budget for more than the effort samples, and spends the
+    // remainder on the axes nobody had evidence for.
+    // `ling-3.0-flash-fin-free` is the one model here the seed table knows
+    // nothing about — measured 2026-10-07, its endpoint answered
+    // `Endpoint is unavailable.` on every attempt — so it is the one that must
+    // still be asked.
+    assert.ok(
+      asked.includes('ling-3.0-flash-fin-free:capability:tools'),
+      'a model with no evidence is asked about the axis every model claims',
+    )
+    assert.ok(
+      !asked.some((q) => q.startsWith('ling-3.0-flash-fin-free:capability:vision')),
+      'it declares text-only input, so there is no claim on screen to verify and nothing is asked',
+    )
+    for (const seeded of ['big-pickle', 'muse-spark-1.3-contributor-free']) {
+      assert.deepEqual(
+        asked.filter((q) => q.startsWith(`${seeded}:capability:`)),
+        [],
+        `a model already measured — by the seed table — costs nothing (${seeded})`,
+      )
+    }
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'ling-3.0-flash-fin-free')
+    assert.equal(record.capabilities?.tools?.ok, true, 'the verdict is persisted, so it survives a restart')
+    assert.equal(typeof record.capabilities?.tools?.fp, 'string')
+    assert.equal(record.capabilities?.tools?.at, clock.t)
+
+    const before = asked.length
+    pastProbeFloor(clock);
+    await catalog.forceProbes()
+    assert.deepEqual(asked.slice(before).filter((q) => q.includes('capability:')), [], 'a settled axis is never asked again')
+  })
+})
+
+test('GUARD: a capability question that taught nothing is not a verdict', async () => {
+  // The failure this exists for: a reasoning model that spends the budget on
+  // thinking and returns no text looks exactly like a model that cannot see, and
+  // an upstream that is down looks exactly like a model without tools. Recording
+  // either as `ok: false` would retire a capability permanently on the strength
+  // of a condition that has nothing to do with the model — so nothing is
+  // written, the panel reads "not measured", and the next round tries again.
+  await withTempDir(async (dir) => {
+    const clock = { t: 2_000_000 }
+    let asked = 0
+    const catalog = catalogWith({
+      dir,
+      clock,
+      manualSampleBudget: MANUAL_SAMPLE_BUDGET,
+      fetchImpl: async () => fakeResponse({ body: apiBody() }),
+      probe: async (_model, question) => {
+        if (typeof question === 'string' && question.startsWith('capability:')) {
+          asked += 1;
+          // No `capability` at all: the prober saw a reply with no text in it.
+          return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };
+        }
+        return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };
+      },
+      listZenIds: async () => ['ling-3.0-flash-fin-free'],
+    });
+    await catalog.forceRefresh();
+    pastProbeFloor(clock);
+    await catalog.forceProbes();
+    assert.ok(asked > 0, 'the axis was asked')
+    const record = await readProbeRecord(join(dir, 'catalog.json'), 'ling-3.0-flash-fin-free')
+    assert.equal(record.capabilities, undefined, 'nothing was persisted for a request that concluded nothing')
+
+    const card = catalog.current().capabilities.find((c) => c.id === 'ling-3.0-flash-fin-free')
+    assert.equal(card.measured.tools, false, 'and the panel says "not measured" rather than "cannot"')
+    // "Not measured" must also leave the request path exactly as it was: this
+    // model's window was never measured either, so the declaration is still what
+    // ships, and the card says so by showing the two numbers equal.
+    assert.equal(card.measured.context, false)
+    // This fixture's record publishes no `limit` at all, so the derived window
+    // came from the template and there is nothing to compare: "not measured" and
+    // "nothing was published" are different states, and the card carries both.
+    assert.equal(card.declaredContext, undefined)
+    assert.equal(card.contextWindow, 200000, 'the template floor still ships, unchanged by a failed measurement')
   })
 })

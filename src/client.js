@@ -114,8 +114,15 @@ window.__ModuleLoader__.load({
 			"marker.opencodeonly": "上游说这个请求只能由 OpenCode 客户端发出",
 			"badge.vision": "视觉",
 			"badge.thinking": "思考",
+			"badge.tools": "工具",
+			"badge.measured": "实测",
+			"caps.ctx": "上下文",
+			"caps.out": "输出",
+			"caps.declared": "声明",
 			"legend.vision": "多模态视觉",
 			"legend.thinking": "思考推理",
+			"legend.tools": "工具调用",
+			"legend.measured": "已实测（非声明）",
 			"empty": "当前没有可显示的模型。"
 		};
 
@@ -174,8 +181,15 @@ window.__ModuleLoader__.load({
 			"marker.opencodeonly": "upstream says only the OpenCode client may send this",
 			"badge.vision": "Vision",
 			"badge.thinking": "Thinking",
+			"badge.tools": "Tools",
+			"badge.measured": "measured",
+			"caps.ctx": "context",
+			"caps.out": "output",
+			"caps.declared": "declared",
 			"legend.vision": "Multimodal vision",
 			"legend.thinking": "Reasoning",
+			"legend.tools": "Tool calls",
+			"legend.measured": "measured on the route, not declared",
 			"empty": "No models are available right now."
 		};
 
@@ -258,6 +272,15 @@ window.__ModuleLoader__.load({
 			".opf-badge-vision{background:rgba(48,176,199,.10);color:#00737F;border:1px solid rgba(48,176,199,.25)}",
 			".opf-badge-think{background:rgba(255,69,58,.08);color:#C22C22;border:1px solid rgba(255,69,58,.20)}",
 			".opf-badge-think svg{width:10px;height:10px}",
+			".opf-badge-tools{background:rgba(88,86,214,.08);color:#4B4ACB;border:1px solid rgba(88,86,214,.20)}",
+			/* The measured mark rides on a badge that was verified on the route.
+			   It is deliberately a different channel from colour: a teal badge
+			   with a dot reads as "this one is not just a claim". */
+			".opf-measured::after{content:'✓';margin-left:2px;font-size:10px;opacity:.85}",
+			".opf-caps{font-size:11px;color:#6B6B72;white-space:nowrap;font-variant-numeric:tabular-nums}",
+			".opf-caps b{font-weight:500;color:#3A3A3F}",
+			".opf-caps .opf-declared{text-decoration:line-through;opacity:.75}",
+			".opf-limit+.opf-limit{margin-left:10px}",
 			".opf-side{display:flex;align-items:center;gap:12px;flex:none}",
 			".opf-state{font-size:13px;color:#6B6B72;user-select:none}",
 			".opf-state.on{color:#1D1D1F;font-weight:500}",
@@ -402,6 +425,12 @@ window.__ModuleLoader__.load({
 		/** Display names for thinking levels: "xhigh" reads "XHigh", not "Xhigh". */
 		var LEVEL_LABELS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
 
+		/** Token counts the way the picker writes them: 1048576 -> "1,048,576". */
+		function countLabel(n) {
+			if (typeof n !== "number" || !isFinite(n)) return "";
+			return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+		}
+
 		function levelLabel(level) {
 			if (typeof level !== "string" || level === "") return "";
 			if (Object.prototype.hasOwnProperty.call(LEVEL_LABELS, level)) return LEVEL_LABELS[level];
@@ -497,9 +526,24 @@ window.__ModuleLoader__.load({
 					var card = payload.models[k];
 					if (card === null || typeof card !== "object") continue;
 					if (typeof card.id !== "string" || card.id === "") continue;
+					/* The numbers and the provenance travel together. The card used
+					   to carry two booleans and a level, which is why a stale
+					   declaration and a measured one looked identical on screen —
+					   the panel had no way to show a number it was not sent. */
+					var measured = card.measured !== null && typeof card.measured === "object" ? card.measured : {};
 					cards[card.id] = {
 						image: card.image === true,
 						thinking: typeof card.thinking === "string" && card.thinking !== "" ? card.thinking : null,
+						contextWindow: typeof card.contextWindow === "number" && isFinite(card.contextWindow) ? card.contextWindow : null,
+						maxOutput: typeof card.maxOutput === "number" && isFinite(card.maxOutput) ? card.maxOutput : null,
+						declaredContext: typeof card.declaredContext === "number" && isFinite(card.declaredContext) ? card.declaredContext : null,
+						declaredOutput: typeof card.declaredOutput === "number" && isFinite(card.declaredOutput) ? card.declaredOutput : null,
+						measured: {
+							context: measured.context === true,
+							output: measured.output === true,
+							vision: measured.vision === true,
+							tools: measured.tools === true,
+						},
 					};
 				}
 			}
@@ -1160,15 +1204,49 @@ window.__ModuleLoader__.load({
 				   screen; the probe badge describes THIS round and sits after
 				   them, because it is the thing the reader just asked for. */
 				{
+					/* A badge carries the measured mark when the ROUTE was asked
+					   and agreed. Without it a declared badge and a verified one
+					   are the same object on screen, which is the whole reason
+					   this row could not be trusted before. */
+					var measuredClass = function (on) { return on ? " opf-measured" : ""; };
 					if (card !== null && card.image === true) {
-						left.push(E("span", { key: "vision", className: "opf-badge opf-badge-vision" },
-							eyeIcon(),
-							E("span", null, t("badge.vision"))));
+						left.push(E("span", {
+							key: "vision",
+							className: "opf-badge opf-badge-vision" + measuredClass(card.measured.vision),
+							title: card.measured.vision ? t("legend.measured") : t("caps.declared")
+						}, eyeIcon(), E("span", null, t("badge.vision"))));
 					}
 					if (card !== null && card.thinking !== null) {
 						left.push(E("span", { key: "think", className: "opf-badge opf-badge-think" },
 							starIcon(),
 							E("span", null, t("badge.thinking") + " · " + levelLabel(card.thinking))));
+					}
+					if (card !== null && card.measured.tools === true) {
+						left.push(E("span", {
+							key: "tools",
+							className: "opf-badge opf-badge-tools" + measuredClass(true),
+							title: t("legend.measured")
+						}, E("span", null, t("badge.tools"))));
+					}
+					/* The two numbers the request path actually uses, with the
+					   declaration struck through when a measurement replaced it.
+					   Hiding these is what let a 200,000-token window and a
+					   1,048,576 one look the same from the outside. */
+					if (card !== null && (card.contextWindow !== null || card.maxOutput !== null)) {
+						var limits = [];
+						var limitPair = function (label, shown, declared, measured) {
+							if (shown === null) return;
+							var parts = [E("span", { key: label + "l" }, label + " ")];
+							if (measured === true && declared !== null && declared !== shown) {
+								parts.push(E("span", { key: label + "old", className: "opf-declared" }, countLabel(declared)));
+								parts.push(E("span", { key: label + "arrow" }, " → "));
+							}
+							parts.push(E("b", { key: label + "new" }, countLabel(shown)));
+							limits.push(E("span", { key: label, className: "opf-limit" }, parts));
+						};
+						limitPair(t("caps.ctx"), card.contextWindow, card.declaredContext, card.measured.context);
+						limitPair(t("caps.out"), card.maxOutput, card.declaredOutput, card.measured.output);
+						left.push(E("span", { key: "limits", className: "opf-caps" }, limits));
 					}
 				}
 				if (hasReading) {
@@ -1301,7 +1379,9 @@ window.__ModuleLoader__.load({
 			   renders whenever the card does. */
 			var legend = E("span", { className: "opf-legend" },
 				E("span", { className: "opf-badge opf-badge-vision" }, eyeIcon(), E("span", null, t("legend.vision"))),
-				E("span", { className: "opf-badge opf-badge-think" }, starIcon(), E("span", null, t("legend.thinking"))));
+				E("span", { className: "opf-badge opf-badge-think" }, starIcon(), E("span", null, t("legend.thinking"))),
+				E("span", { className: "opf-badge opf-badge-tools" }, E("span", null, t("legend.tools"))),
+				E("span", { className: "opf-badge opf-measured" }, E("span", null, t("legend.measured"))));
 
 			/* Progress capsule. LIVE: pulsing dot, "正在探测", "done/total", mini
 			   bar — per the mock. FINISHED: the same shape, tinted by the

@@ -353,9 +353,35 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
       refreshed.body.visible,
     )
     const bunny = refreshed.body.models.find((m) => m.id === 'space-bunny-free')
-    assert.deepEqual(bunny, { id: 'space-bunny-free', image: true, thinking: 'max' })
+    // The card is a projection of the record the request path uses, so it carries
+    // the two numbers that shape every request and what models.dev published
+    // beside them — a reader must be able to see whether a number is a
+    // declaration or a measurement without leaving the panel. For space-bunny
+    // the two agree, which is the whole point of measuring: its declaration was
+    // correct, and the badge says so.
+    assert.deepEqual(bunny, {
+      id: 'space-bunny-free',
+      image: true,
+      thinking: 'max',
+      contextWindow: 1048576,
+      maxOutput: 524288,
+      declaredContext: 1048576,
+      declaredOutput: 524288,
+      levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      off: null,
+      measured: { context: false, output: false, vision: true, tools: true },
+    })
     const pickle = refreshed.body.models.find((m) => m.id === 'big-pickle')
-    assert.deepEqual(pickle, { id: 'big-pickle', image: false, thinking: null })
+    assert.equal(pickle.image, false)
+    assert.equal(pickle.thinking, null)
+    // Declared 200000/32000; the measured window and ceiling replace both, and
+    // the flags are what say so. `vision` is false AND unmeasured: the model
+    // declares no image input, so there is no claim on screen to verify.
+    assert.equal(pickle.declaredContext, 200000)
+    assert.equal(pickle.declaredOutput, 32000)
+    assert.equal(pickle.contextWindow, 1048576)
+    assert.equal(pickle.maxOutput, 128000)
+    assert.deepEqual(pickle.measured, { context: true, output: true, vision: false, tools: true })
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]

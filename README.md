@@ -115,9 +115,14 @@ picker to see the current ones; the latest live check results are in
   falls back to the model set that ships inside pi-ai and the detail page says
   so. A failed refresh never empties the list.
 - **Detail page.** Models are listed alphabetically with the ones you have
-  switched on at the top. Each has a switch that hides it from the picker, and
-  badges for vision (the model declares image input) and thinking (its strongest
-  published reasoning level; none when it publishes no levels).
+  switched on at the top. Each row carries a switch that hides it from the
+  picker, badges for vision, thinking and tool calls, and **the two limits the
+  request actually uses** — context window and maximum output. A badge or a
+  number marked with a tick was measured on this route; one without was copied
+  from models.dev. When a measurement replaced a declaration, the declaration is
+  struck through beside it (`context 200,000 → 1,048,576`), because a stale
+  number and a measured one look identical otherwise — which is exactly why the
+  panel used to be unable to tell you which it was showing.
 
 ### Reasoning and capabilities
 
@@ -184,7 +189,13 @@ until the next round replaces it.
   - **Probe now**, only the models you have switched on, and it keeps asking
     each of them until the measurement is finished (up to nine requests), so
     one click can finish the job instead of starting it. The report says what
-    that cost and how many models still owe samples.
+    that cost and how many models still owe samples. Part of that budget asks
+    the **capability** questions nobody had ever asked: give the model an image
+    and check it names the right colour, give it real tools and check it calls
+    one. Each axis is asked **once per model** and the answer is kept, so a model
+    you keep using costs nothing after the first round — and a round that learns
+    nothing writes nothing, leaving the badge unmarked rather than claiming the
+    model cannot do it.
 - **What removes a model.** Only a positive answer: Zen stops listing it, or the
   route says it will not serve it (`Model is unavailable.`,
   `Model <id> is not supported`, `Model <id> has been deprecated`, `404`,

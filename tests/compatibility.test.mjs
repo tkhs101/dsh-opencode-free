@@ -1829,3 +1829,62 @@ test('GUARD: the request timeout is not shorter than the reply it has to carry',
     'no 180s request deadline is left anywhere on the request path',
   )
 })
+
+test('GUARD: a capability question puts a REAL image and REAL tools on the wire', async () => {
+  // The vision badge and the "tools work" claim both used to be declarations.
+  // Measuring them means the request has to carry what a real conversation
+  // carries — and the two obvious shortcuts are both wrong:
+  //
+  //   · the gate's own stubs describe themselves as "Unavailable in this
+  //     request. Do not call.", so measuring against them reports a model that
+  //     correctly obeys an instruction as a model that cannot use tools;
+  //   · a text-only question asks nothing about vision.
+  //
+  // So this asserts the SHAPE on the wire: a data-URL image part for the vision
+  // question, real function schemas for the tool question, and a budget big
+  // enough that a reasoning model's thinking cannot eat the whole answer
+  // (measured 2026-10-07: at 1024, mimo and muse-spark-1.2 returned no text at
+  // all; at 4096 they answered).
+  const p = plugin.zenProvider(() => 'probe-session', () => undefined)
+  // A model that DECLARES image input. pi-ai replaces the image part with
+  // "(image omitted: model does not support images)" for a text-only record —
+  // which is why the round only ever asks this of a model that claims vision,
+  // and why this test has to use one that does.
+  const model = p.getModels().find((m) => m.api === 'openai-completions' && m.input?.includes('image'))
+  assert.ok(model !== undefined, 'the builtin free set contains an image-capable completions model')
+  let body
+  const capture = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return sseReply()
+  }
+
+  await probeModel(model, { provider: p, apiKey: 'public', question: 'capability:vision', fetchImpl: capture })
+  const userTurn = body.messages.find((m) => m.role === 'user')
+  assert.ok(Array.isArray(userTurn.content), 'the vision question sends the block form, not a bare string')
+  const image = userTurn.content.find((c) => c.type === 'image_url')
+  assert.ok(image !== undefined, 'an image part actually reaches the route')
+  assert.match(image.image_url.url, /^data:image\/png;base64,/, 'as a data URL, which is what DSH sends for a screenshot')
+  assert.equal(body.max_tokens, 4096, 'and with a budget a reasoning model cannot spend entirely on thinking')
+  assert.equal(body.reasoning_effort, 'low', 'the capability question asks about no spelling: `low` here is pi-ai defaulting the omitted field')
+
+  await probeModel(model, { provider: p, apiKey: 'public', question: 'capability:tools', fetchImpl: capture })
+  const names = (body.tools ?? []).map((t) => t.function?.name).filter((n) => typeof n === 'string')
+  assert.ok(names.includes('bash'), `the tool question carries a real bash schema (got ${JSON.stringify(names)})`)
+  assert.ok(names.includes('read'), 'and a real read schema — the two names the anonymous gate admits')
+  // REPLACED, not appended: a list holding both a "do not call bash" stub and a
+  // real bash is a contradiction the model has to resolve, and whichever way it
+  // resolves it, the result is not a measurement.
+  assert.equal(names.filter((n) => n === 'bash').length, 1, 'exactly one bash, so there is no stub to disagree with')
+  assert.deepEqual(
+    names,
+    ['bash', 'read'],
+    'and only the two real schemas are present',
+  )
+  const bash = (body.tools ?? []).find((t) => t.function?.name === 'bash')
+  assert.deepEqual(bash.function.parameters.required, ['command'])
+  assert.doesNotMatch(
+    bash.function.description,
+    /Do not call/,
+    'never the gate stub: a model told not to use a tool cannot be measured using it',
+  )
+})

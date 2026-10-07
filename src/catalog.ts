@@ -1063,6 +1063,19 @@ export interface ProbeRecord {
    */
   readonly context?: MeasuredContext;
   /**
+   * What was MEASURED about this model's declared capabilities, per axis.
+   *
+   * The two axes here are the ones a request can answer: give a model an image
+   * and ask what it sees, give it real tools and ask it to call one. Context and
+   * output are absent by design — they are not questions, they are ceilings.
+   *
+   * Written only when a measurement CONCLUDED. An upstream that was down, a
+   * bucket that was spent, or a reply that was all thinking and no text writes
+   * nothing, because "we could not find out" and "it cannot do this" are
+   * different facts and only the first one is true most often.
+   */
+  readonly capabilities?: Partial<Record<CapabilityAxis, CapabilityVerdict>>;
+  /**
    * Which instrument wrote the effort samples here. See {@link EFFORT_READING};
    * a record without it is read as unmeasured on that axis.
    */
@@ -1193,6 +1206,15 @@ export interface ProbeResult {
    */
   readonly effort?: { readonly kind: "baseline" | "candidate"; readonly tokens: number };
   /**
+   * What a CAPABILITY question concluded, on a reply that carried an answer.
+   *
+   * Absent means the request taught nothing — no text, a refusal, a spent
+   * bucket — and the round writes nothing for it. That is the same distinction
+   * the effort axis makes between a sample and an absence, and it is what keeps
+   * an upstream outage from being persisted as a missing capability.
+   */
+  readonly capability?: { readonly axis: CapabilityAxis; readonly ok: boolean; readonly detail: string };
+  /**
    * Levels this model enumerated in a refusal.
    *
    * Kept even though the round recorded nothing else from that request: the
@@ -1274,6 +1296,27 @@ function correctedEffortKind(entry: Record<string, unknown>): MeasuredEffort | u
  * decides anything: it is the only record of what a model's refusal said it
  * accepts, and that is worth keeping for a cross-check that does not exist yet.
  */
+/**
+ * Defensive read of a persisted capability verdict.
+ *
+ * An axis is kept only if it carries all three parts of a measurement. A half
+ * written entry is not a weak verdict, it is a claim with no evidence attached —
+ * and the panel would render it as measured.
+ */
+function readCapabilities(value: unknown): Partial<Record<CapabilityAxis, CapabilityVerdict>> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const out: Partial<Record<CapabilityAxis, CapabilityVerdict>> = {};
+  for (const axis of ["vision", "tools"] as const) {
+    const entry = value[axis];
+    if (!isPlainObject(entry)) continue;
+    if (typeof entry.ok !== "boolean") continue;
+    if (typeof entry.at !== "number" || !Number.isFinite(entry.at)) continue;
+    if (typeof entry.fp !== "string" || entry.fp === "") continue;
+    out[axis] = { ok: entry.ok, at: entry.at, fp: entry.fp };
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
 function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string[] } {
   const droppedVerdicts: string[] = [];
   if (!isPlainObject(value)) return { probes: {}, droppedVerdicts };
@@ -1312,6 +1355,7 @@ function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string
       ...(entry.swept === true ? { swept: true } : {}),
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
+      ...(readCapabilities(entry.capabilities) === undefined ? {} : { capabilities: readCapabilities(entry.capabilities) }),
       ...(Array.isArray(entry.selfReported)
         ? { selfReported: entry.selfReported.filter((level): level is string => typeof level === "string") }
         : {}),
@@ -1515,16 +1559,144 @@ export interface CatalogSnapshot {
 }
 
 /**
- * The three facts the detail-page panel renders per row. `thinking` is the
- * strongest published thinking level (`"Max"`, `"XHigh"`, …) or `null` when
- * the model publishes no level list — the panel shows no thinking badge then,
- * rather than guessing. The raw level id travels here; display capitalization
- * is the panel's business.
+ * The axes a round can MEASURE, as opposed to declare.
+ *
+ * `vision` and `tools` are the two the panel has always shown or implied without
+ * ever checking: the vision badge is a declaration copied from models.dev, and
+ * "tool calls work" was, until 2026-10-07, an inference from the admission gate.
+ * Both are answerable with one request, so both are worth a slot.
+ *
+ * Context and output are NOT here: they are not questions a cheap request can
+ * ask, they are ceilings measured against the request body. They carry their own
+ * seed tables ({@link SEED_CONTEXT}, {@link SEED_OUTPUT}) and their own runtime
+ * observation (`observeClamp`).
+ */
+export type CapabilityAxis = "vision" | "tools";
+
+/**
+ * What one measurement of an axis concluded.
+ *
+ * `ok` false is deliberately rare: the round records `false` only when the model
+ * ANSWERED and the answer was wrong (it named the wrong colour, or replied in
+ * prose instead of calling the tool). A model that could not be reached records
+ * nothing at all — the same rule the effort axis follows, and for the same
+ * reason: absent is "we do not know", and reading it as "no" would retire a
+ * capability on the strength of an upstream outage.
+ */
+export interface CapabilityVerdict {
+  readonly ok: boolean;
+  readonly at: number;
+  /** Fingerprint of the record this was measured against. */
+  readonly fp: string;
+}
+
+/**
+ * Stable fingerprint of what a capability measurement is ABOUT.
+ *
+ * A vision verdict is about a model that accepts images, so it is discarded when
+ * the declared modalities change; a tool verdict is about nothing the declaration
+ * says, but it is kept on the same fingerprint so one rule covers both.
+ */
+export function capabilityFingerprint(record: CatalogRecord): string {
+  const limit = isPlainObject(record.limit) ? record.limit : {};
+  const modalities = isPlainObject(record.modalities) ? record.modalities : {};
+  const input = Array.isArray(modalities.input) ? modalities.input.join("+") : "-";
+  return `${String(limit.context ?? "-")}:${String(limit.output ?? "-")}:${input}`;
+}
+
+/**
+ * Capabilities this plugin has MEASURED on the live route, by model id.
+ *
+ * Only `true` is ever seeded. Measured 2026-10-07, one request each, and the
+ * requests are the ones the panel's claims had been standing in for:
+ *
+ *   tools — asked to run `echo capability-probe` with three REAL schemas (the
+ *     admission gate's stubs say "Do not call", which would make a compliant
+ *     model look incapable). 9 of the live models emitted a correct tool call.
+ *   vision — a 64x64 PNG, magenta over lime, asked to name the TOP half. Every
+ *     model that declares image input and answered said `magenta`, while the
+ *     no-image control said "no image was attached" (mimo) and `blue`
+ *     (space-bunny) — the wrong answer, which is what proves the image carried it.
+ *
+ * `ling-3.0-flash-fin-free` and `fledge-alpha-free` learned nothing (an endpoint
+ * that has answered `Endpoint is unavailable.` since 2026-10-06, and an upstream
+ * 500), so they are ABSENT rather than seeded false — the same distinction the
+ * effort axis makes between "unmeasured" and "measured negative".
+ */
+const SEED_CAPABILITIES: Readonly<
+  Record<string, { readonly vision?: true; readonly tools?: true }>
+> = {
+  "mimo-v2.6-flash-free": { vision: true, tools: true },
+  "space-bunny-free": { vision: true, tools: true },
+  "longcat-2.5-preview-free": { vision: true, tools: true },
+  "muse-spark-1.2-contributor-free": { vision: true, tools: true },
+  "muse-spark-1.3-contributor-free": { vision: true, tools: true },
+  "nemotron-3.5-lightning-free": { tools: true },
+  "nemotron-3-ultra-free": { tools: true },
+  "ling-3.1-flash-free": { tools: true },
+  "big-pickle": { tools: true },
+};
+
+/** The measured verdict for one axis, from the round first and the seed second. */
+export function measuredCapabilityFor(
+  record: CatalogRecord | undefined,
+  id: string,
+  axis: CapabilityAxis,
+  probes: ProbeMap | undefined,
+): CapabilityVerdict | undefined {
+  if (record === undefined) return undefined;
+  const fp = capabilityFingerprint(record);
+  const live = probes?.[id]?.capabilities?.[axis];
+  if (live !== undefined && live.fp === fp) return live;
+  const seeded = SEED_CAPABILITIES[id]?.[axis];
+  // A seed carries no timestamp of its own: it is a property of the shipped
+  // table, which changes in a commit, not a fact about a moment. `at: 0` is what
+  // keeps it out of any "measured N days ago" arithmetic.
+  return seeded === true ? { ok: true, at: 0, fp } : undefined;
+}
+
+/**
+ * The facts the detail-page panel renders per row.
+ *
+ * `thinking` is the strongest published thinking level (`"Max"`, `"XHigh"`, …)
+ * or `null` when the model publishes no level list — the panel shows no thinking
+ * badge then, rather than guessing. The raw level id travels here; display
+ * capitalization is the panel's business.
+ *
+ * The two NUMBERS are the point of the change. `contextWindow` and `maxOutput`
+ * are read off the same `Model<Api>` pi-ai clamps the request with, so the panel
+ * cannot describe a limit the request path does not use — and `declaredContext`
+ * /
+ * `declaredOutput` travel beside them so a reader can see when the shipped number
+ * is not the published one.
+ *
+ * `measured` says, per axis, whether the number or badge in this row was
+ * verified on the route or copied from models.dev. A panel that shows a declared
+ * 200,000 next to a measured 1,048,576 with nothing to tell them apart is worse
+ * than one that shows only the declaration: both look equally true.
  */
 export interface ModelCapability {
   readonly id: string;
   readonly image: boolean;
   readonly thinking: string | null;
+  /** What pi-ai will clamp this conversation against. */
+  readonly contextWindow: number | undefined;
+  /** What pi-ai will put on the wire as `max_tokens`. */
+  readonly maxOutput: number | undefined;
+  /** What models.dev published, for the two numbers above. */
+  readonly declaredContext: number | undefined;
+  readonly declaredOutput: number | undefined;
+  /** The ladder actually offered, including `off` when it is offered. */
+  readonly levels: readonly string[];
+  /** The Off spelling that is MEASURED to stop reasoning, else null. */
+  readonly off: string | null;
+  /** Per axis: was this verified on the route, or copied from a declaration? */
+  readonly measured: {
+    readonly context: boolean;
+    readonly output: boolean;
+    readonly vision: boolean;
+    readonly tools: boolean;
+  };
 }
 
 /** Strongest-first thinking levels; `off` is never a badge. */
@@ -1558,12 +1730,73 @@ export function topThinkingLevel(model: Model<Api>): string | null {
   return null;
 }
 
+/**
+ * The capability axes a round would ask about for this model right now, in a
+ * fixed order.
+ *
+ * Vision is only asked of a model that DECLARES image input: there is no badge
+ * on screen for a model that claims no vision, so there is nothing on screen to
+ * hold to an answer. Tools is asked of every model, because the anonymous gate
+ * already assumes every request carries them — that assumption is exactly what
+ * was never checked.
+ *
+ * A model with evidence is never asked again. That is what makes this affordable:
+ * the cost is one request per axis per model, ONCE, and the seed table means the
+ * models already measured on 2026-10-07 cost nothing at all.
+ */
+export function capabilityQuestionsFor(
+  model: Model<Api>,
+  record: CatalogRecord | undefined,
+  probes: ProbeMap | undefined,
+): CapabilityAxis[] {
+  const out: CapabilityAxis[] = [];
+  const declaresImage = Array.isArray(model.input) && model.input.includes("image");
+  if (declaresImage && measuredCapabilityFor(record, model.id, "vision", probes) === undefined) out.push("vision");
+  if (measuredCapabilityFor(record, model.id, "tools", probes) === undefined) out.push("tools");
+  return out;
+}
+
 /** Project one effective record to the panel's capability card. */
-export function modelCapability(model: Model<Api>): ModelCapability {
+export function modelCapability(
+  model: Model<Api>,
+  context?: {
+    /** The raw models.dev record, for the declared values and the fingerprints. */
+    readonly record?: CatalogRecord | undefined;
+    readonly probes?: ProbeMap | undefined;
+    /** Whether the advertised window came from a measurement rather than a value. */
+    readonly measuredContext?: boolean;
+    readonly measuredOutput?: boolean;
+    readonly measuredEffort?: MeasuredEffort | undefined;
+  },
+): ModelCapability {
+  const record = context?.record;
+  const limit = isPlainObject(record?.limit) ? record.limit : {};
+  const map = model.thinkingLevelMap as Record<string, string | null> | undefined;
+  const levels = map !== null && typeof map === "object" ? Object.keys(map).filter((level) => typeof map[level] === "string") : [];
+  const vision = measuredCapabilityFor(record, model.id, "vision", context?.probes);
+  const tools = measuredCapabilityFor(record, model.id, "tools", context?.probes);
+  // `off` is `null` in the map when it is offered but unproven, so a string is
+  // the only reading that says "this spelling is known to stop reasoning".
+  const off = map !== null && typeof map === "object" && typeof map.off === "string" ? map.off : null;
   return {
     id: model.id,
     image: Array.isArray(model.input) && model.input.includes("image"),
     thinking: topThinkingLevel(model),
+    contextWindow: model.contextWindow,
+    maxOutput: model.maxTokens,
+    declaredContext: finitePositive(limit.context),
+    declaredOutput: finitePositive(limit.output),
+    levels,
+    off,
+    measured: {
+      context: context?.measuredContext === true,
+      output: context?.measuredOutput === true,
+      // A model that declares no image input has nothing to verify: there is no
+      // claim on screen to back up, so the axis reads as unmeasured rather than
+      // as a failure.
+      vision: vision !== undefined,
+      tools: tools !== undefined,
+    },
   };
 }
 
@@ -3006,6 +3239,45 @@ export async function runProbeRound(
         applyMeasuredChannel(state.models, state.probes);
       }
       } // shot loop
+      // The capability axes this model has never been asked about. Asked AFTER the
+      // effort shots and on the same budget, for two reasons: a model that did not
+      // answer at all is not asked a second question (the round already knows
+      // nothing about it), and a capability sample can never be filed against the
+      // effort tally because it is not produced by the shot loop at all.
+      //
+      // `capabilityQuestionsFor` reads the SAME evidence the panel reads, so an
+      // axis the panel already shows as measured is not asked again — the round
+      // cannot re-measure what it already knows, which is what keeps this from
+      // turning into a permanent per-round tax.
+      const axisQuestions = capabilityQuestionsFor(model, rawById(model.id), state.probes);
+      for (const axis of axisQuestions) {
+        if (state.probeRun.requests >= samplesPerModel) break;
+        if (state.probes[model.id]?.verdict !== "ok") break;
+        const record1 = rawById(model.id);
+        if (record1 === undefined) break;
+        state.probeRun.requests += 1;
+        const askedAt = deps.now();
+        try {
+          const capabilityOutcome = await probe!(model, `capability:${axis}`);
+          const judged = capabilityOutcome.kind === "ok" ? capabilityOutcome.capability : undefined;
+          // Nothing is written when the request taught us nothing — the model
+          // said nothing, the upstream refused, the bucket was spent. An absent
+          // verdict means the panel shows "not measured" and the next round
+          // tries again, which is the honest state of an unanswered question.
+          if (judged === undefined) continue;
+          const prior1 = state.probes[model.id];
+          state.probes[model.id] = {
+            ...prior1,
+            capabilities: {
+              ...prior1?.capabilities,
+              [axis]: { ok: judged.ok, at: askedAt, fp: capabilityFingerprint(record1) },
+            },
+          };
+        } catch {
+          // Same rule as the shot loop: a prober that throws has learned nothing,
+          // and a capability axis is never worth failing a round over.
+        }
+      }
       state.probeRun.done += 1;
     }
   } finally {
@@ -3250,10 +3522,38 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       // One pass over the single effective list feeds both `visible` and
       // `capabilities`, so the ids and the cards can never disagree.
       const effective = effectiveList(state.models, state.zenIds, state.probes);
+      // The raw records behind the derived models, so a card can say what
+      // models.dev published next to what the plugin actually advertises — and
+      // so the two provenance flags come from the same seed tables and probe
+      // records the request path reads, rather than from a second opinion formed
+      // here. A panel that recomputes "measured" on its own is exactly the kind
+      // of second authority that drifts.
+      const rawById = (id: string): CatalogRecord | undefined => {
+        const raw = state.cache?.models?.[id];
+        return isPlainObject(raw) ? ({ ...raw, id } as CatalogRecord) : undefined;
+      };
+      const section = state.cache?.models;
+      const efforts = section === undefined ? new Map<string, MeasuredEffort>() : measuredEffortMap(effective, section, state.probes);
       return {
         models: state.models.slice(),
         visible: effective.map((model) => model.id),
-        capabilities: effective.map(modelCapability),
+        capabilities: effective.map((model) => {
+          const record = rawById(model.id);
+          const limit = isPlainObject(record?.limit) ? record.limit : {};
+          const declaredContext = finitePositive(limit.context);
+          const declaredOutput = finitePositive(limit.output);
+          return modelCapability(model, {
+            record,
+            probes: state.probes,
+            // "Measured" means the number on the wire is not the number that was
+            // published — stated plainly rather than re-derived from the seed
+            // tables, because this is the only reading a reader of the panel can
+            // check: they can see both numbers.
+            measuredContext: declaredContext !== undefined && model.contextWindow !== declaredContext,
+            measuredOutput: declaredOutput !== undefined && model.maxTokens !== declaredOutput,
+            measuredEffort: efforts.get(model.id),
+          });
+        }),
         source: state.source,
         updatedAt: state.updatedAt,
         gateCheckedAt: state.gateCheckedAt,

@@ -11,6 +11,21 @@ cost. Behaviour below is what a user can observe change.
 
 ### Added
 
+- **The panel row reports the limits the request actually uses, and says which
+  of them were measured.** A row now shows the context window and the maximum
+  output pi-ai clamps with, plus vision, thinking and tool-call badges — and a
+  tick on anything that was verified on the route rather than copied from
+  models.dev, with a replaced declaration struck through beside the number that
+  replaced it. The card used to carry two booleans and a level, so a declared
+  200,000 and a measured 1,048,576 were the same object on screen, and the panel
+  could not disagree with the wire even in principle.
+- **A round now measures the two capabilities it used to assume.** Given an
+  image and asked to name its top half, a model answers or it does not; given
+  real tool schemas — not the admission gate's "do not call" stubs — and asked
+  to run one command, it emits a tool call or it does not. Each axis is asked
+  once per model and the verdict is persisted, so a model you keep using costs
+  nothing afterwards. A round that learns nothing writes nothing: the badge stays
+  unmarked, because "we could not find out" and "it cannot" are different facts.
 - **A round's cost is reported.** The report names how many requests it sent
   (a round may take several samples of one model, so the model count is not the
   bill) and how many models still owe samples.

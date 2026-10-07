@@ -17,7 +17,7 @@ import { getApiProvider, registerApiProvider } from "@earendil-works/pi-ai/compa
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
-import type { Catalog } from "./catalog.js";
+import type { CapabilityAxis, Catalog } from "./catalog.js";
 
 export const PROVIDER_ID = "opencode-zen-free";
 export const BASE_URL = "https://opencode.ai/zen/v1";
@@ -767,6 +767,93 @@ const PROBE_PROMPT = "hi";
  */
 export const PROBE_MAX_TOKENS = 1024;
 /**
+ * The budget a vision question gets, for the reason spelled out at the one place
+ * it is used: a reasoning model can spend a small budget entirely on thinking and
+ * return no text, which is indistinguishable from a model that cannot see.
+ */
+export const CAPABILITY_VISION_MAX_TOKENS = 4096;
+
+/**
+ * The two questions a round can ask about a DECLARED capability, and how each one
+ * is decided.
+ *
+ * Both existed as claims before either had a measurement: the vision badge is a
+ * copy of `modalities.input`, and "tool calls work" was an inference from the
+ * anonymous gate that admits a request only when it carries `read` and `bash`.
+ * A panel that shows a badge nobody checked is a promise the plugin cannot keep,
+ * so both became questions the round can ask — once per model, then never again
+ * (the verdict is persisted).
+ *
+ * The image is a 64x64 PNG built by hand and embedded here: magenta over lime,
+ * no network, no dependency. Asking for the TOP half is what makes the answer
+ * unfalsifiable from the prompt — the model cannot guess which half was asked
+ * about — and the no-image control answers "no image was attached" and "blue",
+ * so the wrong answer is on record as well as the right one.
+ *
+ * The tool schemas are REAL. The admission gate's own stubs describe themselves
+ * as "Unavailable in this request. Do not call." — so measuring against them
+ * would report a model that correctly obeys an instruction as a model that
+ * cannot use tools.
+ */
+const CAPABILITY_PROBE_IMAGE_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAATklEQVR42u3PMQkAAAwDsPo3vWnoWQjEQHK5aREQEBAQEBAQEBAQEBAQEBAQEBAQEBAQqAPzBAQEBAQEBAQEBAQEBAQEBAQEBAQEBARaDx986VrSGkoPAAAAAElFTkSuQmCC";
+const CAPABILITY_TOOL_SCHEMAS: readonly Record<string, unknown>[] = [
+  {
+    type: "function",
+    function: {
+      name: "bash",
+      description: "Execute a shell command in a persistent session and return its output.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "The command to execute" },
+          description: { type: "string", description: "A short description of what the command does" },
+        },
+        required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read",
+      description: "Read a file from the local filesystem. Takes a path and returns its contents with line numbers.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "The path to read" } },
+        required: ["path"],
+      },
+    },
+  },
+];
+
+const CAPABILITY_QUESTIONS: Readonly<Record<CapabilityAxis, { question: string; prompt: string }>> = {
+  vision: {
+    question: "capability:vision",
+    prompt:
+      "Look at the attached image. Reply with ONLY one lowercase English colour word: the colour of the image's TOP half. No other words.",
+  },
+  tools: {
+    question: "capability:tools",
+    prompt:
+      "Call the `bash` tool with the command `echo capability-probe`. Do not answer from memory — make the tool call now, then stop.",
+  },
+};
+
+/**
+ * The axis a question string asks about, or undefined when it is not one.
+ *
+ * The prefix is the whole contract between the catalogue's round and this
+ * prober, and it is deliberately not a value in the effort ladder: a capability
+ * question must never be mistaken for a reasoning spelling, or a sample would be
+ * filed against the wrong axis.
+ */
+export function capabilityAxisOf(question: string | undefined): CapabilityAxis | undefined {
+  if (typeof question !== "string") return undefined;
+  const axis = question.startsWith("capability:") ? question.slice("capability:".length) : "";
+  return axis === "vision" || axis === "tools" ? axis : undefined;
+}
+/**
  * Same per-model ceiling as scripts/test-live.mjs, and the same 15s 9router's
  * per-model test uses. The round is sequential over the whole catalogue, so the
  * per-model ceiling is the round's worst case multiplied: 30s here was up to
@@ -929,6 +1016,16 @@ export type ProbeOutcome =
        * only evidence we have of a level models.dev does not publish.
        */
       selfReported?: readonly string[];
+      /**
+       * What a CAPABILITY question concluded, when this request was one.
+       *
+       * `ok: false` only when the model ANSWERED and the answer was wrong. A
+       * reply with no text at all — a reasoning model that spent the whole
+       * budget thinking, measured 2026-10-07 on `muse-spark-1.2` — reports
+       * nothing, because "it said nothing" is not evidence about vision, and
+       * writing it down would retire a capability on a formatting accident.
+       */
+      capability?: { readonly axis: CapabilityAxis; readonly ok: boolean; readonly detail: string };
     }
   | {
       kind: "dead";
@@ -1253,11 +1350,88 @@ function failureKindFor(status: number, body: string, apiKey: string | undefined
  * `inconclusive` rather than rejecting, so one bad model cannot abort a
  * catalogue-wide probe run.
  */
+/**
+ * What one capability reply concluded — or `undefined`, which means "this
+ * request taught us nothing" and must not be recorded as a verdict.
+ *
+ * `undefined` is a real outcome, not an oversight: a reasoning model can reply
+ * with thinking and no text (measured 2026-10-07, `muse-spark-1.2` at a 1024
+ * budget), and recording "cannot see" from a reply that said nothing would retire
+ * a capability on a formatting accident. The same rule keeps an upstream 500 or a
+ * spent bucket out of the evidence: those never reach here, because this only
+ * runs on a reply that carried an answer.
+ */
+function judgeCapability(
+  axis: CapabilityAxis,
+  result: Record<string, unknown>,
+): { axis: CapabilityAxis; ok: boolean; detail: string } | undefined {
+  const content = Array.isArray(result.content) ? result.content : [];
+  if (axis === "tools") {
+    const calls = content.filter(
+      (part): part is { type: string; name: string; arguments: unknown } =>
+        part !== null && typeof part === "object" && (part as { type?: unknown }).type === "toolCall",
+    );
+    if (calls.length === 0) {
+      const said = content
+        .filter((part): part is { type: string; text: string } =>
+          part !== null && typeof part === "object" && (part as { type?: unknown }).type === "text",
+        )
+        .map((part) => part.text)
+        .join(" ")
+        .trim();
+      // Text instead of a call is a conclusion — the model chose to answer rather
+      // than act. Saying nothing at all is not, and stays unmeasured.
+      if (said === "") return undefined;
+      return { axis, ok: false, detail: "answered in prose instead of calling a tool" };
+    }
+    const named = calls.some((call) => call.name === "bash" || call.name === "read");
+    return {
+      axis,
+      ok: named,
+      detail: named ? `called ${calls.map((c) => c.name).join(", ")}` : `called ${calls.map((c) => c.name).join(", ")}, which is not a gate tool`,
+    };
+  }
+  const said = content
+    .filter((part): part is { type: string; text: string } =>
+      part !== null && typeof part === "object" && (part as { type?: unknown }).type === "text",
+    )
+    .map((part) => part.text)
+    .join(" ")
+    .trim();
+  if (said === "") return undefined;
+  // The image is magenta on top and lime below, so the two are opposites: a
+  // model that cannot see has one answer available and it is the wrong one. Both
+  // synonyms are accepted because a colour name is a language act, not a token
+  // match — but the BOTTOM half is named as a failure, never as a near miss.
+  const top = /magenta|fuchsia|pink|purple/i.test(said);
+  const bottom = /lime|green/i.test(said);
+  return {
+    axis,
+    ok: top && !bottom,
+    detail: top && !bottom ? "named the top half" : bottom ? "named the BOTTOM half — the image did not reach it" : "named no colour",
+  };
+}
+
 async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutcome> {
   const recorder = createRecordingFetch(deps.fetchImpl ?? globalThis.fetch);
-  const context = {
-    messages: [{ role: "user", content: deps.prompt ?? PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() }],
-  };
+  // A capability question replaces the prompt, and for vision it also has to
+  // carry an image — which means the block form of a user message rather than a
+  // string. The shape is the one DSH produces when it attaches a screenshot, so
+  // the probe exercises the production path rather than a private one.
+  const axis = capabilityAxisOf(deps.question);
+  const capability = axis === undefined ? undefined : CAPABILITY_QUESTIONS[axis];
+  const message =
+    axis === "vision"
+      ? {
+          role: "user",
+          content: [
+            { type: "text", text: capability?.prompt ?? PROBE_PROMPT },
+            { type: "image", data: CAPABILITY_PROBE_IMAGE_BASE64, mimeType: "image/png" },
+          ],
+          timestamp: deps.now?.() ?? Date.now(),
+        }
+      : { role: "user", content: deps.prompt ?? capability?.prompt ?? PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() };
+  const context = { messages: [message] };
   const signal = AbortSignal.timeout(deps.timeoutMs ?? PROBE_TIMEOUT_MS);
   // Whether the request ran out of time is a property of the SIGNAL, not of
   // whichever error happens to surface: the provider flattens an abort into a
@@ -1283,7 +1457,13 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     // only thing it did change was the channel.
     const stream = deps.provider.streamSimple(model, context, {
       apiKey: deps.apiKey ?? "public",
-      maxTokens: deps.maxTokens ?? PROBE_MAX_TOKENS,
+      // A vision question gets 4096 rather than the usual 1024, and that is a
+      // measurement rather than a guess: at 1024 a reasoning model can spend the
+      // whole budget thinking and return no text at all (mimo at 256 and 1024,
+      // muse-spark-1.2 at 1024), which reads as "this model cannot see" when it
+      // can. At 4096 the same models answer. Spending four output tokens per
+      // thousand to avoid a false negative is the cheaper side of that trade.
+      maxTokens: deps.maxTokens ?? (axis === "vision" ? CAPABILITY_VISION_MAX_TOKENS : PROBE_MAX_TOKENS),
       // The default reasoning effort for muse-spark is xhigh; a probe only
       // needs any reply, so it asks for the cheapest one.
       reasoning: "low",
@@ -1317,6 +1497,27 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
         // question the round asked in that case, so it needs no extra rule.
         const asks = deps.question !== undefined && deps.question !== "baseline" && deps.question !== "settled";
         injected.reasoning = asks;
+        // A capability question carries no reasoning spelling at all: it is not
+        // about the effort axis, and a capability sample filed against it would
+        // be a sample about the wrong thing. What it does carry, for the tool
+        // axis, is the real schemas — the gate's stubs are the one tool
+        // definition a model is told not to use.
+        if (axis !== undefined) {
+          if (axis !== "tools") return body;
+          // The gate's stubs are REPLACED, not appended to. They describe
+          // themselves as "Unavailable in this request. Do not call." — and a
+          // list carrying both a "do not call bash" and a real bash is a
+          // contradiction the model gets to resolve, which is not a measurement.
+          // The real schemas carry the same two names, so the gate is still
+          // satisfied after they replace the stubs.
+          const existing = (Array.isArray(body.tools) ? body.tools : []).filter(
+            (tool): tool is Record<string, unknown> =>
+              tool !== null &&
+              typeof tool === "object" &&
+              (tool as { function?: { description?: unknown } }).function?.description !== STUB_DESCRIPTION,
+          );
+          return { ...body, tools: [...existing, ...CAPABILITY_TOOL_SCHEMAS] };
+        }
         // The baseline round sends nothing at all: it is the same request the
         // liveness probe was already making, so asking for the model's own
         // default costs no extra quota.
@@ -1378,6 +1579,10 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
         kind: injected.reasoning === true ? "candidate" : "baseline",
         tokens: observed,
       },
+      // A capability question is judged on the ANSWER, not on the fact that one
+      // arrived — so it never rides the `effort` bucket above, which belongs to
+      // the reasoning axis alone.
+      ...(axis === undefined ? {} : { effort: undefined, capability: result === undefined ? undefined : judgeCapability(axis, result) }),
     };
   }
   const { status, body, cause } = recorder.read();
