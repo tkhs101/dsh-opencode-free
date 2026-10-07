@@ -474,7 +474,14 @@ export function apply(ctx: HostContext, config?: Config): void {
     modelErrors: /* @__PURE__ */ new Map<string, string>(),
     configuredMaxTokens: /* @__PURE__ */ new Map<string, number>(),
     streamIdleTimeoutMs: 600 * 1_000,
-    timeoutMs: 180_000,
+    // This one reaches pi-ai as the SDK's whole-request `timeout`, and it was
+    // 180s — which decided the real length of a reply before any max-output
+    // number could. Measured 2026-10-07: asking mimo for 34,000 or 40,000 output
+    // tokens died at 181s with HTTP 200 and no usage, while the same request
+    // with a longer timeout produced all 40,000 at ~152 tok/s. 180s bought about
+    // 27,000 tokens — less than the 32,000 the plugin used to advertise. It now
+    // matches `streamIdleTimeoutMs` above, so the two clocks agree.
+    timeoutMs: 600 * 1_000,
     maxRequestImageBytes: 20 * 1024 * 1024,
     requestImagePixelBudget: 2048 * 2048,
     requestImageMaxBytes: 1024 * 1024,

@@ -1640,7 +1640,22 @@ function compatRequestOptions<T extends StreamOptions>(
     // missing it while identical ones carrying it pass. Set it explicitly here
     // so the drop cannot remove it. Same affinity value as x-opencode-session.
     sessionId: opencodeSession,
-    timeoutMs: options?.timeoutMs ?? 180_000,
+    // The WHOLE-request timeout, not an idle one: pi-ai hands this to the
+    // OpenAI SDK as `timeout`, which aborts the request end to end.
+    //
+    // It was 180s, and that turned out to be the ceiling that actually decided
+    // how long a reply could be — measured 2026-10-07, asking
+    // `mimo-v2.6-flash-free` for 40,000 and then 34,000 output tokens: both died
+    // at 181s with HTTP 200 and no usage frame. Re-run through the provider
+    // directly with a 900s timeout, the same request produced all 40,000 tokens
+    // with `stopReason: "length"` at ~152 tok/s. So 180s bought about 27,000
+    // tokens — less than the 32,000 the plugin used to advertise, which is why
+    // raising the ceiling alone would have changed nothing a user could observe.
+    //
+    // 600s matches the profile's own `streamIdleTimeoutMs`, so the host already
+    // expects a stream to run that long; a caller that sets its own timeout
+    // still wins.
+    timeoutMs: options?.timeoutMs ?? 600_000,
     maxRetries: options?.maxRetries ?? 2,
     fetch: withEncryptedContentFallback(options?.fetch as FetchFunction | undefined, recorder) as T["fetch"],
     // The map is the single authority on what Off puts on the wire; this mirrors

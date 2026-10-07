@@ -1791,3 +1791,41 @@ test('disposing the node:http patch unwraps it when nothing wrapped after', asyn
     http.request = before
   }
 })
+
+test('GUARD: the request timeout is not shorter than the reply it has to carry', async () => {
+  // 180s used to be the whole-request deadline in BOTH places it is set, and it
+  // decided how long a reply could be before any max-output number applied.
+  // Measured 2026-10-07: `mimo-v2.6-flash-free` asked for 34,000 and then
+  // 40,000 output tokens died at 181s with HTTP 200 and no usage frame; through
+  // the provider with a longer timeout the same request produced all 40,000 at
+  // ~152 tok/s. 180s bought about 27,000 tokens — less than the 32,000 the
+  // plugin used to advertise, which is why raising the ceiling changed nothing a
+  // user could observe.
+  //
+  // The host profile's copy is the one that WINS: dsh-llm-pi-ai's
+  // `profileOptions` copies `profile.timeoutMs` into every request's options,
+  // and the provider then keeps the caller's value. So a guard that read only
+  // the plugin's default would pass while the behaviour stayed broken — both
+  // numbers are pinned here, and both must equal the profile's
+  // `streamIdleTimeoutMs`, so the two clocks cannot drift apart again.
+  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const provider = await readFile(new URL('../src/zen-provider.ts', import.meta.url), 'utf8')
+  const literal = /streamIdleTimeoutMs:\s*([\d_]+(?:\s*\*\s*[\d_]+)*)/.exec(source)?.[1] ?? ''
+  const idle = literal.split('*').map((part) => Number(part.trim().replace(/_/g, ''))).reduce((a, b) => a * b, 1)
+  assert.equal(idle, 600_000, 'the profile still carries a 10-minute stream idle timeout')
+  assert.match(
+    source,
+    /timeoutMs:\s*600 \* 1_000/,
+    'the HOST profile copy must be 600s — this is the one dsh-llm-pi-ai puts on the wire',
+  )
+  assert.match(
+    provider,
+    /timeoutMs:\s*options\?\.timeoutMs \?\? 600_000/,
+    "the provider's own default matches, and a caller's own timeout still wins",
+  )
+  assert.doesNotMatch(
+    `${source}\n${provider}`,
+    /180_000/,
+    'no 180s request deadline is left anywhere on the request path',
+  )
+})

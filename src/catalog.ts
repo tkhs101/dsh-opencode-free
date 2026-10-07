@@ -1842,6 +1842,8 @@ export function clampProposalFor(declared: number): number {
  *     accepted `max_tokens` 1040384 — the largest value that fits inside their own
  *     advertised window — against declarations of 32000 and 131072.
  *   nemotron-3.5-lightning-free accepted 991808 against a declaration of 262144.
+ *   nemotron-3-ultra-free accepted 991808 against a declaration of 128000, on a
+ *     second run after the first was answered by an overloaded upstream.
  *   big-pickle accepted 128000 (1040384 → HTTP 500, which concludes nothing).
  *   longcat-2.5-preview-free accepted 262144 and refused 393216 with the generic
  *     `invalid_request_error`; the bisection step at 262144 answered, so the
@@ -1850,9 +1852,10 @@ export function clampProposalFor(declared: number): number {
  * `space-bunny-free` is deliberately ABSENT: it accepted 524288, which is what
  * models.dev declares, and refused 782336 — the one live model whose declaration
  * is right, and the reason this table is a measurement table and not a rule.
- * `ling-3.1-flash-free` (429), `nemotron-3-ultra-free` (overloaded) and
- * `ling-3.0-flash-fin-free` (endpoint unavailable) learned nothing and are absent
- * too: their declarations stand, unverified, exactly as before.
+ * `ling-3.1-flash-free` (429) and `ling-3.0-flash-fin-free` (an endpoint that has
+ * answered `Endpoint is unavailable.` on every attempt since 2026-10-06) learned
+ * nothing and are absent too: their declarations stand, unverified, exactly as
+ * before.
  *
  * Each entry is the largest budget the route ACCEPTED, never a number inferred
  * from one, and never more than the window this plugin advertises for the same
@@ -1868,6 +1871,7 @@ const SEED_OUTPUT: Readonly<Record<string, { readonly declared: number; readonly
   "longcat-2.5-preview-free": { declared: 131072, measured: 262144 },
   "muse-spark-1.2-contributor-free": { declared: 131072, measured: 1040384 },
   "muse-spark-1.3-contributor-free": { declared: 131072, measured: 1040384 },
+  "nemotron-3-ultra-free": { declared: 128000, measured: 991808 },
   "nemotron-3.5-lightning-free": { declared: 262144, measured: 991808 },
 };
 

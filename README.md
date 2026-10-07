@@ -127,9 +127,11 @@ models.dev per model (Muse Spark gets `minimal`…`xhigh`, Space Bunny gets
 
 Tool calls work, and that is now a measurement rather than an admission
 requirement: asked to run one command, every model that answered this round
-answered with a real tool call and the right arguments — 7 of 7 on the live set
-(2026-10-07). The free tier still admits a request only when it carries `read`
-and `bash`, which is a separate requirement and is not what this sentence means.
+answered with a real tool call and the right arguments — 9 of 9 on the live set
+(2026-10-07). The models that never answered failed identically with and
+without tools, which is an upstream condition rather than a missing capability.
+The free tier still admits a request only when it carries `read` and `bash`,
+which is a separate requirement and is not what this sentence means.
 
 `off` is the exception: it is **measured, not assumed**. The round asks the
 model for no reasoning and for its own lowest level, compares the reasoning
@@ -150,8 +152,15 @@ instead. Both fields drive real behaviour, so both were measured the same way:
 the context window is read off the endpoint's own refusal, and the maximum
 output off what the route accepts on the wire. Mimo V2.6 Flash declares a
 200,000-token window and 32,000 tokens of output; it answers 1,048,576 and
-1,040,384. Space Bunny Free's declarations measured correct and are used as they
-are.
+1,040,384, and it does generate past the declared 32,000: asked for 40,000 it
+produced 40,000. Space Bunny Free's declarations measured correct and are used
+as they are.
+
+One ceiling is not a number, though: time. Mimo V2.6 Flash writes at about 150
+tokens a second, so a single reply is bounded by the 10-minute request timeout as
+much as by its token ceiling — roughly 90,000 tokens, far short of the 1,040,384
+the route accepts. Nothing reports that: a reply that stops at its own limit
+looks exactly like a finished one. It used to be worse, at 3 minutes.
 
 ### Availability check
 

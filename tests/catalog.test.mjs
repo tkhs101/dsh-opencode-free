@@ -2220,12 +2220,14 @@ test('GUARD: a measured output ceiling is used, and it never exceeds the adverti
   // outgoing body:
   //
   //   mimo-v2.6-flash-free    declared   32000   accepted 1040384
-  //   fledge-alpha-free       declared  131072   accepted 1040384
+  //   fledge-alpha-free       declared  131072   accepted 1040384 (twice)
   //   muse-spark-1.2/1.3      declared  131072   accepted 1040384
+  //   nemotron-3-ultra        declared  128000   accepted  991808 (on the rerun)
   //   nemotron-3.5-lightning  declared  262144   accepted  991808
   //   longcat-2.5-preview     declared  131072   accepted 262144, refused 393216
   //   big-pickle              declared   32000   accepted  128000
   //   space-bunny-free        declared  524288   accepted  524288  <- right
+  //   ling-3.1 / ling-3.0     declared   32768   nothing learned (429, endpoint down)
   const section = (output) => ({
     'mimo-v2.6-flash-free': { ...modelsDict()['space-bunny-free'], id: 'mimo-v2.6-flash-free', name: 'Mimo', limit: { context: 200000, output } },
     'space-bunny-free': { ...modelsDict()['space-bunny-free'], id: 'space-bunny-free', name: 'Space Bunny', limit: { context: 1048576, output: 524288 } },

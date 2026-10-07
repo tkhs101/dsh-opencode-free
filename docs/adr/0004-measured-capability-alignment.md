@@ -1418,13 +1418,19 @@ nemotron-3-ultra-free 的基線 49、nemotron-3.5-lightning-free 的基線 30。
 | `muse-spark-1.2-contributor-free` | 131072 | **1040384** | ≥7.9× | — |
 | `muse-spark-1.3-contributor-free` | 131072 | **1040384** | ≥7.9× | — |
 | `fledge-alpha-free` | 131072 | **1040384** | ≥7.9× | — |
+| `nemotron-3.ultra-free` | 128000 | **991808** | ≥7.7× | 首輪 503，09:07 重跑取得 |
 | `nemotron-3.5-lightning-free` | 262144 | **991808** | ≥3.8× | — |
 | `longcat-2.5-preview-free` | 131072 | 262144 | ≥2× | 393216 → 400，二分 262144 仍 200 |
 | `big-pickle` | 32000 | 128000 | ≥4× | 1040384 → HTTP 500（無結論） |
 | `space-bunny-free` | 524288 | 524288 | **1×** | 782336 → 400，二分後仍單調 |
-| `ling-3.1-flash-free` | 32768 | — | 無資料 | 429 `Endpoint is unavailable.` |
-| `nemotron-3-ultra-free` | 128000 | — | 無資料 | 200 內 `503 Service temporarily overloaded` |
-| `ling-3.0-flash-fin-free` | 32768 | — | 無資料 | 400 `Endpoint is unavailable.` |
+| `ling-3.1-flash-free` | 32768 | — | 無資料 | 三次 429 `Endpoint is unavailable.` |
+| `ling-3.0-flash-fin-free` | 32768 | — | 無資料 | 四次 400 `Endpoint is unavailable.` |
+
+**首輪的「無資料」不是模型的性質，是當時上游的狀況**：`nemotron-3-ultra-free`
+在 09:07 重跑即取得 991808（兩次獨立執行）。`ling-3.1-flash-free` 與
+`ling-3.0-flash-fin-free` 在 09:07 仍然只回 429／400 的
+`Endpoint is unavailable.`——這兩個端點自 2026-10-06 起就持續如此，屬於
+**端點健康**，不是能力問題，故不影響任何結論。
 
 **`space-bunny-free` 是這張表存在的理由**：它的宣告量測為**正確**
 （524288 收、782336 拒，二分單調），所以這不是一條規則，是一份證據表——
@@ -1446,14 +1452,20 @@ README 長期宣稱「工具可用」並自我註明那是**准入條件**而非
   那個「Unavailable in this request. Do not call.」的佔位——否則模型照做反而會
   被讀成能力不足），要求「呼叫 `bash` 跑 `echo capability-probe`」：
   **7/7 發出真實 toolCall 且參數正確**（mimo、space-bunny、longcat、
-  muse-spark-1.2/1.3、nemotron-3.5、big-pickle）。另外四個
-  （nemotron-ultra、ling×2、fledge）`stopReason:error`，**帶工具與不帶工具
-  的報文逐字元組相同**（Nvidia 503 / `Endpoint is unavailable.` / HTTP 500），
-  故那是上游狀況，不是能力缺失。
+  muse-spark-1.2/1.3、nemotron-3.5、big-pickle）。09:07 補測首輪失敗的四個：
+  `nemotron-3-ultra-free` 與 `ling-3.1-flash-free` 同樣發出正確 toolCall，
+  累計 **9/9**；`ling-3.0-flash-fin-free` 與 `fledge-alpha-free` 仍
+  `stopReason:error`。四者的 `stopReason:error` **帶工具與不帶工具的報文逐字元組
+  相同**（Nvidia 503 / `Endpoint is unavailable.` / HTTP 500），故那是上游
+  狀況，不是能力缺失。
 - **視覺**：64×64 手寫 PNG（上半 `#FF00FF`、下半 `#00FF00`），
-  問「上半部是什麼顏色」：**5/5 答 `magenta`**。對照組（無圖）在 mimo 回答
+  問「上半部是什麼顏色」：**5/5 答 `magenta`**（mimo、longcat、
+  muse-spark-1.2/1.3、space-bunny）。對照組（無圖）在 mimo 回答
   「no image was attached」、在 space-bunny 回答 `blue`——**答錯**，
-  這正是圖像承載了答案的證據。`fledge-alpha-free` 無資料（上游 500）。
+  這正是圖像承載了答案的證據。唯一宣告視覺卻無資料的是 `fledge-alpha-free`
+  （上游 500／429）。`nemotron-3-ultra-free` 與兩個 `ling` **不宣告**圖片輸入，
+  面板本就不給視覺徽標，故無可測項——**沒有宣告的能力不需要實測，
+  但也說明宣告本身仍非上游第一手證據**。
 
 兩個副教訓，都寫進證據本身：
 
@@ -1464,11 +1476,44 @@ README 長期宣稱「工具可用」並自我註明那是**准入條件**而非
 2. **「宣告支援圖片」不等於「路由接受圖片」**，這一句至今只驗到一半：
    5 個可量測的宣告模型全數通過，但宣告本身仍非上游的第一手證據。
 
-**未量測與存疑**
+### 四十一之二、「接受」與「兑现」之間：180 秒這道牆（2026-10-07）
 
-- 接受 ≠ 兑现：`max_tokens` 被接受只證明**請求成立**，不證明模型真能生成
-  那麼多。要證明需要一次 >32K 的真實生成（約 40K 輸出 token），本次**未做**——
-  共享 bucket 是使用者的，該請求由使用者決定。
+上限表回答的是**請求會不會被受理**，不是**模型能不能生成那麼多**。使用者選擇
+補做後者的證明，得到的第一個結果不是預期的那個：
+
+| 請求 | 結果 |
+|---|---|
+| mimo `max_tokens: 40000`（探測路徑） | 181s、HTTP 200、**無 usage** |
+| mimo `max_tokens: 34000`（探測路徑） | 181s、HTTP 200、**無 usage** |
+| mimo `max_tokens: 40000`（繞過探測，timeout 900s） | `stopReason: length`、**產出 40000**、263.7s、約 152 tok/s |
+
+**兩次都在 181 秒死掉，不是巧合，是本插件自己的時鐘。**
+`zen-provider.ts` 的 `requestOptions` 寫著 `timeoutMs: options?.timeoutMs ?? 180_000`，
+而 pi-ai 把它交給 OpenAI SDK 的 `timeout`——那是**整個請求**的逾時，不是閒置逾時。
+更關鍵的是 `index.ts` 的 profile 也寫 `timeoutMs: 180_000`，而 DSH 會把它複製進
+每次請求的選項（`dsh-llm-pi-ai` 的 `profileOptions`），所以**主機的值會覆蓋插件的值**：
+只改插件那一處不會有任何效果。
+
+**結論：180s 在任何 max_tokens 數字生效之前，就先決定了一次回答能有多長。**
+以實測的 152 tok/s 換算，180s 約等於 27,000 個輸出 token——**比插件原本廣告的
+32,000 還少**。也就是說：只把上限從 32,000 抬到 1,040,384，使用者在實際使用中
+看不到任何差別，因為先撞到的是時間牆。
+
+**已修**：兩處都改為 600s，與 profile 既有的 `streamIdleTimeoutMs: 600_000` 對齊，
+主機與插件不再各說各話；呼叫端自帶的 timeout 仍然優先。這一條改動**不影響**
+短回答——它只在模型真的想寫很久時才會用到。
+
+**為什麼值得寫**：這正是「能力有沒有真實發揮」最典型的失敗形狀——廣告的數字是對的、
+上游也受理，但**插件自己**在更早的地方就把能力掐掉了，而面板不會顯示任何差異。
+ADR §四十一的前半段若只量「受理」，就會把這道牆漏掉。
+
+### 未量測與存疑（2026-10-07 補測後）
+
+- ~~接受 ≠ 兑现~~ **已證**：mimo 實際產出 40,000 token（`stopReason: length`），
+  遠超宣告的 32,000——**宣告確實在截斷真實回答**，抬升有意義。
+- **產出速率是新的隱形上限**：約 152 tok/s 意味著「要多長」由時間決定而非
+  `max_tokens` 決定。64K 的回答需要約 7 分鐘，仍在新的 600s 之內；256K 需要
+  28 分鐘，**做不到**——即使路由允許。這條沒有被任何機制偵測。
 - `fledge-alpha-free`、`ling-3.1-flash-free`、`nemotron-3-ultra-free`、
   `ling-3.0-flash-fin-free` 本輪無資料，維持宣告。
 - `big-pickle` 與 `longcat-2.5-preview-free` 仍只有區間。
