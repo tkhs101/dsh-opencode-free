@@ -2138,7 +2138,26 @@ export function clampProposalFor(declared: number): number {
  * ceiling — mimo writes about 152 tokens/second, so the ten-minute request
  * timeout ends a reply near 91,000 tokens whatever the budget says.
  */
-const SEED_OUTPUT: Readonly<Record<string, { readonly declared: number; readonly observed: number }>> = {
+/**
+ * Evidence for one model's output ceiling, and there are THREE kinds, because
+ * three different institutions are entitled to state one and they disagree.
+ *
+ *   `named`    — a ceiling the VENDOR published, or the ROUTE stated in a
+ *                 refusal. Both are first-party statements about the thing
+ *                 itself, and both cost nothing to obtain: a refusal returns a
+ *                 number for zero output tokens.
+ *   `observed` — a generation this plugin watched to its budget, or watched end
+ *                 a long reply on its own. Lower bound evidence, and the only
+ *                 kind that proves the model actually writes.
+ *
+ * The BUDGET follows `named` first and `observed` second, and never exceeds
+ * either: a budget above a ceiling the route refuses is a guaranteed failure, and
+ * a budget below what the model writes truncates it. A model with neither keeps
+ * models.dev's declaration (ADR 0004 §48).
+ */
+const SEED_OUTPUT: Readonly<
+  Record<string, { readonly declared: number; readonly named?: number; readonly observed?: number }>
+> = {
   // DELIVERY evidence only — a generation this plugin watched to its budget, with
   // `stopReason: "length"`. Both measured 2026-10-07 with the integer prompt
   // ("print the integers from 1 to 100000"), asking for more than the model
@@ -2174,8 +2193,33 @@ const SEED_OUTPUT: Readonly<Record<string, { readonly declared: number; readonly
   // No other model has an entry because none has been watched past its
   // declaration. Several stopped on their own well below it, which is a fact
   // about those samples and not a ceiling.
-  "mimo-v2.6-flash-free": { declared: 32000, observed: 64000 },
+  "mimo-v2.6-flash-free": {
+    declared: 32000,
+    // Xiaomi's own model page, fetched 2026-10-07:
+    //   https://mimo.mi.com/models/en-US/mimo-v2.6-flash
+    //   "Context Window 1M tokens" / "Max Output 128K tokens"
+    // 128K = 131072. It is a vendor statement, so it outranks anything measured
+    // here — and it independently confirms the CONTEXT seed (1M = 1048576) that
+    // came from the endpoint's own refusal.
+    named: 131072,
+    // What the route accepts: asked for 1,048,577, 2,000,000 and 8,000,000 and
+    // got three 200s. There is no output cap on this route at all, so the vendor
+    // number — not the acceptance — is what bounds the budget.
+    observed: 64000,
+  },
   "big-pickle": { declared: 32000, observed: 48000 },
+  "longcat-2.5-preview-free": {
+    declared: 131072,
+    // The route, in its own words, 2026-10-07:
+    //   "[invalid_parameter] 参数校验失败: /max_tokens: 995834 is not less or
+    //    equal to 262144"
+    // So 262144 is enforced by the upstream, and models.dev publishes half of
+    // it. Sending more is refused; sending 131072 truncates a reply that wants
+    // more. No production has been witnessed past 32770 — the model stops when it
+    // has said what it came to say — which is why there is no `observed` here
+    // even though the budget still moves.
+    named: 262144,
+  },
 };
 
 /**
@@ -2227,7 +2271,9 @@ export function maxTokensFor(
   if (declared === undefined) return declared;
   const seed = SEED_OUTPUT[id];
   if (seed === undefined || seed.declared !== declared) return declared;
-  const bounded = window === undefined ? seed.observed : Math.min(seed.observed, window);
+  const ceiling = Math.max(seed.named ?? 0, seed.observed ?? 0);
+  if (ceiling === 0) return declared;
+  const bounded = window === undefined ? ceiling : Math.min(ceiling, window);
   return bounded > declared ? bounded : declared;
 }
 

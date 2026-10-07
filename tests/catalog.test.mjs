@@ -2286,14 +2286,19 @@ test('GUARD: the output budget follows models.dev unless a generation was WATCHE
       .candidates.find((m) => m.id === id)
   }
 
-  // Watched producing 64,000 at a declared 32,000 (2026-10-07, integer prompt,
-  // `stopReason: "length"`, 346s at ~185 tok/s): the budget follows the
-  // observation, because that is the only evidence that exists.
-  assert.equal(built('mimo-v2.6-flash-free', 32000).maxTokens, 64000, 'a watched generation raises the budget')
+  // Two kinds of evidence now move this field, and a vendor's own word outranks
+  // anything measured here. Xiaomi publishes MiMo-V2.6-Flash as 1M context /
+  // **128K max output**; the route accepts 8,000,000 (three 200s) so it enforces
+  // nothing at all; and a generation was watched to 64,000. models.dev says
+  // 32,000 — four times below the vendor's own number.
+  assert.equal(built('mimo-v2.6-flash-free', 32000).maxTokens, 131072, 'a VENDOR-STATED ceiling outranks a declaration 4x too low')
+  // longcat: the route names its own ceiling in a refusal — "/max_tokens: 995834
+  // is not less or equal to 262144" — while models.dev publishes half of it. The
+  // budget moves on that, with no production witnessed at all.
   assert.equal(
     built('longcat-2.5-preview-free', 131072).maxTokens,
-    131072,
-    "a route that ACCEPTED 262144 — with no generation watched — keeps models.dev's number",
+    262144,
+    'a ceiling the ROUTE states in a refusal moves the budget',
   )
   assert.equal(
     built('space-bunny-free', 524288).maxTokens,

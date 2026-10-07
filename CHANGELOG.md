@@ -93,6 +93,22 @@ cost. Behaviour below is what a user can observe change.
   At that rate 180s bought roughly 27,000 tokens — less than the plugin used to
   advertise. The host profile's copy was the one that won, so both are now 600s,
   matching the profile's own stream idle timeout. Short replies are unaffected.
+- **A ceiling anyone STATES moves the output budget — vendor or route.**
+  Xiaomi publishes [MiMo-V2.6-Flash](https://mimo.mi.com/models/en-US/mimo-v2.6-flash)
+  as 1M context and **128K max output**; models.dev publishes 32,000, four times
+  lower, and the same 1M context number the endpoint states in its own refusals.
+  Longcat's route names its own ceiling outright — `/max_tokens: 995834 is not
+  less or equal to 262144` — while models.dev publishes 131,072, half of it.
+  Both statements cost zero output tokens (a refusal returns a number; a page is a
+  page), and both now bound the budget. Ask the route for more than it will take
+  and read the answer: asking for 8,000,000 was accepted by mimo, three
+  Nemotron/Muse routes and refused by Longcat, which is how a 262,144 ceiling and
+  an absent one look from the outside.
+  Tested against the vendor's number: asked for 131,072, Mimo wrote 79,722 and
+  stopped by itself (762s) — above its declared 32,000, below the published
+  ceiling. The budget is 131,072 and the *observed* figure stays 64,000, because
+  a published ceiling is a statement about what a model may write and not a reply
+  anybody watched finish.
 - **The output budget now follows models.dev, except where a generation was
   watched.** `limit.output` is the number every reply is cut at, and the route
   enforces it — so a declaration that is too low silently truncates a real reply

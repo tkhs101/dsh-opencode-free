@@ -165,11 +165,15 @@ declaration that is too low really does cut a reply at the declaration with
 nothing reporting it. But that only proves the field is enforced, not that a
 model writes what it is given: on 2026-10-07 every route accepted budgets up to
 1,040,384, and no model has ever been seen writing anything like it. So the rule
-is that **only a watched generation moves this number** — and two have been
-watched reaching their budget: Mimo V2.6 Flash produced 64,000 and Big Pickle
-48,000, against declarations of 32,000 each. Every other model's budget is
-exactly what models.dev says, and the row shows an arrow only where that is not
-true.
+is that **only a stated ceiling or a watched generation moves this number**.
+Xiaomi publishes [MiMo-V2.6-Flash](https://mimo.mi.com/models/en-US/mimo-v2.6-flash)
+at 128K max output while models.dev says 32,000; Longcat's route names its own
+ceiling outright (`/max_tokens: 995834 is not less or equal to 262144`) while
+models.dev says half of it. Both statements cost nothing — a refusal returns a
+number — and both now bound the budget. A watched generation bounds it too:
+Mimo wrote 79,722 tokens when asked for 131,072, and Big Pickle 48,000. Every
+other model's budget is exactly what models.dev says, and the row shows an arrow
+only where that is not true.
 
 Worth knowing why the other nine have no figure: models choose when to stop, so
 the same request produced 892 tokens once and 64,000 the next time. And for
