@@ -2321,8 +2321,8 @@ test('GUARD: the output budget follows models.dev unless a generation was WATCHE
   )
   assert.equal(
     observedOutputFor(section(131072)['longcat-2.5-preview-free'], 'longcat-2.5-preview-free', 131072),
-    undefined,
-    'no generation has been watched for this model, so there is nothing to claim',
+    64000,
+    'watched writing 64,000 against a declared 131,072: still an observation. A guard that dropped anything below the declaration made the panel claim this model had never been watched writing — on the one model with the most evidence — and it protected nothing, because the budget is a max() over the declaration anyway.',
   )
   const mimo = built('mimo-v2.6-flash-free', 32000)
   assert.ok(mimo.maxTokens <= mimo.contextWindow, 'a budget above the context it must fit inside is unreachable')

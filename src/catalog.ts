@@ -2384,11 +2384,18 @@ export function observedOutputFor(
   const declared = finitePositive(isPlainObject(record.limit) ? record.limit.output : undefined);
   const seed = SEED_OUTPUT[id];
   if (seed === undefined || seed.declared !== declared || seed.observed === undefined) return undefined;
-  // It cannot exceed the budget we would actually send, and it cannot be less
-  // than what the declaration already allowed — a number below that would be a
-  // demotion dressed as a measurement.
+  // Bounded by the budget we would send, and NOTHING else.
+  //
+  // There used to be a guard here that dropped an observation BELOW the
+  // declaration, on the reasoning that a smaller number would be "a demotion
+  // dressed as a measurement". It hid the truth on the one model with the most
+  // evidence: `longcat-2.5-preview-free` was watched writing 64,000 against a
+  // declared 131,072, and the panel showed nothing at all — as though nobody had
+  // ever watched it write. And it could not have protected anything: the budget
+  // is `max(declaration, named, observed)`, so an observation below the
+  // declaration cannot lower it. The guard blocked facts, not risk.
   if (budget !== undefined && seed.observed > budget) return budget;
-  return seed.observed > declared ? seed.observed : undefined;
+  return seed.observed;
 }
 
 /**
@@ -3914,18 +3921,38 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
    * Fire-and-forget on purpose: a reply must never wait on bookkeeping, and the
    * write is atomic, so the worst a crash costs is one increment.
    */
+  let persistInFlight: Promise<void> | null = null;
+  let persistQueued = false;
   function persistCache(): void {
     if (state.cache === null) return;
-    const record = {
+    // SERIALISED, because the record is a whole-file replace and two concurrent
+    // writes lose one of the increments: three truncations in quick succession
+    // produced three overlapping writes, and the one that landed last was
+    // whichever had read the state earliest — so a count went missing. Caught by
+    // the test that reads the file back, not by the panel, which never saw the
+    // number at all.
+    if (persistInFlight !== null) {
+      persistQueued = true;
+      return;
+    }
+    // Built at WRITE time, not at call time, so a queued write carries the state
+    // as it is when it goes out rather than as it was when it was asked for.
+    persistInFlight = writeCacheAtomic(path, {
       etag: state.cache.etag,
       fetchedAt: state.cache.fetchedAt,
       models: state.cache.models,
       probes: state.probes,
       lastProbeAt: state.lastProbeAt,
       lastRound: state.cache.lastRound,
-    };
-    state.cache = { ...state.cache, lastRound: state.cache.lastRound };
-    void writeCacheAtomic(path, record).catch(() => undefined);
+    })
+      .catch(() => undefined)
+      .then(() => {
+        persistInFlight = null;
+        if (persistQueued) {
+          persistQueued = false;
+          persistCache();
+        }
+      });
   }
 
   function observeClamp(id: string, observation: ClampObservation): void {
