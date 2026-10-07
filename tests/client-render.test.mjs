@@ -1617,3 +1617,50 @@ test('GUARD: a click whose first progress read FAILS still waits for the round',
     mounted.dispose()
   }
 })
+
+test('GUARD: the row states the limits that are IN EFFECT, and hides the provenance', async () => {
+  // Asked directly: "当前配置的最大输出大小是多少，没看懂". The row answered with
+  // four figures and two arrows — `输出预算 131,072 → 262,144`, `路由自述上限
+  // 262,144`, `实测产出 ≥64,000` — and every one of them was true, and the
+  // reader still could not say what the plugin SENDS. A line cannot be made true
+  // enough to be readable; it has to be shortened.
+  //
+  // So the line carries the effective values only, and everything about where
+  // they came from is one hover away. The declared value is NOT struck through in
+  // the open any more: a strikethrough next to the live number reads as "this is
+  // what you get" to anyone who has not internalised the convention.
+  const mounted = await renderCard({
+    hidden: [],
+    snapshot: {
+      ...SNAPSHOT,
+      visible: ['longcat-2.5-preview-free'],
+      models: [
+        {
+          id: 'longcat-2.5-preview-free',
+          image: true,
+          thinking: 'high',
+          contextWindow: 1000000,
+          outputBudget: 262144,
+          declaredContext: 1000000,
+          declaredOutput: 131072,
+          observedOutput: 64000,
+          stated: { output: 262144, at: 1759146617000 },
+          measured: { context: false, output: true, vision: true, tools: true },
+        },
+      ],
+    },
+  })
+  // The two limits are sibling spans, so the row is read as one line of text.
+  // Titles are attributes, not text — which is the whole point: the provenance is
+  // present on the row without being IN the row.
+  const line = collect(mounted.rerender()).texts.join(' ')
+  assert.match(line, /1,000,000/, 'the context window is on the row')
+  assert.match(line, /262,144/, 'the number that is actually SENT is on the row')
+  assert.doesNotMatch(line, /131,072/, 'the replaced declaration is not competing for the eye')
+  assert.doesNotMatch(line, /64,000/, 'nor is what the model was watched writing')
+  const titled = [...walk(mounted.rerender())].filter((n) => typeof n.props?.title === 'string' && n.props.title.length > 0)
+  const outputNode = titled.find((n) => n.props.title.includes('262,144'))
+  assert.ok(outputNode !== undefined, 'and the provenance is one hover away')
+  assert.match(outputNode.props.title, /131,072/, 'the declaration it replaced')
+  assert.match(outputNode.props.title, /64,000/, 'what the model was actually watched writing')
+})

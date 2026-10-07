@@ -118,9 +118,13 @@ window.__ModuleLoader__.load({
 			"badge.tools": "工具",
 			"badge.measured": "实测",
 			"caps.ctx": "上下文",
-			"caps.out": "输出预算",
+			"caps.out": "输出",
 			"caps.observed": "实测产出",
 			"caps.stated": "路由自述上限",
+			"caps.detailDeclared": "models.dev 声明 {value}（已被实测取代）",
+			"caps.detailStated": "路由自述上限 {value}",
+			"caps.detailObserved": "实测产出 ≥{value}",
+			"caps.detailTruncated": "真实回答被预算截断 {count} 次",
 			"caps.truncated": "被预算截断",
 			"caps.truncatedTitle": "真实会话中被 max_tokens 拦腰截断的次数（免费）",
 			"caps.statedTitle": "上游在拒绝正文里说出的它自己的上限",
@@ -192,9 +196,13 @@ window.__ModuleLoader__.load({
 			"badge.tools": "Tools",
 			"badge.measured": "measured",
 			"caps.ctx": "context",
-			"caps.out": "output budget",
+			"caps.out": "output",
 			"caps.observed": "observed",
 			"caps.stated": "route says",
+			"caps.detailDeclared": "models.dev declared {value} (replaced by measurement)",
+			"caps.detailStated": "route-stated ceiling {value}",
+			"caps.detailObserved": "observed ≥{value}",
+			"caps.detailTruncated": "real replies cut off at the budget: {count}",
 			"caps.truncated": "cut off",
 			"caps.truncatedTitle": "times a real reply was cut off at max_tokens (free)",
 			"caps.statedTitle": "the ceiling the upstream stated about itself in a refusal",
@@ -295,6 +303,8 @@ window.__ModuleLoader__.load({
 			".opf-caps b{font-weight:500;color:#3A3A3F}",
 			".opf-caps .opf-declared{text-decoration:line-through;opacity:.75}",
 			".opf-limit+.opf-limit{margin-left:10px}",
+			".opf-hint-dot{cursor:help;opacity:.55}",
+			".opf-hint-dot:hover{opacity:1}",
 			".opf-side{display:flex;align-items:center;gap:12px;flex:none}",
 			".opf-state{font-size:13px;color:#6B6B72;user-select:none}",
 			".opf-state.on{color:#1D1D1F;font-weight:500}",
@@ -1280,52 +1290,52 @@ window.__ModuleLoader__.load({
 							title: t("legend.measured")
 						}, E("span", null, t("badge.tools"))));
 					}
-					/* The two numbers the request path actually uses, with the
-					   declaration struck through when a measurement replaced it.
-					   Hiding these is what let a 200,000-token window and a
-					   1,048,576 one look the same from the outside. */
+					/* The two numbers the request path uses, and ONLY the effective
+					   values. Provenance moved into the tooltip.
+
+					   This line used to read `输出预算 131,072 → 262,144` plus two more
+					   numbers on the same line, and the reader asked what the current
+					   maximum output was — a line that shows four figures and two
+					   arrows cannot answer that at a glance, however true each figure
+					   is. The effective value is what the request carries, so it is what
+					   the line says; where it came from, and what the model has actually
+					   been seen writing, are one hover away. */
 					if (card !== null && (card.contextWindow !== null || card.outputBudget !== null)) {
-						var limits = [];
-						var limitPair = function (label, shown, declared, measured) {
-							if (shown === null) return;
-							var parts = [E("span", { key: label + "l" }, label + " ")];
+						var detail = function (shown, declared, measured) {
+							var lines = [];
 							if (measured === true && declared !== null && declared !== shown) {
-								parts.push(E("span", { key: label + "old", className: "opf-declared" }, countLabel(declared)));
-								parts.push(E("span", { key: label + "arrow" }, " → "));
+								lines.push(t("caps.detailDeclared", { value: countLabel(declared) }));
 							}
-							parts.push(E("b", { key: label + "new" }, countLabel(shown)));
-							limits.push(E("span", { key: label, className: "opf-limit" }, parts));
+							return lines.join("\n");
 						};
-						limitPair(t("caps.ctx"), card.contextWindow, card.declaredContext, card.measured.context);
-						limitPair(t("caps.out"), card.outputBudget, card.declaredOutput, card.measured.output);
-						left.push(E("span", { key: "limits", className: "opf-caps" }, limits));
-						/* What the model has actually been SEEN to produce, when a
-						   generation has been watched. The budget above is what the
-						   route will accept; this is what came back. Showing only
-						   the first is how a 1,040,384 budget came to read as a
-						   million-token reply. */
-						if (card.stated !== null && card.stated.output !== null) {
-							left.push(E("span", {
-								key: "stated",
-								className: "opf-caps",
-								title: t("caps.statedTitle")
-							}, t("caps.stated") + " ", E("b", null, countLabel(card.stated.output))));
+						var parts2 = [];
+						if (card.contextWindow !== null) {
+							parts2.push(E("span", { key: "ctx", className: "opf-limit" },
+								t("caps.ctx") + " ", E("b", null, countLabel(card.contextWindow)),
+								card.measured.context === true && card.declaredContext !== null && card.declaredContext !== card.contextWindow
+									? E("span", { key: "ctxt", className: "opf-hint-dot", title: detail(card.contextWindow, card.declaredContext, card.measured.context) }, " ⓘ")
+									: null));
 						}
-						if (card.truncated !== null) {
-							left.push(E("span", {
-								key: "trunc",
-								className: "opf-caps",
-								title: t("caps.truncatedTitle")
-							}, t("caps.truncated") + " ",
-								E("b", null, String(card.truncated.output + card.truncated.context))));
+						if (card.outputBudget !== null) {
+							/* Everything known about the output number, in one place:
+							   what the publisher declared, what the route says it will
+							   take, what the model has been watched writing, and how
+							   often a real reply has been cut off. They were four items on
+							   the row; they are one sentence in a tooltip. */
+							var lines2 = detail(card.outputBudget, card.declaredOutput, card.measured.output);
+							if (card.stated !== null && card.stated.output !== null) {
+								lines2 += (lines2 === "" ? "" : "\n") + t("caps.detailStated", { value: countLabel(card.stated.output) });
+							}
+							if (card.observedOutput !== null) {
+								lines2 += (lines2 === "" ? "" : "\n") + t("caps.detailObserved", { value: countLabel(card.observedOutput) });
+							}
+							if (card.truncated !== null) {
+								lines2 += (lines2 === "" ? "" : "\n") + t("caps.detailTruncated", { count: String(card.truncated.output + card.truncated.context) });
+							}
+							parts2.push(E("span", { key: "out", className: "opf-limit", title: lines2 },
+								t("caps.out") + " ", E("b", null, countLabel(card.outputBudget))));
 						}
-						if (card.observedOutput !== null) {
-							left.push(E("span", {
-								key: "obs",
-								className: "opf-caps",
-								title: t("caps.observedTitle")
-							}, t("caps.observed") + " ", E("b", null, "≥" + countLabel(card.observedOutput))));
-						}
+						left.push(E("span", { key: "limits", className: "opf-caps" }, parts2));
 					}
 				}
 				if (hasReading) {

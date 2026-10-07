@@ -37,6 +37,16 @@ cost. Behaviour below is what a user can observe change.
   64,000 with `finish_reason: "length"` in 947s (~67 tokens/second), so the panel
   can stop implying this model has never been watched writing a long reply. Its
   budget does not move: 262,144 is the ceiling the route itself named.
+- **A row now answers "what is the limit" without arithmetic.** It read
+  `输出预算 131,072 → 262,144`, `路由自述上限 262,144`, `实测产出 ≥64,000` — four
+  figures and two arrows, every one of them true, and a reader still could not
+  say what the plugin actually sends. The line now carries the values that are in
+  effect (`上下文 1,000,000 · 输出 262,144`) and everything about where they came
+  from is one hover away: the models.dev declaration it replaced, the ceiling the
+  route named, the longest reply the model was watched writing, and how many real
+  replies have been cut off at the budget. The strikethrough is gone from the open
+  row — a struck-through number beside the live one reads as the value to anyone
+  who has not internalised the convention.
 - **The panel row reports the limits the request actually uses, and says which
   of them were measured.** A row now shows the context window and the maximum
   output pi-ai clamps with, plus vision, thinking and tool-call badges — and a
