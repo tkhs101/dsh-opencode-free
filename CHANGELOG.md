@@ -11,6 +11,32 @@ cost. Behaviour below is what a user can observe change.
 
 ### Added
 
+- **Replies cut off at the budget are now counted, for free.** The output axis
+  rests on a number nobody can verify by asking the model: has a reply ever
+  wanted MORE than what the plugin sends? Synthetic generations answer it at tens
+  of thousands of tokens each, and answer it unreliably — measured 2026-10-07, the
+  same request produced 892 tokens once and 79,722 the next. Real traffic already
+  carries the answer in `stopReason`, on a request that was happening anyway, so a
+  reply that ends on `finish_reason: "length"` is counted per model and shown on
+  its row. Replies cut by the CONTEXT clamp are counted apart, because a
+  conversation running out of room says nothing about the output budget being
+  small. Zero is the useful reading: it means the budget has not bound, so raising
+  it would have bought nothing. The count is persisted, because a counter a
+  restart erases cannot answer a question about days of use.
+- **Sending no `max_tokens` at all does not work on this route.** Measured with
+  the field stripped from the outgoing body and nothing else changed: Mimo
+  returned nothing at all after 283 seconds, Longcat's reply changed shape
+  entirely (7 seconds, ending on a tool call), and only Big Pickle behaved. A
+  route that errors or reshapes when the parameter is absent has to be told what
+  the ceiling is — which the harvested limit now supplies automatically.
+- **A refused click says how long is left, in the right unit.** A wait of 60.7
+  seconds was reported as "about 2 minutes" — `Math.ceil` rounding up a value that
+  was under a minute told the reader to wait out a minute for a button that would
+  still refuse. Under a minute is now reported in seconds.
+- **Longcat's first watched generation is recorded.** Asked for 64,000 it produced
+  64,000 with `finish_reason: "length"` in 947s (~67 tokens/second), so the panel
+  can stop implying this model has never been watched writing a long reply. Its
+  budget does not move: 262,144 is the ceiling the route itself named.
 - **The panel row reports the limits the request actually uses, and says which
   of them were measured.** A row now shows the context window and the maximum
   output pi-ai clamps with, plus vision, thinking and tool-call badges — and a
