@@ -72,6 +72,27 @@ cost. Behaviour below is what a user can observe change.
   now have separate budgets. The declared-capability questions (vision, tools) stay
   on the manual round: they cost real output tokens, and the daily round covers
   models the user has switched off, which is not a bill worth paying daily.
+- **Evidence survives a changed declaration instead of vanishing.** `limit.*` is a
+  pointer to which model an id meant, and the pointer moves — models.dev fixes a
+  typo, a publisher revises a number. A seed whose declaration no longer matches
+  used to be dropped outright, so a typo fix silently deleted the only generation
+  anyone had watched. It is demoted now: applied under the `declared x 4` valve,
+  and labelled `inferred` so it stops claiming first-party evidence. A witnessed
+  generation is kept and flagged as not re-checked rather than forgotten.
+- **Capability evidence expires.** Vision and tools had no TTL while the effort
+  axis always had one, so a months-old probe read exactly like today's and nothing
+  could downgrade it. Thirty days, matching the effort clock: past it, the axis is
+  asked again on the next manual round. With no clock supplied the age is not
+  guessed at — the verdict stands, and the round is what re-asks.
+- **A removal is final for a week, not for ever.** `nextProbeAt` was written into
+  every `dead` record and never read, so a model retired on a wrong channel during
+  an upstream outage stayed suppressed with no path back — and a name Zen
+  re-published could never return. It is read now, and a death older than seven
+  days is asked once more.
+- **A region refusal says so.** "not available in your country" is the one failure
+  with a one-line fix the reader can apply, and it was being filed as `unknown` or
+  as a bad key. It is its own state now, and it renders among the caller-scoped
+  conditions rather than as a failure of the model.
 - **The panel row reports the limits the request actually uses, and says which
   of them were measured.** A row now shows the context window and the maximum
   output pi-ai clamps with, plus vision, thinking and tool-call badges — and a

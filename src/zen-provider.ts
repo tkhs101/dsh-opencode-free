@@ -591,6 +591,16 @@ export type ZenFailureKind =
   | "bad-key"
   | "upstream-overloaded"
   | "endpoint-unavailable"
+  /**
+   * The route refused because of WHERE the request came from.
+   *
+   * Its own condition, and the only failure here with a one-line fix the reader
+   * can act on: a different egress is a different answer. Reporting it as
+   * "unknown" made a model that is perfectly usable look like a mystery, and the
+   * plugin's own catalogue says which models are sensitive to it — the free lane
+   * is keyed to the caller's region, not to the model.
+   */
+  | "region-blocked"
   | "unknown";
 
 export const ZEN_FAILURE_GUIDANCE: Record<ZenFailureKind, string> = {
@@ -605,6 +615,8 @@ export const ZEN_FAILURE_GUIDANCE: Record<ZenFailureKind, string> = {
     "上游暫時過載（503）。這是上游的容量問題，與插件、key、模型是否可用都無關；稍後再試即可。",
   "endpoint-unavailable":
     "上游端點暫時不可達（Upstream request failed: Endpoint is unavailable）。這是路由的問題，與模型是否可用無關；稍後再試。",
+  "region-blocked":
+    "上游依出口地區拒絕（not available in your country）。模型本身可能完全正常——換一個出口再試即可，這與 key、額度、模型都無關。",
   unknown: "未知的上游錯誤。跑 scripts/reverify.sh 看當下閘門狀態，仍異常則回報狀態碼與報文。",
 };
 
@@ -683,6 +695,8 @@ export const ZEN_TRANSPORT_GUIDANCE =
  * anonymity-gate marker is present, and an unrecognized 403 stays unknown
  * rather than guessed.
  */
+const REGION_PATTERN = /not available in your country|unavailable in your (?:country|region)|region.?block|not available in this region|country.?restricted/i;
+
 export function classifyZenFailure(status: number, bodyText: string): ZenFailureKind {
   const body = typeof bodyText === "string" ? bodyText : "";
   if (ANON_GATED_PATTERN.test(body)) return "anon-gated";
@@ -695,6 +709,10 @@ export function classifyZenFailure(status: number, bodyText: string): ZenFailure
   // problem look like a mystery, and it is the one condition here the reader can
   // simply wait out.
   if (OVERLOADED_PATTERN.test(body)) return "upstream-overloaded";
+  // Matched BEFORE the status, because this one is routinely carried as a 403
+  // and a 400 — and a bare status would file it under "bad key" or "unknown",
+  // both of which send the reader to fix something that is not broken.
+  if (REGION_PATTERN.test(body)) return "region-blocked";
   return "unknown";
 }
 

@@ -388,6 +388,17 @@ export function fallbackLevelFor(record: CatalogRecord): string {
  */
 export const EFFORT_TTL_MS = 30 * 24 * 60 * 60_000;
 
+/**
+ * How long a vision/tools verdict stays authoritative.
+ *
+ * The effort axis has always had a TTL and the capability axes did not, which made
+ * a probe from months ago indistinguishable from one taken today: a model that
+ * gained tool support, or lost it, kept its mark for ever, and nothing could ever
+ * downgrade it. Thirty days matches the effort axis, so "stale" means the same
+ * thing on both.
+ */
+export const CAPABILITY_TTL_MS = 30 * 24 * 60 * 60_000;
+
 /** Whether a confirmed effort verdict still stands. */
 export function effortVerdictFresh(
   record: ProbeRecord | undefined,
@@ -1042,6 +1053,14 @@ export interface ProbeRecord {
    */
   readonly swept?: boolean;
   /**
+   * When a swept `dead` verdict may be asked again.
+   *
+   * Written when the death is recorded, and READ by {@link isSettled}. It was
+   * documented here from the start and never consulted, which made every removal
+   * permanent — including the ones that were wrong.
+   */
+  readonly nextProbeAt?: number;
+  /**
    * The channel this model actually ANSWERED on, when a probe found one.
    *
    * Everything else about a model's channel is inference: a pi-ai builtin table
@@ -1409,6 +1428,9 @@ function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string
       at: entry.at,
       ...(typeof entry.reason === "string" && entry.reason !== "" ? { reason: entry.reason } : {}),
       ...(entry.swept === true ? { swept: true } : {}),
+      ...(typeof entry.nextProbeAt === "number" && Number.isFinite(entry.nextProbeAt)
+        ? { nextProbeAt: entry.nextProbeAt }
+        : {}),
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
       ...(readCapabilities(entry.capabilities) === undefined ? {} : { capabilities: readCapabilities(entry.capabilities) }),
@@ -1699,16 +1721,32 @@ const SEED_CAPABILITIES: Readonly<
   "big-pickle": { tools: true },
 };
 
-/** The measured verdict for one axis, from the round first and the seed second. */
+/**
+ * The measured verdict for one axis, from the round first and the seed second.
+ *
+ * `now` exists for the TTL: a verdict older than {@link CAPABILITY_TTL_MS reads as
+ * unmeasured, so the axis is asked again on the next manual round. It is not
+ * deleted — a stale entry is still a fact, it is just no longer current, and the
+ * difference matters when someone asks "how old is that tick?".
+ */
 export function measuredCapabilityFor(
   record: CatalogRecord | undefined,
   id: string,
   axis: CapabilityAxis,
   probes: ProbeMap | undefined,
+  now?: number,
 ): CapabilityVerdict | undefined {
   if (record === undefined) return undefined;
   const fp = capabilityFingerprint(record);
-  const live = probes?.[id]?.capabilities?.[axis];
+  const fresh = (verdict: CapabilityVerdict | undefined): CapabilityVerdict | undefined => {
+    if (verdict === undefined) return undefined;
+    // A seed carries `at: 0` — it is a property of the shipped table, not of a
+    // moment — so the TTL cannot apply to it without expiring a fact that was
+    // never dated.
+    if (now !== undefined && verdict.at > 0 && now - verdict.at > CAPABILITY_TTL_MS) return undefined;
+    return verdict;
+  };
+  const live = fresh(probes?.[id]?.capabilities?.[axis]);
   if (live !== undefined && live.fp === fp) return live;
   const seeded = SEED_CAPABILITIES[id]?.[axis];
   // A seed carries no timestamp of its own: it is a property of the shipped
@@ -1884,11 +1922,12 @@ export function capabilityQuestionsFor(
   model: Model<Api>,
   record: CatalogRecord | undefined,
   probes: ProbeMap | undefined,
+  now?: number,
 ): CapabilityAxis[] {
   const out: CapabilityAxis[] = [];
   const declaresImage = Array.isArray(model.input) && model.input.includes("image");
-  if (declaresImage && measuredCapabilityFor(record, model.id, "vision", probes) === undefined) out.push("vision");
-  if (measuredCapabilityFor(record, model.id, "tools", probes) === undefined) out.push("tools");
+  if (declaresImage && measuredCapabilityFor(record, model.id, "vision", probes, now) === undefined) out.push("vision");
+  if (measuredCapabilityFor(record, model.id, "tools", probes, now) === undefined) out.push("tools");
   return out;
 }
 
@@ -1951,6 +1990,8 @@ export function modelCapability(
     readonly limits?: MeasuredLimits | undefined;
     /** Truncation counters from real traffic, when the probe record has them. */
     readonly budgetHits?: ProbeRecord["budgetHits"];
+    /** Wall clock, so a verdict older than the TTL reads as unmeasured. */
+    readonly now?: number;
   },
 ): ModelCapability {
   const record = context?.record;
@@ -1958,8 +1999,8 @@ export function modelCapability(
   const limit = isPlainObject(record?.limit) ? record.limit : {};
   const map = model.thinkingLevelMap as Record<string, string | null> | undefined;
   const levels = map !== null && typeof map === "object" ? Object.keys(map).filter((level) => typeof map[level] === "string") : [];
-  const vision = measuredCapabilityFor(record, model.id, "vision", context?.probes);
-  const tools = measuredCapabilityFor(record, model.id, "tools", context?.probes);
+  const vision = measuredCapabilityFor(record, model.id, "vision", context?.probes, context?.now);
+  const tools = measuredCapabilityFor(record, model.id, "tools", context?.probes, context?.now);
   // `off` is `null` in the map when it is offered but unproven, so a string is
   // the only reading that says "this spelling is known to stop reasoning".
   const off = map !== null && typeof map === "object" && typeof map.off === "string" ? map.off : null;
@@ -2217,6 +2258,21 @@ export function isMeasuredLimits(value: unknown): value is MeasuredLimits {
   return ok(output) && ok(context) && (output !== undefined || context !== undefined);
 }
 
+/**
+ * Whether the witnessed generation behind the advertised figure was taken against
+ * the declaration models.dev publishes today.
+ *
+ * False does not mean the number is wrong — it was watched happening. It means
+ * the pointer moved since, and nobody has re-watched. The panel says so rather
+ * than presenting an unre-checked figure as current.
+ */
+export function observedOutputIsStale(record: CatalogRecord, id: string): boolean {
+  const seed = SEED_OUTPUT[id];
+  if (seed === undefined || seed.observed === undefined) return false;
+  const declared = finitePositive(isPlainObject(record.limit) ? record.limit.output : undefined);
+  return seed.declared !== undefined && seed.declared !== declared;
+}
+
 /** Defensive read of a persisted context measurement. */
 export function isMeasuredContext(value: unknown): value is MeasuredContext {
   if (!isPlainObject(value)) return false;
@@ -2308,7 +2364,17 @@ export function seededContextFor(record: CatalogRecord, id: string): MeasuredCon
   const seed = SEED_CONTEXT[id];
   if (seed === undefined) return undefined;
   const declared = finitePositive(isPlainObject(record.limit) ? record.limit.context : undefined);
-  if (declared !== seed.declared) return undefined;
+  // A measurement is about the MODEL, and the declaration is only a pointer to
+  // which model this id meant. When the pointer moves we cannot tell a typo fix
+  // from a different model behind the same id — so the measurement is not thrown
+  // away (that is how a models.dev typo fix silently deleted the only witnessed
+  // number in the table), it is DEMOTED: first-party becomes inferred, which puts
+  // it behind the `declared x 4` valve and the ceiling, and the panel says
+  // `inferred` instead of claiming a first-party statement that was never made
+  // about this declaration.
+  if (declared !== seed.declared) {
+    return { raisedTo: seed.measured, fp: contextFingerprint(record), at: 0, source: "inferred" };
+  }
   // The endpoint stated this about itself, or accepted a request of this size —
   // see SEED_CONTEXT. It is first-party evidence, so it is not held to the
   // inferred-raise valve.
@@ -2487,7 +2553,13 @@ export function observedOutputFor(
 ): number | undefined {
   const declared = finitePositive(isPlainObject(record.limit) ? record.limit.output : undefined);
   const seed = SEED_OUTPUT[id];
-  if (seed === undefined || seed.declared !== declared || seed.observed === undefined) return undefined;
+  // A witness SURVIVES a moved declaration, deliberately: it was watched
+  // happening, and the cost of forgetting it is a models.dev typo fix erasing the
+  // only production anyone has ever watched. What the move does cost is
+  // PROVENANCE, which is what {@link observedOutputIsStale} reports — the number
+  // stays, and the panel says it has not been re-checked against this
+  // declaration.
+  if (seed === undefined || seed.observed === undefined) return undefined;
   // Bounded by the budget we would send, and NOTHING else.
   //
   // There used to be a guard here that dropped an observation BELOW the
@@ -2930,10 +3002,25 @@ export function probeRowFor(
  * rather than a model that is gone — and a permanent verdict on a wrong channel
  * is how a working model goes missing for good.
  */
-function isSettled(id: string, probes: ProbeMap): boolean {
+/**
+ * A death is final, and `nextProbeAt` is the field that says when it stops being
+ * final.
+ *
+ * The field was documented and never read, so a model that was wrongly retired —
+ * swept on a channel the route happened to be serving wrong, while an upstream
+ * outage was in progress — stayed suppressed for ever with no path back. A dead
+ * verdict that is older than the interval is asked once more, which costs one
+ * request for the models nobody is using and is the only way a name Zen has
+ * re-published can come back at all.
+ */
+export const DEAD_RECHECK_MS = 7 * 24 * 60 * 60_000;
+
+function isSettled(id: string, probes: ProbeMap, now: number): boolean {
   const record = probes[id];
   if (record === undefined || record.verdict !== "dead") return false;
-  return record.swept === true;
+  if (record.swept !== true) return false;
+  const due = record.nextProbeAt;
+  return typeof due === "number" && due > now ? true : typeof due !== "number" || now - record.at < DEAD_RECHECK_MS;
 }
 
 /**
@@ -2986,7 +3073,7 @@ export function planRound(
   const isShown = (id: string): boolean => scope === "served" || hidden?.(id) !== true;
   return {
     targets: live.filter(
-      (model) => isShown(model.id) && !isSettled(model.id, probes),
+      (model) => isShown(model.id) && !isSettled(model.id, probes, now),
     ),
     notListed:
       servedSet === null
@@ -3619,8 +3706,9 @@ export async function runProbeRound(
             ? { api: channel }
             : {}),
         // Reaching here means the prober exhausted every channel before
-        // concluding, so this `dead` is earned and can be final.
-        ...(outcome.kind === "dead" ? { swept: true } : {}),
+        // concluding, so this `dead` is earned and can be final — but "final"
+        // needs an end, and the end is a date rather than never.
+        ...(outcome.kind === "dead" ? { swept: true, nextProbeAt: stamp + DEAD_RECHECK_MS } : {}),
         // The tally is kept even when nothing was confirmed, so the next round
         // continues the count instead of restarting it.
         ...(tally !== undefined && question !== "settled"
@@ -3711,7 +3799,7 @@ export async function runProbeRound(
       // axis the panel already shows as measured is not asked again — the round
       // cannot re-measure what it already knows, which is what keeps this from
       // turning into a permanent per-round tax.
-      const axisQuestions = capabilityQuestionsFor(model, rawById(model.id), state.probes);
+      const axisQuestions = capabilityQuestionsFor(model, rawById(model.id), state.probes, deps.now());
       // The CEILING question goes first, and it is the only one whose cost is
       // zero when it works: it asks for the whole advertised window, so a route
       // with a limit refuses and NAMES it, and a refusal produces no output
@@ -4169,6 +4257,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
             measuredEffort: efforts.get(model.id),
             limits: harvested.get(model.id),
             budgetHits: state.probes[model.id]?.budgetHits,
+            now: Date.now(),
           });
         }),
         source: state.source,

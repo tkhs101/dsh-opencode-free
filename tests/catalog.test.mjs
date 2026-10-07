@@ -39,6 +39,13 @@ import {
   contextFingerprint,
   contextWindowFor,
   observedOutputFor,
+  observedOutputIsStale,
+  contextEvidenceFor,
+  seededContextFor,
+  DEAD_RECHECK_MS,
+  CAPABILITY_TTL_MS,
+  capabilityFingerprint,
+  measuredCapabilityFor,
   clampVerdict,
   effortVerdict,
   nextEffortQuestion,
@@ -2267,8 +2274,13 @@ test('GUARD: a measured context window is used, and a changed declaration discar
   assert.equal(window('ling-3.1-flash-free', 262144), 262144, 'a model with no measurement keeps its declaration');
   assert.equal(
     window('mimo-v2.6-flash-free', 400000),
-    400000,
-    'a CHANGED declaration discards the seed instead of keeping a number measured about something else',
+    1048576,
+    'a moved declaration does not DISCARD the measurement, it DEMOTES it: the seed is now inferred rather than first-party, so it is bounded by declared x 4 (1,600,000) and the ceiling (1,048,576) — and it still clears both. Discarding a witnessed number over a pointer move is what let a models.dev typo fix silently delete it (ADR 0004 §56).',
+  )
+  assert.equal(
+    contextEvidenceFor(section(400000)['mimo-v2.6-flash-free'], 1048576, seededContextFor(section(400000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free')),
+    'inferred',
+    'and the panel says `inferred` — a demoted source does not keep the first-party claim',
   );
 })
 
@@ -2318,16 +2330,26 @@ test('GUARD: the output budget follows models.dev unless a generation was WATCHE
   assert.equal(
     built('mimo-v2.6-flash-free', 64000).maxTokens,
     64000,
-    'a CHANGED declaration discards the observation — it was watched about something else',
+    'a seed measured against another declaration does not RAISE the budget — the number it was measured about is not this one',
+  )
+  assert.equal(
+    observedOutputFor(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 131072),
+    79722,
+    'but the witnessed generation SURVIVES the move: it was watched happening, and throwing it away is how a typo fix erases the only production in the table',
+  )
+  assert.equal(
+    observedOutputFor(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 64000),
+    64000,
+    'clamped to the budget we would actually send — claiming a longer reply than we allow would be a different lie',
+  )
+  assert.equal(
+    observedOutputIsStale(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free'),
+    true,
+    'and the panel is told the figure has not been re-checked against this declaration',
   )
   // The observation is reported separately and only where it exists, so the row
   // can never present a budget as something the model was seen to write.
   assert.equal(observedOutputFor(section(32000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 64000), 64000)
-  assert.equal(
-    observedOutputFor(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 64000),
-    undefined,
-    'a changed declaration discards the observation too',
-  )
   assert.equal(
     observedOutputFor(section(131072)['longcat-2.5-preview-free'], 'longcat-2.5-preview-free', 131072),
     64000,
@@ -5234,4 +5256,48 @@ test('GUARD: the panel names WHICH source each number came from, not just "measu
   // "declared" nor "measured".
   assert.equal(card('big-pickle', 32000).evidence.vision, 'declared', 'the template declares image input, so there is a claim to be right or wrong about')
   assert.equal(card('ling-3.1-flash-free', 32768).evidence.vision, 'declared')
+})
+
+test('GUARD: a swept death expires, and a stale capability verdict is asked again', async () => {
+  // Three findings from the same audit, all of them "documented and never read":
+  //
+  //  · `nextProbeAt` was written into the record and nothing ever consulted it, so
+  //    every removal was permanent — including the ones that were wrong. A dead
+  //    verdict that has aged past the interval is asked once more, which is also
+  //    the only way a name Zen re-publishes can come back at all.
+  //  · vision and tools had no TTL while the effort axis always had one, so a
+  //    probe from months ago was indistinguishable from one taken today, and no
+  //    code path could downgrade a mark.
+  //  · a seed whose declaration moved used to be DISCARDED, which meant a
+  //    models.dev typo fix silently deleted the only generation anyone had
+  //    watched. It is demoted now: still applied, bounded by the inferred valve,
+  //    and labelled `inferred` so it stops claiming first-party evidence.
+  assert.equal(DEAD_RECHECK_MS, 7 * 24 * 60 * 60_000, 'a week is long enough that a dead model costs nothing')
+  assert.equal(CAPABILITY_TTL_MS, EFFORT_TTL_MS, 'both axes age on the same clock')
+
+  const record = { id: 'x-free', limit: { context: 1000, output: 500 } }
+  const fp = capabilityFingerprint(record)
+  // A realistic clock: the TTL arithmetic is meaningless around epoch-ish values,
+  // and a NEGATIVE timestamp would silently pass the `at > 0` guard that keeps a
+  // seed (which carries `at: 0`, meaning "a property of the table, not a moment")
+  // out of the age arithmetic.
+  const NOW = 1_800_000_000_000
+  const fresh = { ok: true, at: NOW - 1000, fp }
+  const stale = { ok: true, at: NOW - CAPABILITY_TTL_MS - 1, fp }
+  assert.equal(measuredCapabilityFor(record, 'x-free', 'tools', { 'x-free': { verdict: 'ok', at: 0, capabilities: { tools: fresh } } }, NOW).ok, true, 'current')
+  assert.equal(
+    measuredCapabilityFor(record, 'x-free', 'tools', { 'x-free': { verdict: 'ok', at: 0, capabilities: { tools: stale } } }, NOW),
+    undefined,
+    'past the TTL it reads as unmeasured, so the next round asks again',
+  )
+  assert.equal(
+    measuredCapabilityFor(record, 'x-free', 'tools', { 'x-free': { verdict: 'ok', at: 0, capabilities: { tools: fresh } } }).ok,
+    true,
+    'with no clock supplied the age is not guessed at — the verdict stands, and the ROUND (which does pass a clock) is what re-asks',
+  )
+  // The seed survives a moved declaration, weakened rather than dropped.
+  const moved = { id: 'mimo-v2.6-flash-free', limit: { context: 400000, output: 64000 } }
+  const applied = seededContextFor(moved, 'mimo-v2.6-flash-free')
+  assert.equal(applied?.source, 'inferred', 'a moved declaration turns first-party evidence into inferred')
+  assert.equal(applied?.raisedTo, 1048576, 'and the number is still there — a typo fix must not erase it')
 })

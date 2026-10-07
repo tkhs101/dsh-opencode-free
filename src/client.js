@@ -788,7 +788,10 @@ window.__ModuleLoader__.load({
 		   is shown INLINE rather than only on hover — three different conditions all
 		   render as "未测到", and a reader who cannot tell them apart cannot tell
 		   whether to wait, reconfigure, or give up. */
-		var CALLER_CODES = { "anon-gated": true, "quota-exhausted": true, "bad-key": true, "upstream-overloaded": true, "endpoint-unavailable": true };
+		/* "region-blocked" belongs here, not with the model's own failures: the model is
+		   not what is broken, the caller's egress is. Showing it in the model's own
+		   colour would say the model is at fault for where you are. */
+		var CALLER_CODES = { "anon-gated": true, "quota-exhausted": true, "bad-key": true, "upstream-overloaded": true, "endpoint-unavailable": true, "region-blocked": true };
 
 		function failureText(t, result) {
 			var key = typeof result.code === "string" && hasOwnKey(FAILURE_WORDS, result.code)
