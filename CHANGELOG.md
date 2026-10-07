@@ -47,6 +47,16 @@ cost. Behaviour below is what a user can observe change.
   replies have been cut off at the budget. The strikethrough is gone from the open
   row — a struck-through number beside the live one reads as the value to anyone
   who has not internalised the convention.
+- **The per-row tool badge is gone.** Measured over the live set: 9 of 12 rows
+  carried it, two were unmeasured, and none ever lacked it. A mark that appears on
+  every row asserts nothing a reader would not have assumed, and it takes the
+  space a varying capability should have. Vision keeps its badge — seven models
+  declare image input and five do not — and the tool measurement is not thrown
+  away: it moves to the model name, which is the one element on a row that means
+  "this model", so it is still one hover away and still testable. The card's
+  footer legend now states the one genuinely special thing about tools here, once
+  instead of per row: the free tier admits nothing unless the request carries
+  `read` and `bash`, which is why the plugin adds them to every request.
 - **The panel row reports the limits the request actually uses, and says which
   of them were measured.** A row now shows the context window and the maximum
   output pi-ai clamps with, plus vision, thinking and tool-call badges — and a

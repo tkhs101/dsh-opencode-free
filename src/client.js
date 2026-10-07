@@ -132,8 +132,9 @@ window.__ModuleLoader__.load({
 			"caps.declared": "声明",
 			"legend.vision": "多模态视觉",
 			"legend.thinking": "思考推理",
-			"legend.tools": "工具调用",
+			"legend.tools": "工具调用（本插件为每个请求补上 read/bash：免费层只放行带这两个工具的请求）",
 			"legend.measured": "已实测（非声明）",
+			"legend.verified": "已实测：{list}",
 			"empty": "当前没有可显示的模型。"
 		};
 
@@ -210,8 +211,9 @@ window.__ModuleLoader__.load({
 			"caps.declared": "declared",
 			"legend.vision": "Multimodal vision",
 			"legend.thinking": "Reasoning",
-			"legend.tools": "Tool calls",
+			"legend.tools": "Tool calls (the plugin adds read/bash to every request — the free tier admits nothing without them)",
 			"legend.measured": "measured on the route, not declared",
+			"legend.verified": "verified: {list}",
 			"empty": "No models are available right now."
 		};
 
@@ -1260,7 +1262,25 @@ window.__ModuleLoader__.load({
 			var rows = ordered.map(function (id) {
 				var shown = !hasOwnKey(hidden, id);
 				var card = hasOwnKey(cards, id) ? cards[id] : null;
-				var left = [E("span", { key: "id", className: "opf-id" }, id)];
+				/* What was VERIFIED about this model, on the name itself.
+				   The tool badge used to sit here and it was removed: 9 of 12 rows
+				   carried it, none ever lacked it, and a mark that is on every row
+				   tells the reader nothing they would not have assumed. The
+				   measurement stays — it is what would put the badge back — and it
+				   lives on the model name now, which is the one element that means
+				   "this model" rather than "this number". */
+				var verified = [];
+				if (card !== null) {
+					if (card.measured.tools === true) verified.push(t("badge.tools"));
+					if (card.measured.vision === true && card.image === true) verified.push(t("badge.vision"));
+				}
+				var left = [
+					E("span", {
+						key: "id",
+						className: "opf-id",
+						title: verified.length === 0 ? undefined : t("legend.verified", { list: verified.join(" · ") }),
+					}, id),
+				];
 				var rowClass = "opf-row";
 				/* Capability badges describe the model and are always on
 				   screen; the probe badge describes THIS round and sits after
@@ -1282,13 +1302,6 @@ window.__ModuleLoader__.load({
 						left.push(E("span", { key: "think", className: "opf-badge opf-badge-think" },
 							starIcon(),
 							E("span", null, t("badge.thinking") + " · " + levelLabel(card.thinking))));
-					}
-					if (card !== null && card.measured.tools === true) {
-						left.push(E("span", {
-							key: "tools",
-							className: "opf-badge opf-badge-tools" + measuredClass(true),
-							title: t("legend.measured")
-						}, E("span", null, t("badge.tools"))));
 					}
 					/* The two numbers the request path uses, and ONLY the effective
 					   values. Provenance moved into the tooltip.
@@ -1469,7 +1482,7 @@ window.__ModuleLoader__.load({
 			var legend = E("span", { className: "opf-legend" },
 				E("span", { className: "opf-badge opf-badge-vision" }, eyeIcon(), E("span", null, t("legend.vision"))),
 				E("span", { className: "opf-badge opf-badge-think" }, starIcon(), E("span", null, t("legend.thinking"))),
-				E("span", { className: "opf-badge opf-badge-tools" }, E("span", null, t("legend.tools"))),
+				E("span", { className: "opf-badge opf-badge-tools", title: t("legend.tools") }, E("span", null, "read + bash")),
 				E("span", { className: "opf-badge opf-measured" }, E("span", null, t("legend.measured"))));
 
 			/* Progress capsule. LIVE: pulsing dot, "正在探测", "done/total", mini

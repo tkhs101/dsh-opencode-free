@@ -1663,4 +1663,61 @@ test('GUARD: the row states the limits that are IN EFFECT, and hides the provena
   assert.ok(outputNode !== undefined, 'and the provenance is one hover away')
   assert.match(outputNode.props.title, /131,072/, 'the declaration it replaced')
   assert.match(outputNode.props.title, /64,000/, 'what the model was actually watched writing')
+  // The harness swaps `setTimeout` for a capturing stub and only puts it back on
+  // dispose. A test that leaves it installed makes the NEXT test's render loop
+  // wait on a timer that is never fired — a hang with no error anywhere, which is
+  // what this file did to itself twice today.
+  mounted.dispose()
+})
+
+test('GUARD: a badge that is on every row is not a badge', async () => {
+  // Asked, correctly: tool calling works on every model here, so what is the
+  // badge telling me? Measured over the live set — 9 rows carried the tool badge,
+  // two were unmeasured, and NOT ONE ever lacked it. A mark that appears on every
+  // row asserts nothing a reader would not have assumed, and it takes space that
+  // a varying capability should have.
+  //
+  // Vision is the contrast that keeps the other two: 7 rows declare image input
+  // and 5 do not, so that badge carries a decision — DSH refuses to attach a
+  // screenshot to a model that does not take one. Thinking never says "cannot"
+  // either, but it names the LEVEL you will be offered, which is a setting rather
+  // than a claim.
+  //
+  // So the tool badge is gone and the measurement moved to the model name, which
+  // is the one element that means "this model". The measurement must survive: if
+  // a model ever refuses to call a tool, that is the fact that earns the badge
+  // back, and nothing here may throw the evidence away.
+  const mounted = await renderCard({
+    hidden: [],
+    snapshot: {
+      ...SNAPSHOT,
+      visible: ['space-bunny-free', 'big-pickle'],
+      models: [
+        { id: 'space-bunny-free', image: true, thinking: 'max', contextWindow: 1048576, outputBudget: 524288, declaredContext: 1048576, declaredOutput: 524288, measured: { context: false, output: false, vision: true, tools: true } },
+        { id: 'big-pickle', image: false, thinking: 'high', contextWindow: 200000, outputBudget: 48000, declaredContext: 200000, declaredOutput: 32000, measured: { context: true, output: true, vision: false, tools: true } },
+      ],
+    },
+  })
+  const nodes = [...walk(mounted.rerender())]
+  const badges = nodes.filter((n) => String(n.props?.className ?? '').includes('opf-badge'))
+  // The card's footer legend keeps one, because the free tier's admission rule is
+  // a fact about THIS PLUGIN rather than about any model, and it is worth saying
+  // once. What must not survive is the per-row one.
+  const toolBadges = badges.filter((n) => String(n.props.className).includes('opf-badge-tools'))
+  assert.equal(toolBadges.length, 1, 'exactly one tools badge, and it is the legend')
+  assert.match(
+    [...walk(toolBadges[0])].filter((n) => n.text).map((n) => n.text).join(''),
+    /read/,
+    'the legend states the admission rule instead of a per-model claim',
+  )
+  assert.match(String(toolBadges[0].props.title ?? ''), /read|bash/, 'and explains it on hover')
+  assert.ok(
+    badges.some((n) => String(n.props.className).includes('opf-badge-vision')),
+    'the vision badge stays: it is the capability that actually varies',
+  )
+  // The evidence is not discarded with the badge: it moves to the model name,
+  // which is the one element on the row that means "this model".
+  const idNodes = nodes.filter((n) => String(n.props?.className ?? '') === 'opf-id')
+  assert.equal(idNodes.length, 2, 'one per row')
+  for (const node of idNodes) assert.match(String(node.props.title ?? ''), /工具/, 'tools stay listed where they were verified')
 })
