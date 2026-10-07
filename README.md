@@ -165,11 +165,18 @@ declaration that is too low really does cut a reply at the declaration with
 nothing reporting it. But that only proves the field is enforced, not that a
 model writes what it is given: on 2026-10-07 every route accepted budgets up to
 1,040,384, and no model has ever been seen writing anything like it. So the rule
-is that **only a watched generation moves this number** — and one has been
-watched: Mimo V2.6 Flash produced 40,000 output tokens when asked for 40,000, so
-its budget ships at 40,000 rather than the declared 32,000. Every other model's
-budget is exactly what models.dev says, and the row shows an arrow only where
-that is not true.
+is that **only a watched generation moves this number** — and two have been
+watched reaching their budget: Mimo V2.6 Flash produced 64,000 and Big Pickle
+48,000, against declarations of 32,000 each. Every other model's budget is
+exactly what models.dev says, and the row shows an arrow only where that is not
+true.
+
+Worth knowing why the other nine have no figure: models choose when to stop, so
+the same request produced 892 tokens once and 64,000 the next time. And for
+several of them the budget is not the constraint at all — throughput measured
+between 34 and 365 tokens a second, so the ten-minute request timeout ends a
+reply between roughly 28,000 and 295,000 tokens, which for a model declaring
+128,000 or 262,144 means the clock binds first.
 
 Time is the ceiling nobody sees. Mimo V2.6 Flash writes at about 150 tokens a
 second, so a single reply ends at roughly 90,000 tokens when the 10-minute

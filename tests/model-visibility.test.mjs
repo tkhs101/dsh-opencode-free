@@ -385,9 +385,9 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
     assert.equal(pickle.declaredContext, 200000)
     assert.equal(pickle.declaredOutput, 32000)
     assert.equal(pickle.contextWindow, 1048576)
-    assert.equal(pickle.outputBudget, 32000)
-    assert.equal(pickle.observedOutput, undefined, 'nothing has been watched this model produce')
-    assert.deepEqual(pickle.measured, { context: true, output: false, vision: false, tools: true })
+    assert.equal(pickle.outputBudget, 48000, 'watched producing 48,000 of a declared 32,000')
+    assert.equal(pickle.observedOutput, 48000)
+    assert.deepEqual(pickle.measured, { context: true, output: true, vision: false, tools: true })
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]

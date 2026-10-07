@@ -89,10 +89,10 @@ cost. Behaviour below is what a user can observe change.
   capability: every route accepted budgets up to 1,040,384 on 2026-10-07 and no
   model has ever been seen writing that, so those numbers ship nowhere. One model
   has a watched generation — Mimo V2.6 Flash produced 40,000 output tokens when
-  asked for 40,000 — so only its budget differs from its declaration (32,000 →
-  40,000). The other seven are exactly what models.dev publishes, which is also
-  the smaller change for the user's shared quota: at most one reply per turn can
-  run 25% longer than before.
+  asked for more than it declares, and two have now been watched reaching it:
+  Mimo V2.6 Flash produced 64,000 of a declared 32,000 (346s, ~185 tokens per
+  second) and Big Pickle 48,000 of 32,000 (132s, ~365 tokens per second). The
+  other nine budgets are exactly what models.dev publishes.
 - **And it is labelled as a budget, not as a capability.** The route enforces
   `max_tokens` — asked for 8 with a prompt that wanted thousands, every model
   that answered stopped at exactly 8 with `finish_reason: "length"` — so a budget

@@ -2122,14 +2122,43 @@ export function clampProposalFor(declared: number): number {
  * timeout ends a reply near 91,000 tokens whatever the budget says.
  */
 const SEED_OUTPUT: Readonly<Record<string, { readonly declared: number; readonly observed: number }>> = {
-  // DELIVERY evidence only. One model, because one generation has been watched.
+  // DELIVERY evidence only — a generation this plugin watched to its budget, with
+  // `stopReason: "length"`. Both measured 2026-10-07 with the integer prompt
+  // ("print the integers from 1 to 100000"), asking for more than the model
+  // declares:
+  //
+  //   mimo-v2.6-flash-free  ask 64000 → produced 64000, length, 346s, 185 tok/s
+  //   big-pickle            ask 48000 → produced 48000, length, 132s, 365 tok/s
+  //
+  // Three measurement traps cost more requests than these two observations did,
+  // and all three are reasons a naive version of this table would be wrong:
+  //
+  //   1. A MODEL CHOOSES WHEN TO STOP. The same model, the same ask, one sample
+  //      produced 892 tokens with `stop` and the next produced 64,000 with
+  //      `length`. A single short reply is evidence about that sample, not about
+  //      the ceiling — so every entry here is a WITNESSED generation, and the
+  //      protocol retries rather than trusting one.
+  //   2. THE ADMISSION GATE PUTS TOOLS ON EVERY REQUEST, and a model that calls
+  //      one ends its generation: `longcat-2.5-preview-free` produced 121 tokens
+  //      with `stopReason: "toolUse"` on a 64,000 budget, which reads exactly
+  //      like a route that caps output. The measurement says so in a system
+  //      message instead.
+  //   3. RATE IS THE CEILING NOBODY SEES. 34 tok/s (nemotron-3.5) to 365
+  //      (big-pickle): inside the ten-minute request timeout that is roughly
+  //      28,000 to 295,000 tokens, so for several models the DECLARED budget
+  //      (128,000 / 262,144 / 524,288) is not the constraint — the clock is.
   //
   // The 2026-10-07 acceptance sweep (every route taking `max_tokens` from 8 up to
   // 1,040,384) is deliberately NOT here. It proved the route enforces the field —
   // which is why a declaration that is too low really does cut a reply — but an
   // accepted budget is not a thing any model was seen to write, and shipping it
   // as one is the mistake this table was corrected for (ADR 0004 §44).
-  "mimo-v2.6-flash-free": { declared: 32000, observed: 40000 },
+  //
+  // No other model has an entry because none has been watched past its
+  // declaration. Several stopped on their own well below it, which is a fact
+  // about those samples and not a ceiling.
+  "mimo-v2.6-flash-free": { declared: 32000, observed: 64000 },
+  "big-pickle": { declared: 32000, observed: 48000 },
 };
 
 /**

@@ -930,9 +930,9 @@ test('a derived record carries all four capabilities from models.dev', () => {
   const pickle = candidates.find((m) => m.id === 'big-pickle')
   assert.deepEqual(pickle.input, ['text'], 'text-only stays text-only')
   assert.equal(pickle.contextWindow, 200000)
-  // `limit.output` says 32000 and nothing has been WATCHED past it, so the
-  // declaration ships unchanged — see the guard below for the one model that has.
-  assert.equal(pickle.maxTokens, 32000)
+  // `limit.output` says 32000 and this model was watched producing 48,000 of it
+  // (2026-10-07, `stopReason: "length"`), so the budget follows the observation.
+  assert.equal(pickle.maxTokens, 48000)
   // A record that publishes NOTHING falls back to the template for the identity
   // and transport fields, but NOT for capability claims. `input` and `reasoning`
   // describe what the model can do; inheriting them from another model answers
@@ -2286,9 +2286,10 @@ test('GUARD: the output budget follows models.dev unless a generation was WATCHE
       .candidates.find((m) => m.id === id)
   }
 
-  // Watched producing 40,000 at a declared 32,000: the budget follows the
+  // Watched producing 64,000 at a declared 32,000 (2026-10-07, integer prompt,
+  // `stopReason: "length"`, 346s at ~185 tok/s): the budget follows the
   // observation, because that is the only evidence that exists.
-  assert.equal(built('mimo-v2.6-flash-free', 32000).maxTokens, 40000, 'a watched generation raises the budget')
+  assert.equal(built('mimo-v2.6-flash-free', 32000).maxTokens, 64000, 'a watched generation raises the budget')
   assert.equal(
     built('longcat-2.5-preview-free', 131072).maxTokens,
     131072,
@@ -2306,7 +2307,7 @@ test('GUARD: the output budget follows models.dev unless a generation was WATCHE
   )
   // The observation is reported separately and only where it exists, so the row
   // can never present a budget as something the model was seen to write.
-  assert.equal(observedOutputFor(section(32000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 40000), 40000)
+  assert.equal(observedOutputFor(section(32000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 64000), 64000)
   assert.equal(
     observedOutputFor(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 64000),
     undefined,
