@@ -84,6 +84,14 @@ cost. Behaviour below is what a user can observe change.
   could downgrade it. Thirty days, matching the effort clock: past it, the axis is
   asked again on the next manual round. With no clock supplied the age is not
   guessed at — the verdict stands, and the round is what re-asks.
+- **The counter of replies cut off at the budget was never counting.** The outcome
+  a finished request is recorded on was created, filled in by the payload hook and
+  read by the stream wrapper — but the lookup that finds it had no caller from the
+  commit that introduced it, so every real request returned early and nothing was
+  observed. It also hung off `result()`, which the host never calls: DSH consumes
+  the stream's iterator. So the "cut off" figure on a row was measuring nothing,
+  and the first-token timing never existed. Both paths report now, and the count
+  on screen means what it says.
 - **A removal is final for a week, not for ever.** `nextProbeAt` was written into
   every `dead` record and never read, so a model retired on a wrong channel during
   an upstream outage stayed suppressed with no path back — and a name Zen
