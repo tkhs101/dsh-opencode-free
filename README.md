@@ -175,12 +175,22 @@ Mimo wrote 79,722 tokens when asked for 131,072, and Big Pickle 48,000. Every
 other model's budget is exactly what models.dev says, and the row shows an arrow
 only where that is not true.
 
-Worth knowing why the other nine have no figure: models choose when to stop, so
-the same request produced 892 tokens once and 64,000 the next time. And for
-several of them the budget is not the constraint at all — throughput measured
-between 34 and 365 tokens a second, so the ten-minute request timeout ends a
-reply between roughly 28,000 and 295,000 tokens, which for a model declaring
-128,000 or 262,144 means the clock binds first.
+Worth knowing why some models have no figure: models choose when to stop, so the
+same request produced 892 tokens once and 79,722 the next. And for several of
+them the budget is not the constraint at all — throughput measured between 34 and
+365 tokens a second, so the ten-minute request timeout ends a reply between
+roughly 28,000 and 295,000 tokens, which for a model declaring 128,000 or
+262,144 means the clock binds first.
+
+The other half of that answer costs nothing and is collected automatically: when
+the route refuses a request, the numbers it names **are** its own limits — "does
+not exceed 262144" for output, "maximum context length of 262139" for context —
+and the check reads them out of the refusal and remembers them per model. A
+refusal produces no output tokens at all, so this is the one ceiling measurement
+that is free, and it is the one that catches a stale declaration: it is how
+Big Pickle's window was found to be four times what the model really has. A
+route that answers instead of refusing has stated nothing, which is recorded as
+such rather than as a guess.
 
 Time is the ceiling nobody sees. Mimo V2.6 Flash writes at about 150 tokens a
 second, so a single reply ends at roughly 90,000 tokens when the 10-minute

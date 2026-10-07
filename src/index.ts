@@ -67,6 +67,7 @@ export {
   requestHeader,
   resolveZenApiKey,
   sessionHeader,
+  statedCeilings,
   stripStaleReasoning,
   swapCompactionPrompt,
   zenProvider,

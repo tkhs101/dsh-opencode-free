@@ -2197,6 +2197,7 @@ test('GUARD: a route that reports no reasoning stops being asked, not asked for 
         // each, and this guard is about the effort ladder not being re-asked for
         // ever. Counting them together would make the guard pass for the wrong
         // reason the moment the capability questions stop.
+        if (question === 'ceiling') return { kind: 'inconclusive', code: 'error', http: 400, reason: 'stub refusal' };
         if (typeof question === 'string' && question.startsWith('capability:')) return { kind: 'ok', api: 'openai-completions', capability: { axis: question.slice(11), ok: true, detail: 'stub' } };
         asked += 1;
         return { kind: 'ok', api: 'openai-completions', effort: { kind: 'baseline', tokens: 0 } };

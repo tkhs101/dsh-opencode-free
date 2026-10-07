@@ -45,6 +45,7 @@ function readNodeHeader(headers, name) {
   return entry ? entry[1] : undefined
 }
 
+const { maxTokensFor, contextFingerprint: catalogFingerprint } = await import('../src/catalog.ts')
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
 const libUrl = new URL('../lib/', import.meta.url)
 const hostFiles = (await readdir(libUrl)).filter((f) => f.endsWith('.js')).sort()
@@ -1887,4 +1888,49 @@ test('GUARD: a capability question puts a REAL image and REAL tools on the wire'
     /Do not call/,
     'never the gate stub: a model told not to use a tool cannot be measured using it',
   )
+})
+
+test('GUARD: a ceiling the ROUTE states is harvested, and an acceptance is not', async () => {
+  // The cheapest instrument in the plugin, and the one that was not being used: a
+  // refusal costs ZERO output tokens and returns a NUMBER. Measured 2026-10-07:
+  //   "[invalid_parameter] 参数校验失败: /max_tokens: 995834 is not less or equal
+  //    to 262144"                                    ← longcat, an OUTPUT ceiling
+  //   "...exceeds the model's maximum context length of 262139 tokens"
+  //                                                 ← big-pickle, a CONTEXT one
+  // and `big-pickle` is the model whose window was advertising four times its
+  // real ceiling because an ACCEPTANCE had been read as a measurement.
+  const output = plugin.statedCeilings(
+    '[invalid_parameter] 参数校验失败: \n/max_tokens: 995834 is not less or equal to 262144\n',
+  )
+  assert.deepEqual(output, { output: 262144 }, 'the ceiling is the far side of the comparison, not the ask')
+  const context = plugin.statedCeilings(
+    "[invalid_request_error] Requested token count exceeds the model's maximum context length of 262139 tokens. You requested about 300000 tokens.",
+  )
+  assert.deepEqual(context, { context: 262139 })
+  assert.equal(plugin.statedCeilings('This endpoint\'s maximum context length is 1048576 tokens. However, you requested about 1048659 tokens.').context, 1048576, 'and the wording mimo uses')
+
+  // A refusal that names nothing is a refusal about something else — a bad
+  // parameter, a dead model, a gate — and must never be harvested as a number.
+  for (const body of [
+    '{"type":"error","error":{"type":"error","message":"Internal server error"}}',
+    '{"error":{"type":"invalid_request_error","message":"[invalid_request_error] invalid request"}}',
+    '{"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}}',
+    '{"error":{"error":{"type":"ModelDeprecated","message":"Model x has been deprecated"}}}',
+    '',
+  ]) {
+    assert.equal(plugin.statedCeilings(body), undefined, `names no ceiling, so harvests none: ${body.slice(0, 40)}`)
+  }
+})
+
+test('GUARD: a harvested ceiling survives a restart and dies with its declaration', async () => {
+  const record = { id: 'longcat-2.5-preview-free', limit: { context: 1000000, output: 131072 } }
+  const fp = catalogFingerprint(record)
+  const stated = { output: 262144, fp, at: 1_700_000_000_000 }
+  assert.equal(maxTokensFor(record, 'longcat-2.5-preview-free', 1000000, stated), 262144, 'a route that states a ceiling moves the budget')
+
+  // A ceiling stated about a declaration this model no longer has is dropped:
+  // it belonged to the old record.
+  assert.equal(maxTokensFor(record, 'longcat-2.5-preview-free', 1000000, { ...stated, fp: '9:9:text' }), 262144, 'falls back to the seed, which is keyed on the same declaration')
+  assert.equal(maxTokensFor({ ...record, limit: { context: 1000000, output: 200000 } }, 'longcat-2.5-preview-free', 1000000, stated), 200000, 'a changed declaration discards the statement AND the seed')
+  assert.ok(maxTokensFor(record, 'longcat-2.5-preview-free', 1000000, { output: 999999999, fp, at: 1 }) <= 1000000, 'and it can never exceed the window it has to fit inside')
 })

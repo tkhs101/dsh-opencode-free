@@ -737,6 +737,12 @@ export interface DeriveOptions {
    * so `derive()` stays pure and fixture-testable, exactly like `measuredEffort`.
    */
   readonly measuredContext?: ReadonlyMap<string, MeasuredContext>;
+  /**
+   * Ceilings the ROUTE has stated about itself, keyed by id. Same reason, and it
+   * travels beside `measuredEffort` rather than inside it: this axis is about
+   * the request's own limits, not about the model's reasoning.
+   */
+  readonly measuredLimits?: ReadonlyMap<string, MeasuredLimits>;
 }
 
 export interface DerivedCatalog {
@@ -766,6 +772,7 @@ function buildModel(
   knownApis?: ReadonlyMap<string, Api>,
   measured?: MeasuredEffort,
   measuredContext?: MeasuredContext,
+  measuredLimits?: MeasuredLimits,
 ): Model<Api> {
   const id = typeof record.id === "string" && record.id !== "" ? record.id : "";
   const api = channelFor(record, knownApis);
@@ -794,7 +801,7 @@ function buildModel(
     contextWindow,
     // The window first, because the output ceiling is bounded by it: a ceiling
     // above the context it must fit inside is not a bigger ceiling, it is a lie.
-    maxTokens: maxTokensFor(record, id, contextWindow) ?? template.maxTokens,
+    maxTokens: maxTokensFor(record, id, contextWindow, measuredLimits) ?? template.maxTokens,
     thinkingLevelMap: (levels ?? undefined) as Model<Api>["thinkingLevelMap"],
     // `compat` is transport-specific. Carrying the template's completions
     // overrides onto a responses model would misconfigure it, so a channel
@@ -831,6 +838,7 @@ export function derive(section: CatalogRecord, options: DeriveOptions): DerivedC
         options.knownApis,
         options.measuredEffort?.get(id),
         options.measuredContext?.get(id),
+        options.measuredLimits?.get(id),
       ),
     );
   }
@@ -1076,6 +1084,16 @@ export interface ProbeRecord {
    */
   readonly capabilities?: Partial<Record<CapabilityAxis, CapabilityVerdict>>;
   /**
+   * Ceilings the ROUTE has stated about this model, harvested from refusals.
+   *
+   * This is the mechanism that replaces a table of guesses: the numbers come
+   * from the route itself, at the moment it refused, and they are fingerprinted
+   * against the declaration they were stated about so a changed declaration
+   * discards them. `namedAt` records when — a ceiling stated last month may have
+   * moved, and the panel shows the age rather than implying permanence.
+   */
+  readonly limits?: MeasuredLimits;
+  /**
    * Which instrument wrote the effort samples here. See {@link EFFORT_READING};
    * a record without it is read as unmeasured on that axis.
    */
@@ -1214,6 +1232,13 @@ export interface ProbeResult {
    * an upstream outage from being persisted as a missing capability.
    */
   readonly capability?: { readonly axis: CapabilityAxis; readonly ok: boolean; readonly detail: string };
+  /**
+   * Ceilings the ROUTE stated about itself in the refusal that ended this
+   * probe, when it named any. Harvested from every failure, because it is free:
+   * the request was being sent anyway, and a refusal returns a number where an
+   * acceptance returns nothing.
+   */
+  readonly ceilings?: { readonly output?: number; readonly context?: number };
   /**
    * Levels this model enumerated in a refusal.
    *
@@ -1356,6 +1381,11 @@ function readProbes(value: unknown): { probes: ProbeMap; droppedVerdicts: string
       ...(isMeasuredChannel(entry.api) ? { api: entry.api } : {}),
       ...(isMeasuredContext(entry.context) ? { context: entry.context } : {}),
       ...(readCapabilities(entry.capabilities) === undefined ? {} : { capabilities: readCapabilities(entry.capabilities) }),
+      // A `fp: ""` entry is the recorded fact that the route named nothing when
+      // it was asked, and it is deliberately NOT read back as a measurement —
+      // `isMeasuredLimits` rejects it, so the next round asks again rather than
+      // treating silence as a ceiling.
+      ...(isMeasuredLimits(entry.limits) ? { limits: entry.limits } : {}),
       ...(Array.isArray(entry.selfReported)
         ? { selfReported: entry.selfReported.filter((level): level is string => typeof level === "string") }
         : {}),
@@ -1703,6 +1733,15 @@ export interface ModelCapability {
   readonly levels: readonly string[];
   /** The Off spelling that is MEASURED to stop reasoning, else null. */
   readonly off: string | null;
+  /**
+   * Ceilings the ROUTE has stated about this model, when it has named any.
+   *
+   * These are the interval's other end. A budget is only meaningful as a range:
+   * a reply has been watched at `observedOutput`, and the route says nothing
+   * above `statedOutput`. Neither is the ceiling — one is the low bound, the
+   * other the high bound — and a row that shows only the budget hides that.
+   */
+  readonly stated?: { readonly output?: number; readonly context?: number; readonly at: number };
   /** Per axis: was this verified on the route, or copied from a declaration? */
   readonly measured: {
     readonly context: boolean;
@@ -1781,9 +1820,11 @@ export function modelCapability(
     readonly measuredContext?: boolean;
     readonly measuredOutput?: boolean;
     readonly measuredEffort?: MeasuredEffort | undefined;
+    readonly limits?: MeasuredLimits | undefined;
   },
 ): ModelCapability {
   const record = context?.record;
+  const limits = context?.limits;
   const limit = isPlainObject(record?.limit) ? record.limit : {};
   const map = model.thinkingLevelMap as Record<string, string | null> | undefined;
   const levels = map !== null && typeof map === "object" ? Object.keys(map).filter((level) => typeof map[level] === "string") : [];
@@ -1803,6 +1844,17 @@ export function modelCapability(
     declaredOutput: finitePositive(limit.output),
     levels,
     off,
+    // Only when it names something: `fp: ""` is the record of a route that said
+    // nothing, and it must not reach the panel as a number.
+    ...(limits?.fp === "" || limits === undefined
+      ? {}
+      : {
+          stated: {
+            ...(limits.output === undefined ? {} : { output: limits.output }),
+            ...(limits.context === undefined ? {} : { context: limits.context }),
+            at: limits.at,
+          },
+        }),
     measured: {
       context: context?.measuredContext === true,
       output: context?.measuredOutput === true,
@@ -1981,6 +2033,32 @@ export interface MeasuredContext {
 export function contextFingerprint(record: CatalogRecord): string {
   const limit = isPlainObject(record.limit) ? record.limit : {};
   return `${String(limit.context ?? "-")}:${String(limit.output ?? "-")}`;
+}
+
+/**
+ * Ceilings the route has stated about one model, and when it last said so.
+ *
+ * `fp` is the fingerprint of the declaration the statement was made against —
+ * the same {@link contextFingerprint} the context axis uses, because both
+ * statements are about the same record. A changed declaration discards them
+ * rather than keeping a number that was stated about something else.
+ */
+export interface MeasuredLimits {
+  readonly output?: number;
+  readonly context?: number;
+  readonly fp: string;
+  readonly at: number;
+}
+
+/** Defensive read of harvested ceilings; a partial one is no measurement. */
+export function isMeasuredLimits(value: unknown): value is MeasuredLimits {
+  if (!isPlainObject(value)) return false;
+  if (typeof value.fp !== "string" || value.fp === "") return false;
+  if (typeof value.at !== "number" || !Number.isFinite(value.at)) return false;
+  const output = value.output;
+  const context = value.context;
+  const ok = (n: unknown): boolean => n === undefined || (typeof n === "number" && Number.isFinite(n) && n > 0);
+  return ok(output) && ok(context) && (output !== undefined || context !== undefined);
 }
 
 /** Defensive read of a persisted context measurement. */
@@ -2266,12 +2344,18 @@ export function maxTokensFor(
   record: CatalogRecord,
   id: string,
   window: number | undefined,
+  limits?: MeasuredLimits | undefined,
 ): number | undefined {
   const declared = finitePositive(isPlainObject(record.limit) ? record.limit.output : undefined);
   if (declared === undefined) return declared;
+  // A number the ROUTE stated about itself outranks every seed: it is
+  // first-party, current, and it cost nothing. It is also the only one that can
+  // exist for a model the plugin has never seen before.
+  const stated =
+    limits !== undefined && limits.fp === contextFingerprint(record) ? finitePositive(limits.output) : undefined;
   const seed = SEED_OUTPUT[id];
-  if (seed === undefined || seed.declared !== declared) return declared;
-  const ceiling = Math.max(seed.named ?? 0, seed.observed ?? 0);
+  const seeded = seed !== undefined && seed.declared === declared ? seed : undefined;
+  const ceiling = Math.max(stated ?? 0, seeded?.named ?? 0, seeded?.observed ?? 0);
   if (ceiling === 0) return declared;
   const bounded = window === undefined ? ceiling : Math.min(ceiling, window);
   return bounded > declared ? bounded : declared;
@@ -2739,9 +2823,16 @@ function deriveWithEvidence(state: CatalogState, deps: CatalogDeps, section: Cat
   // A live measurement outranks the recorded one: it is newer and it was taken
   // against this very record. The seed fills in only what nobody has measured.
   const windows = measuredContextFor(base.candidates, section, state.probes);
-  return evidence.size === 0 && windows.size === 0
+  const limits = measuredLimitsFor(base.candidates, section, state.probes);
+  return evidence.size === 0 && windows.size === 0 && limits.size === 0
     ? base
-    : derive(section, { knownApis: deps.knownApis, template: deps.template, measuredEffort: evidence, measuredContext: windows });
+    : derive(section, {
+        knownApis: deps.knownApis,
+        template: deps.template,
+        measuredEffort: evidence,
+        measuredContext: windows,
+        measuredLimits: limits,
+      });
 }
 
 /**
@@ -2766,6 +2857,31 @@ export function measuredContextFor(
     out.set(model.id, live !== undefined && live.fp === contextFingerprint(record) ? live : (seededContextFor(record, model.id) ?? { raisedTo: 0, fp: "", at: 0 }));
   }
   for (const [id, entry] of out) if (entry.raisedTo === 0) out.delete(id);
+  return out;
+}
+
+/**
+ * Ceilings the route has stated about each candidate, fingerprinted against the
+ * record they were stated about.
+ *
+ * A statement whose fingerprint no longer matches is dropped rather than applied:
+ * it was about a declaration this model no longer has, and the ceiling it named
+ * belonged to that one.
+ */
+export function measuredLimitsFor(
+  models: readonly Model<Api>[],
+  section: CatalogRecord,
+  probes: ProbeMap,
+): Map<string, MeasuredLimits> {
+  const out = new Map<string, MeasuredLimits>();
+  for (const model of models) {
+    const raw = section[model.id];
+    if (!isPlainObject(raw)) continue;
+    const limits = probes[model.id]?.limits;
+    if (!isMeasuredLimits(limits)) continue;
+    if (limits.fp !== contextFingerprint({ ...raw, id: model.id })) continue;
+    out.set(model.id, limits);
+  }
   return out;
 }
 
@@ -3398,6 +3514,53 @@ export async function runProbeRound(
       // cannot re-measure what it already knows, which is what keeps this from
       // turning into a permanent per-round tax.
       const axisQuestions = capabilityQuestionsFor(model, rawById(model.id), state.probes);
+      // The CEILING question goes first, and it is the only one whose cost is
+      // zero when it works: it asks for the whole advertised window, so a route
+      // with a limit refuses and NAMES it, and a refusal produces no output
+      // tokens at all. A route that answers instead is recorded as having stated
+      // nothing — which is itself the answer for a model whose ceiling is above
+      // anything this conversation could ask for.
+      if (state.probes[model.id]?.limits === undefined) {
+        for (const _attempt of [0]) {
+          if (state.probeRun.requests >= samplesPerModel) break;
+          if (state.probes[model.id]?.verdict !== "ok") break;
+          const recordCeil = rawById(model.id);
+          if (recordCeil === undefined) break;
+          state.probeRun.requests += 1;
+          try {
+            const ceilingOutcome = await probe!(model, "ceiling");
+            const stated = ceilingOutcome.kind === "inconclusive" ? ceilingOutcome.ceilings : undefined;
+            const priorC = state.probes[model.id];
+            state.probes[model.id] = {
+              ...priorC,
+              // Recorded even when nothing was named: "asked, and the route said
+              // no more" is what stops the next round from asking again, and it
+              // is the honest state of a route that enforces nothing.
+              limits:
+                stated === undefined
+                  ? { fp: "", at: 0 }
+                  : {
+                      ...(stated.output === undefined ? {} : { output: stated.output }),
+                      ...(stated.context === undefined ? {} : { context: stated.context }),
+                      fp: capabilityFingerprint(recordCeil),
+                      at: deps.now(),
+                    },
+            };
+            // A context ceiling the route just NAMED is the strongest evidence
+            // there is for that axis — first-party, current, free — so it is
+            // applied immediately rather than at the end of the round.
+            if (stated?.context !== undefined) {
+              const m = state.models.find((x) => x.id === model.id);
+              if (m !== undefined && stated.context > m.contextWindow) {
+                (m as { contextWindow: number }).contextWindow = stated.context;
+              }
+            }
+          } catch {
+            // A prober that throws has learned nothing; the axis stays open and
+            // the next round asks again.
+          }
+        }
+      }
       for (const axis of axisQuestions) {
         if (state.probeRun.requests >= samplesPerModel) break;
         if (state.probes[model.id]?.verdict !== "ok") break;
@@ -3682,6 +3845,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       };
       const section = state.cache?.models;
       const efforts = section === undefined ? new Map<string, MeasuredEffort>() : measuredEffortMap(effective, section, state.probes);
+      const harvested = section === undefined ? new Map<string, MeasuredLimits>() : measuredLimitsFor(effective, section, state.probes);
       return {
         models: state.models.slice(),
         visible: effective.map((model) => model.id),
@@ -3700,6 +3864,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
             measuredContext: declaredContext !== undefined && model.contextWindow !== declaredContext,
             measuredOutput: declaredOutput !== undefined && model.maxTokens !== declaredOutput,
             measuredEffort: efforts.get(model.id),
+            limits: harvested.get(model.id),
           });
         }),
         source: state.source,

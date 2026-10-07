@@ -119,6 +119,8 @@ window.__ModuleLoader__.load({
 			"caps.ctx": "上下文",
 			"caps.out": "输出预算",
 			"caps.observed": "实测产出",
+			"caps.stated": "路由自述上限",
+			"caps.statedTitle": "上游在拒绝正文里说出的它自己的上限",
 			"caps.observedTitle": "本插件实际看这个模型写出过的最长回答",
 			"caps.declared": "声明",
 			"legend.vision": "多模态视觉",
@@ -188,6 +190,8 @@ window.__ModuleLoader__.load({
 			"caps.ctx": "context",
 			"caps.out": "output budget",
 			"caps.observed": "observed",
+			"caps.stated": "route says",
+			"caps.statedTitle": "the ceiling the upstream stated about itself in a refusal",
 			"caps.observedTitle": "the longest reply this plugin has watched this model produce",
 			"caps.declared": "declared",
 			"legend.vision": "Multimodal vision",
@@ -535,7 +539,12 @@ window.__ModuleLoader__.load({
 					   declaration and a measured one looked identical on screen —
 					   the panel had no way to show a number it was not sent. */
 					var measured = card.measured !== null && typeof card.measured === "object" ? card.measured : {};
+					var stated = card.stated !== null && typeof card.stated === "object" ? card.stated : null;
 					cards[card.id] = {
+						stated:
+							stated !== null && (typeof stated.output === "number" || typeof stated.context === "number")
+								? { output: typeof stated.output === "number" ? stated.output : null, context: typeof stated.context === "number" ? stated.context : null }
+								: null,
 						image: card.image === true,
 						thinking: typeof card.thinking === "string" && card.thinking !== "" ? card.thinking : null,
 						contextWindow: typeof card.contextWindow === "number" && isFinite(card.contextWindow) ? card.contextWindow : null,
@@ -1257,6 +1266,13 @@ window.__ModuleLoader__.load({
 						   route will accept; this is what came back. Showing only
 						   the first is how a 1,040,384 budget came to read as a
 						   million-token reply. */
+						if (card.stated !== null && card.stated.output !== null) {
+							left.push(E("span", {
+								key: "stated",
+								className: "opf-caps",
+								title: t("caps.statedTitle")
+							}, t("caps.stated") + " ", E("b", null, countLabel(card.stated.output))));
+						}
 						if (card.observedOutput !== null) {
 							left.push(E("span", {
 								key: "obs",

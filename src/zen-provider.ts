@@ -841,6 +841,45 @@ const CAPABILITY_QUESTIONS: Readonly<Record<CapabilityAxis, { question: string; 
 };
 
 /**
+ * A ceiling the ROUTE stated about itself, read out of a refusal.
+ *
+ * This is the cheapest instrument in the plugin and it is the one that was not
+ * being used: a refusal costs ZERO output tokens and it returns a NUMBER, where
+ * a generation costs tens of thousands and may not even reach its budget. Two
+ * distinct ceilings appear in these bodies and they are not the same thing:
+ *
+ *   output  "[invalid_parameter] 参数校验失败: /max_tokens: 995834 is not less
+ *           or equal to 262144"                        ← longcat, measured 2026-10-07
+ *   context "...exceeds the model's maximum context length of 262139 tokens"
+ *                                                       ← big-pickle, same day
+ *   context "This endpoint's maximum context length is 1048576 tokens."
+ *                                                       ← mimo (ADR 0004 §4)
+ *
+ * An ACCEPTANCE says nothing about any of this, which is how `big-pickle` came
+ * to be advertising a window four times its real one (ADR 0004 §47).
+ *
+ * Returned as two optional numbers rather than one, because a body can name
+ * either, both, or neither, and the caller must not have to guess which kind it
+ * got. A body that names neither is a refusal about something else entirely —
+ * a bad parameter, a dead model, a gate — and this returns undefined so it can
+ * never be mistaken for a measurement.
+ */
+export function statedCeilings(body: string): { output?: number; context?: number } | undefined {
+  if (typeof body !== "string" || body === "") return undefined;
+  const out: { output?: number; context?: number } = {};
+  // The parameter form. `max_tokens: <sent> is not less or equal to <cap>`; the
+  // sent value is ours (pi-ai's clamp) and is deliberately not read — the ceiling
+  // is the other side of the comparison.
+  const param = /max_tokens:\s*\d+\s+is\s+not\s+less\s+or\s+equal\s+to\s+(\d+)/i.exec(body);
+  if (param?.[1] !== undefined) out.output = Number(param[1]);
+  const context =
+    /maximum context length (?:is|of)\s+(\d+)\s*tokens/i.exec(body) ??
+    /maximum context length of\s+(\d+)/i.exec(body);
+  if (context?.[1] !== undefined) out.context = Number(context[1]);
+  return out.output === undefined && out.context === undefined ? undefined : out;
+}
+
+/**
  * The axis a question string asks about, or undefined when it is not one.
  *
  * The prefix is the whole contract between the catalogue's round and this
@@ -1432,6 +1471,13 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
         }
       : { role: "user", content: deps.prompt ?? capability?.prompt ?? PROBE_PROMPT, timestamp: deps.now?.() ?? Date.now() };
   const context = { messages: [message] };
+  // The CEILING question asks for the whole advertised window on purpose: pi-ai
+  // clamps that to `window − estimate − 4096`, which is the largest value this
+  // conversation can carry, so the request goes out at the top of what the plugin
+  // would ever ask for. A route with a ceiling below that refuses and names it;
+  // a route without one answers, which is itself the finding. One request, and
+  // the refusal costs no output tokens at all.
+  const asksCeiling = deps.question === "ceiling";
   const signal = AbortSignal.timeout(deps.timeoutMs ?? PROBE_TIMEOUT_MS);
   // Whether the request ran out of time is a property of the SIGNAL, not of
   // whichever error happens to surface: the provider flattens an abort into a
@@ -1463,7 +1509,7 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
       // muse-spark-1.2 at 1024), which reads as "this model cannot see" when it
       // can. At 4096 the same models answer. Spending four output tokens per
       // thousand to avoid a false negative is the cheaper side of that trade.
-      maxTokens: deps.maxTokens ?? (axis === "vision" ? CAPABILITY_VISION_MAX_TOKENS : PROBE_MAX_TOKENS),
+      maxTokens: deps.maxTokens ?? (asksCeiling ? model.contextWindow : axis === "vision" ? CAPABILITY_VISION_MAX_TOKENS : PROBE_MAX_TOKENS),
       // The default reasoning effort for muse-spark is xhigh; a probe only
       // needs any reply, so it asks for the cheapest one.
       reasoning: "low",
@@ -1641,8 +1687,9 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
   // with a generic 400 on `reasoning_effort:"none"`, and the responses channel
   // with `401 Model space-bunny-free is not supported for format openai`.
   const formatScoped = FORMAT_SCOPED_PATTERN.test(body);
+  const ceilings = statedCeilings(body);
   if (status === 0) {
-    return { kind: "inconclusive", reason: kind, code: kind, http: 0, marker: anonGateMarker(body) };
+    return { kind: "inconclusive", reason: kind, code: kind, http: 0, marker: anonGateMarker(body), ...(ceilings === undefined ? {} : { ceilings }) };
   }
   return {
     kind: "inconclusive",
@@ -1650,6 +1697,7 @@ async function probeOnce(model: Model<Api>, deps: ProbeDeps): Promise<ProbeOutco
     code: kind,
     http: status,
     marker: anonGateMarker(body),
+    ...(ceilings === undefined ? {} : { ceilings }),
     ...(formatScoped ? { formatScoped: true } : {}),
     // The one piece of good news a refusal can carry: the model's own vocabulary.
     ...(selfReportedLevels(body) === undefined ? {} : { selfReported: selfReportedLevels(body) }),

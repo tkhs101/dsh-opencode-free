@@ -93,6 +93,20 @@ cost. Behaviour below is what a user can observe change.
   At that rate 180s bought roughly 27,000 tokens — less than the plugin used to
   advertise. The host profile's copy was the one that won, so both are now 600s,
   matching the profile's own stream idle timeout. Short replies are unaffected.
+- **The plugin now learns each route's own limits instead of shipping a table.**
+  A refusal costs zero output tokens and returns a number — "does not exceed
+  262144" for output, "maximum context length of 262139" for context — so every
+  probe round now asks once for the whole advertised window and reads whatever
+  the refusal names, remembering it per model against a fingerprint of the
+  declaration it was stated about. A changed declaration discards it. A route
+  that answers instead of refusing is recorded as having stated nothing, and
+  asked again next round, rather than guessed at. This is the mechanism that
+  catches a stale declaration on its own: it is how Big Pickle's window turned
+  out to be four times what the model really has. A stated ceiling outranks the
+  seed tables, and a route that names nothing keeps models.dev's declaration.
+  The detail row shows the interval rather than a single number — what a reply
+  was watched writing, and what the route says it will not go past — because a
+  ceiling was never one number.
 - **A ceiling anyone STATES moves the output budget — vendor or route.**
   Xiaomi publishes [MiMo-V2.6-Flash](https://mimo.mi.com/models/en-US/mimo-v2.6-flash)
   as 1M context and **128K max output**; models.dev publishes 32,000, four times
