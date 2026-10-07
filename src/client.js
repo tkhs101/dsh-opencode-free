@@ -117,7 +117,9 @@ window.__ModuleLoader__.load({
 			"badge.tools": "工具",
 			"badge.measured": "实测",
 			"caps.ctx": "上下文",
-			"caps.out": "输出",
+			"caps.out": "输出预算",
+			"caps.observed": "实测产出",
+			"caps.observedTitle": "本插件实际看这个模型写出过的最长回答",
 			"caps.declared": "声明",
 			"legend.vision": "多模态视觉",
 			"legend.thinking": "思考推理",
@@ -184,7 +186,9 @@ window.__ModuleLoader__.load({
 			"badge.tools": "Tools",
 			"badge.measured": "measured",
 			"caps.ctx": "context",
-			"caps.out": "output",
+			"caps.out": "output budget",
+			"caps.observed": "observed",
+			"caps.observedTitle": "the longest reply this plugin has watched this model produce",
 			"caps.declared": "declared",
 			"legend.vision": "Multimodal vision",
 			"legend.thinking": "Reasoning",
@@ -535,7 +539,8 @@ window.__ModuleLoader__.load({
 						image: card.image === true,
 						thinking: typeof card.thinking === "string" && card.thinking !== "" ? card.thinking : null,
 						contextWindow: typeof card.contextWindow === "number" && isFinite(card.contextWindow) ? card.contextWindow : null,
-						maxOutput: typeof card.maxOutput === "number" && isFinite(card.maxOutput) ? card.maxOutput : null,
+						outputBudget: typeof card.outputBudget === "number" && isFinite(card.outputBudget) ? card.outputBudget : null,
+						observedOutput: typeof card.observedOutput === "number" && isFinite(card.observedOutput) ? card.observedOutput : null,
 						declaredContext: typeof card.declaredContext === "number" && isFinite(card.declaredContext) ? card.declaredContext : null,
 						declaredOutput: typeof card.declaredOutput === "number" && isFinite(card.declaredOutput) ? card.declaredOutput : null,
 						measured: {
@@ -1232,7 +1237,7 @@ window.__ModuleLoader__.load({
 					   declaration struck through when a measurement replaced it.
 					   Hiding these is what let a 200,000-token window and a
 					   1,048,576 one look the same from the outside. */
-					if (card !== null && (card.contextWindow !== null || card.maxOutput !== null)) {
+					if (card !== null && (card.contextWindow !== null || card.outputBudget !== null)) {
 						var limits = [];
 						var limitPair = function (label, shown, declared, measured) {
 							if (shown === null) return;
@@ -1245,8 +1250,20 @@ window.__ModuleLoader__.load({
 							limits.push(E("span", { key: label, className: "opf-limit" }, parts));
 						};
 						limitPair(t("caps.ctx"), card.contextWindow, card.declaredContext, card.measured.context);
-						limitPair(t("caps.out"), card.maxOutput, card.declaredOutput, card.measured.output);
+						limitPair(t("caps.out"), card.outputBudget, card.declaredOutput, card.measured.output);
 						left.push(E("span", { key: "limits", className: "opf-caps" }, limits));
+						/* What the model has actually been SEEN to produce, when a
+						   generation has been watched. The budget above is what the
+						   route will accept; this is what came back. Showing only
+						   the first is how a 1,040,384 budget came to read as a
+						   million-token reply. */
+						if (card.observedOutput !== null) {
+							left.push(E("span", {
+								key: "obs",
+								className: "opf-caps",
+								title: t("caps.observedTitle")
+							}, t("caps.observed") + " ", E("b", null, "≥" + countLabel(card.observedOutput))));
+						}
 					}
 				}
 				if (hasReading) {

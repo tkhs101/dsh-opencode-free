@@ -1681,8 +1681,21 @@ export interface ModelCapability {
   readonly thinking: string | null;
   /** What pi-ai will clamp this conversation against. */
   readonly contextWindow: number | undefined;
-  /** What pi-ai will put on the wire as `max_tokens`. */
-  readonly maxOutput: number | undefined;
+  /**
+   * The `max_tokens` budget pi-ai will put on the wire.
+   *
+   * Named for what it is. It is the largest budget the route takes, NOT an
+   * output length any model has produced — presenting it as "maximum output" is
+   * how a 1,040,384 budget came to read as a million-token reply nobody has
+   * ever seen (ADR 0004 §43).
+   */
+  readonly outputBudget: number | undefined;
+  /**
+   * The largest reply this plugin has watched this model produce, when one has
+   * been watched. Absent means never watched — NOT "cannot write", and NOT
+   * "writes exactly the budget".
+   */
+  readonly observedOutput: number | undefined;
   /** What models.dev published, for the two numbers above. */
   readonly declaredContext: number | undefined;
   readonly declaredOutput: number | undefined;
@@ -1693,6 +1706,7 @@ export interface ModelCapability {
   /** Per axis: was this verified on the route, or copied from a declaration? */
   readonly measured: {
     readonly context: boolean;
+    /** The BUDGET was measured on the route — not that the model writes that much. */
     readonly output: boolean;
     readonly vision: boolean;
     readonly tools: boolean;
@@ -1783,7 +1797,8 @@ export function modelCapability(
     image: Array.isArray(model.input) && model.input.includes("image"),
     thinking: topThinkingLevel(model),
     contextWindow: model.contextWindow,
-    maxOutput: model.maxTokens,
+    outputBudget: model.maxTokens,
+    observedOutput: observedOutputFor(record ?? {}, model.id, model.maxTokens),
     declaredContext: finitePositive(limit.context),
     declaredOutput: finitePositive(limit.output),
     levels,
@@ -2056,15 +2071,29 @@ export function clampProposalFor(declared: number): number {
 }
 
 /**
- * Max-output ceilings this plugin has MEASURED, by the model id they were
- * measured on — the `limit.output` counterpart of {@link SEED_CONTEXT}.
+ * The OUTPUT BUDGET to put on the wire, by the model id it was measured on — the
+ * `limit.output` counterpart of {@link SEED_CONTEXT}.
  *
- * `limit.output` is not decoration either, and pi-ai puts it straight on the
- * wire: `buildBaseOptions` sends `options.maxTokens ?? model.maxTokens`, and DSH
- * sends no `maxTokens` of its own for this provider (its `configuredMaxTokens`
- * map is empty), so this number IS the ceiling every reply is cut at. When it is
- * too low the reply simply stops — `finish_reason: "length"`, no error, nothing
- * in the panel.
+ * Read the name carefully: this is a budget, not an output length. It is the
+ * largest `max_tokens` the route would take without refusing, and that is exactly
+ * what this field should be, because pi-ai sends it
+ * (`options.maxTokens ?? model.maxTokens`, and DSH sends no `maxTokens` of its
+ * own for this provider) and the route ENFORCES it. When the declaration is too
+ * low the reply is cut at the declaration with `finish_reason: "length"` and
+ * nothing anywhere says why — so the budget must not be smaller than the route
+ * permits.
+ *
+ * **It is not evidence that the model can WRITE that much**, and calling it that
+ * was a real mistake (ADR 0004 §43). Two measurements keep the two apart:
+ *
+ *   · the route honours the field — asked for 8 with a prompt that wanted
+ *     thousands, `mimo`, `space-bunny-free`, `longcat-2.5-preview-free`,
+ *     `nemotron-3-ultra-free` and `big-pickle` all returned exactly 8/64 tokens
+ *     with `finish_reason: "length"`. So a refusal at N is evidence and an
+ *     acceptance at N is a budget, not a promise.
+ *   · what a model actually PRODUCES is {@link observedOutputFor}, and today that
+ *     exists for one model only: mimo, 40,000 tokens, `stopReason: "length"`,
+ *     about 152 tokens/second.
  *
  * Measured 2026-10-07 on the live set, one request per step, reading the number
  * off the outgoing body rather than off the declaration: the prompt is one word,
@@ -2092,21 +2121,58 @@ export function clampProposalFor(declared: number): number {
  *
  * Each entry is the largest budget the route ACCEPTED, never a number inferred
  * from one, and never more than the window this plugin advertises for the same
- * model — an output ceiling larger than the context it has to fit in is a
- * fiction. pi-ai clamps with `min(maxTokens, context − estimate − 4096)`, so the
- * bytes can never carry more than the value recorded here: a conversation with
- * room asks for it, and a long one automatically asks for less.
+ * model — a budget larger than the context it has to fit in is a fiction. pi-ai
+ * clamps with `min(maxTokens, context − estimate − 4096)`, so the bytes can never
+ * carry more than the value recorded here: a conversation with room asks for it,
+ * and a long one automatically asks for less.
+ *
+ * What this does NOT claim: that any model will write that much. The time is the
+ * real ceiling — mimo writes about 152 tokens/second, so the ten-minute request
+ * timeout ends the conversation at roughly 91,000 tokens whatever the budget
+ * says. A budget above that is not wasted (it costs nothing, and pi-ai's clamp
+ * lowers it as the conversation grows), but it must never be shown to a user as
+ * an output length.
  */
-const SEED_OUTPUT: Readonly<Record<string, { readonly declared: number; readonly measured: number }>> = {
-  "mimo-v2.6-flash-free": { declared: 32000, measured: 1040384 },
-  "big-pickle": { declared: 32000, measured: 128000 },
-  "fledge-alpha-free": { declared: 131072, measured: 1040384 },
-  "longcat-2.5-preview-free": { declared: 131072, measured: 262144 },
-  "muse-spark-1.2-contributor-free": { declared: 131072, measured: 1040384 },
-  "muse-spark-1.3-contributor-free": { declared: 131072, measured: 1040384 },
-  "nemotron-3-ultra-free": { declared: 128000, measured: 991808 },
-  "nemotron-3.5-lightning-free": { declared: 262144, measured: 991808 },
+const SEED_OUTPUT: Readonly<
+  Record<string, { readonly declared: number; readonly budget: number; readonly observed?: number }>
+> = {
+  // `observed` is the only field here that is a CAPABILITY: the largest reply
+  // this plugin has watched the model actually produce. It exists for exactly
+  // one model, and that is the honest state of the question.
+  "mimo-v2.6-flash-free": { declared: 32000, budget: 1040384, observed: 40000 },
+  "big-pickle": { declared: 32000, budget: 128000 },
+  "fledge-alpha-free": { declared: 131072, budget: 1040384 },
+  "longcat-2.5-preview-free": { declared: 131072, budget: 262144 },
+  "muse-spark-1.2-contributor-free": { declared: 131072, budget: 1040384 },
+  "muse-spark-1.3-contributor-free": { declared: 131072, budget: 1040384 },
+  "nemotron-3-ultra-free": { declared: 128000, budget: 991808 },
+  "nemotron-3.5-lightning-free": { declared: 262144, budget: 991808 },
 };
+
+/**
+ * The largest reply this plugin has actually SEEN this model produce.
+ *
+ * This is the number that answers "how much can this model write", and it is not
+ * the number above. Measured 2026-10-07: `mimo-v2.6-flash-free`, asked for
+ * 40,000 output tokens, produced 40,000 with `stopReason: "length"` at about 152
+ * tokens/second. Every other model in the table has NO entry, because no
+ * generation has been watched for them — which is the whole reason the budget
+ * and the observation are kept apart. Absent means "never watched", not "cannot".
+ */
+export function observedOutputFor(
+  record: CatalogRecord,
+  id: string,
+  budget: number | undefined,
+): number | undefined {
+  const declared = finitePositive(isPlainObject(record.limit) ? record.limit.output : undefined);
+  const seed = SEED_OUTPUT[id];
+  if (seed === undefined || seed.declared !== declared || seed.observed === undefined) return undefined;
+  // It cannot exceed the budget we would actually send, and it cannot be less
+  // than what the declaration already allowed — a number below that would be a
+  // demotion dressed as a measurement.
+  if (budget !== undefined && seed.observed > budget) return budget;
+  return seed.observed > declared ? seed.observed : undefined;
+}
 
 /**
  * The output ceiling to advertise for one model: the measured one when this exact
@@ -2125,7 +2191,7 @@ export function maxTokensFor(
   if (declared === undefined) return declared;
   const seed = SEED_OUTPUT[id];
   if (seed === undefined || seed.declared !== declared) return declared;
-  const bounded = window === undefined ? seed.measured : Math.min(seed.measured, window);
+  const bounded = window === undefined ? seed.budget : Math.min(seed.budget, window);
   return bounded > declared ? bounded : declared;
 }
 

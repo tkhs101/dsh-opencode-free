@@ -151,21 +151,32 @@ input, and asking each of those models to name the colour of the top half of a
 two-tone image returned the right colour on every model that answered (5 of 5,
 2026-10-07).
 
-The context size and maximum output in the picker are the model's own — and
-where models.dev turned out to publish a stale number, the measured one is used
-instead. Both fields drive real behaviour, so both were measured the same way:
-the context window is read off the endpoint's own refusal, and the maximum
-output off what the route accepts on the wire. Mimo V2.6 Flash declares a
-200,000-token window and 32,000 tokens of output; it answers 1,048,576 and
-1,040,384, and it does generate past the declared 32,000: asked for 40,000 it
-produced 40,000. Space Bunny Free's declarations measured correct and are used
-as they are.
+The context size and the output budget in the picker are measured, not copied —
+and they are two different kinds of number, which the picker labels separately.
 
-One ceiling is not a number, though: time. Mimo V2.6 Flash writes at about 150
-tokens a second, so a single reply is bounded by the 10-minute request timeout as
-much as by its token ceiling — roughly 90,000 tokens, far short of the 1,040,384
-the route accepts. Nothing reports that: a reply that stops at its own limit
-looks exactly like a finished one. It used to be worse, at 3 minutes.
+**Context** is a real ceiling, read off the endpoint's own refusal: Mimo V2.6
+Flash declares 200,000 and its endpoint says its maximum is 1,048,576. That one
+is a capability, and it is what decides when the conversation is compacted.
+
+**Output budget** is not a capability. It is the largest `max_tokens` the route
+will accept without refusing, and it is enforced — asked for 8 with a prompt
+that wanted thousands, the models that answered all stopped at exactly 8 with
+`finish_reason: "length"`. So the budget is worth raising when the declaration is
+stale: a budget that is too small silently cuts a real reply at
+`finish_reason: "length"` with nothing reporting it. It is **not** a claim that
+any model writes that much, and no model here has been seen to.
+
+What a model has actually been seen to write is a separate number, shown only
+where one exists: Mimo V2.6 Flash produced 40,000 output tokens when asked for
+40,000. For every other model there is no such figure, because no generation has
+been watched — and the row says nothing rather than filling the gap.
+
+Time is the ceiling nobody sees. Mimo V2.6 Flash writes at about 150 tokens a
+second, so a single reply ends at roughly 90,000 tokens when the 10-minute
+request timeout arrives, whatever the budget says. Nothing reports that: a reply
+that stops at its own limit looks exactly like a finished one. It used to be
+worse, at 3 minutes — which was under the declared budget, so no budget could
+have helped until the timeout moved.
 
 ### Availability check
 

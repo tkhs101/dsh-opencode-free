@@ -364,7 +364,10 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
       image: true,
       thinking: 'max',
       contextWindow: 1048576,
-      maxOutput: 524288,
+      // `observedOutput` is ABSENT rather than undefined: the card travels as
+      // JSON, and an unanswered "what has this model actually written" must not
+      // survive as a key a reader could mistake for a zero.
+      outputBudget: 524288,
       declaredContext: 1048576,
       declaredOutput: 524288,
       levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
@@ -380,7 +383,7 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
     assert.equal(pickle.declaredContext, 200000)
     assert.equal(pickle.declaredOutput, 32000)
     assert.equal(pickle.contextWindow, 1048576)
-    assert.equal(pickle.maxOutput, 128000)
+    assert.equal(pickle.outputBudget, 128000)
     assert.deepEqual(pickle.measured, { context: true, output: true, vision: false, tools: true })
 
     // The derived record is a real model as far as the picker is concerned.

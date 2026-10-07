@@ -82,9 +82,9 @@ cost. Behaviour below is what a user can observe change.
   At that rate 180s bought roughly 27,000 tokens — less than the plugin used to
   advertise. The host profile's copy was the one that won, so both are now 600s,
   matching the profile's own stream idle timeout. Short replies are unaffected.
-- **Measured maximum output is used.** `limit.output` was never checked, and it
-  is the number every reply is cut at: a model whose route accepts far more was
-  silently stopping at the declaration, with `finish_reason: "length"` and
+- **The output budget is measured and used.** `limit.output` was never checked,
+  and it is the number every reply is cut at: a model whose route takes far more
+  was silently stopping at the declaration, with `finish_reason: "length"` and
   nothing in the panel to say so. Measured 2026-10-07 — Mimo V2.6 Flash was being
   held to 32,000 while accepting 1,040,384, Muse Spark and Fledge Alpha to
   131,072 while accepting 1,040,384, Nemotron 3.5 Lightning to 262,144 while
@@ -92,7 +92,18 @@ cost. Behaviour below is what a user can observe change.
   Longcat to 131,072 while accepting 262,144, Big Pickle to 32,000 while
   accepting 128,000. Space Bunny Free measured correct at 524,288
   and is used as declared. A changed declaration discards the measurement, and a
-  ceiling is never advertised above the context window it has to fit inside.
+  budget is never sent above the context window it has to fit inside.
+- **And it is labelled as a budget, not as a capability.** The route enforces
+  `max_tokens` — asked for 8 with a prompt that wanted thousands, every model
+  that answered stopped at exactly 8 with `finish_reason: "length"` — so a budget
+  that is too low does cut real replies and raising it is right. But no model here
+  writes a million tokens, and none has been seen to: the panel now names the
+  number a budget and shows, separately and only where one exists, the longest
+  reply a model has actually been watched producing (40,000 tokens, for Mimo V2.6
+  Flash). The other seven have no such figure because no generation has been
+  watched, and the row says nothing rather than inventing one. Time is the limit
+  nobody sees: at about 150 tokens a second, the 10-minute request timeout ends a
+  reply near 90,000 tokens whatever the budget says.
 
 ## [0.3.1] - 2026-10-03
 

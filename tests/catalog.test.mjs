@@ -38,6 +38,7 @@ import {
   isMeasuredContext,
   contextFingerprint,
   contextWindowFor,
+  observedOutputFor,
   clampVerdict,
   effortVerdict,
   nextEffortQuestion,
@@ -973,7 +974,8 @@ test('modelCapability projects image and top level per record', () => {
     image: true,
     thinking: 'max',
     contextWindow: 1048576,
-    maxOutput: 524288,
+    outputBudget: 524288,
+    observedOutput: undefined,
     declaredContext: undefined,
     declaredOutput: undefined,
     levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
@@ -1026,7 +1028,11 @@ test('capabilities ride alongside visible, same ids in the same order', async ()
     // catalogue that has probed, is what makes "the panel cannot disagree with the
     // wire" a checkable claim rather than an intention.
     assert.equal(bunny.contextWindow, 1048576, 'the window pi-ai clamps this conversation against')
-    assert.equal(bunny.maxOutput, 524288, 'the budget pi-ai puts on the wire')
+    assert.equal(bunny.outputBudget, 524288, 'the BUDGET pi-ai puts on the wire')
+    // No generation has been watched for this model, so there is no observed
+    // output. Absent is "never watched" — the row must not imply the model
+    // writes exactly the budget, or exactly the declaration.
+    assert.equal(bunny.observedOutput, undefined)
     assert.equal(bunny.declaredContext, 1048576, 'and what models.dev published beside it')
     assert.equal(bunny.measured.context, false, 'equal numbers: the declaration was right, nothing was raised')
     assert.equal(bunny.measured.vision, true, 'measured on the route, not copied from the declaration')
@@ -1045,9 +1051,10 @@ test('capabilities ride alongside visible, same ids in the same order', async ()
         'id',
         'image',
         'levels',
-        'maxOutput',
         'measured',
+        'observedOutput',
         'off',
+        'outputBudget',
         'thinking',
       ])
     }
@@ -2288,7 +2295,22 @@ test('GUARD: a measured output ceiling is used, and it never exceeds the adverti
   }
 
   const mimo = built('mimo-v2.6-flash-free', 32000)
-  assert.equal(mimo.maxTokens, 1040384, 'the measured ceiling replaces a declaration 32x too low')
+  assert.equal(mimo.maxTokens, 1040384, 'the measured BUDGET replaces a declaration 32x too low')
+  // The budget is not a capability claim, and the two are carried separately:
+  // 1040384 is what the route will take, 40000 is what the model was watched
+  // producing. Asserting them apart is what stops the first from being read as
+  // the second — the mistake this test exists for.
+  assert.equal(observedOutputFor(section(32000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 1040384), 40000)
+  assert.equal(
+    observedOutputFor(section(64000)['mimo-v2.6-flash-free'], 'mimo-v2.6-flash-free', 1040384),
+    undefined,
+    'a changed declaration discards the observation too — it was measured about something else',
+  )
+  assert.equal(
+    observedOutputFor(section(32000)['space-bunny-free'], 'space-bunny-free', 524288),
+    undefined,
+    'no generation has been watched for this model, so there is nothing to claim',
+  )
   assert.equal(mimo.contextWindow, 1048576, 'and the window it is bounded by is the measured one')
   assert.ok(
     mimo.maxTokens <= mimo.contextWindow,
