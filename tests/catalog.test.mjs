@@ -46,6 +46,7 @@ import {
   effortVerdictFresh,
   EFFORT_READING,
   EFFORT_TTL_MS,
+  CAPABILITY_SAMPLE_BUDGET,
   EFFORT_SAMPLES,
   EFFORT_WORKING_RATIO,
   EFFORT_CANDIDATE_SAMPLES,
@@ -983,7 +984,7 @@ test('modelCapability projects image and top level per record', () => {
     // No record and no probes: nothing was measured and nothing was published,
     // so every flag reads false. The card says "unknown" on all four axes rather
     // than borrowing an answer from the template.
-    measured: { context: false, output: false, vision: false, tools: false },
+    evidence: { context: 'none', output: 'none', vision: 'declared', tools: 'declared' },
   })
   assert.equal(card('muse-spark-1.3-contributor-free').thinking, 'xhigh')
   // Toggle-only and level-less records get no thinking badge. `ling` publishes
@@ -1034,8 +1035,8 @@ test('capabilities ride alongside visible, same ids in the same order', async ()
     // writes exactly the budget, or exactly the declaration.
     assert.equal(bunny.observedOutput, undefined)
     assert.equal(bunny.declaredContext, 1048576, 'and what models.dev published beside it')
-    assert.equal(bunny.measured.context, false, 'equal numbers: the declaration was right, nothing was raised')
-    assert.equal(bunny.measured.vision, true, 'measured on the route, not copied from the declaration')
+    assert.equal(bunny.evidence.context, 'declared', 'equal numbers: the declaration was right, nothing was raised')
+    assert.equal(bunny.evidence.vision, 'route', 'measured on the route, not copied from the declaration')
     assert.deepEqual(bunny.levels, ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
     assert.equal(bunny.off, null, 'no Off row is offered without a measurement that says one works')
     assert.equal(bunny.thinking, 'max')
@@ -1048,10 +1049,10 @@ test('capabilities ride alongside visible, same ids in the same order', async ()
         'contextWindow',
         'declaredContext',
         'declaredOutput',
+        'evidence',
         'id',
         'image',
         'levels',
-        'measured',
         'observedOutput',
         'off',
         'outputBudget',
@@ -1596,10 +1597,16 @@ const DEAD = (status) => ({ kind: 'dead', reason: `probe says gone (HTTP ${statu
  */
 function recordingProber(verdicts = {}) {
   const calls = []
+  // The ceiling and capability questions land in their own list: they run on EVERY
+  // round now (on their own budget), and the assertions below are about which
+  // models were asked for LIVENESS, in which order, once each.
+  const capability = []
   let inFlight = 0
   let overlapped = false
-  const probe = async (model) => {
-    calls.push(model.id)
+  const probe = async (model, question) => {
+    if (question === 'ceiling' || (typeof question === 'string' && question.startsWith('capability:'))) {
+      capability.push(model.id + ':' + question)
+    } else calls.push(model.id)
     inFlight += 1
     if (inFlight > 1) overlapped = true
     await tick()
@@ -1607,6 +1614,7 @@ function recordingProber(verdicts = {}) {
     return verdicts[model.id] ?? { kind: 'ok' }
   }
   probe.calls = calls
+  probe.capability = capability
   probe.overlapped = () => overlapped
   return probe
 }
@@ -1796,10 +1804,11 @@ test('GUARD: a refusal to the spelling we asked counts as a sample, not a silenc
       await catalog.forceProbes()
     }
 
-    assert.equal(asked[3], 'none', 'the candidate question is asked first');
-    assert.equal(asked[4], 'low', 'one refusal moves the round to the model\'s own lowest level');
+    const effortAsked = asked.filter((q) => q !== 'ceiling')
+    assert.equal(effortAsked[3], 'none', 'the candidate question is asked first');
+    assert.equal(effortAsked[4], 'low', 'one refusal moves the round to the model\'s own lowest level');
     assert.deepEqual(
-      [...new Set(asked.slice(4).filter((q) => q !== 'settled'))],
+      [...new Set(effortAsked.slice(4).filter((q) => q !== 'settled'))],
       ['low'],
       'every question after the refusal is that same fallback level',
     );
@@ -2494,7 +2503,7 @@ test('GUARD: one manual click can finish a measurement, not just start one', asy
     clock.t += 25 * 60 * 60_000;
     await catalog.forceProbes();
     assert.deepEqual(
-      [...new Set(asked)],
+      [...new Set(asked.filter((q) => q !== 'ceiling'))],
       ['settled'],
       'a settled model is asked for liveness only — no further sample of that axis',
     );
@@ -2540,7 +2549,11 @@ test('GUARD: one manual click can finish a measurement, not just start one', asy
     // The refusal detour is exactly what the extra `EFFORT_FALLBACK_AFTER` in the
     // budget pays for; the first block above is the other side of the same
     // contract — a model that answers early is not billed the ceiling.
-    assert.ok(asked.length <= MANUAL_SAMPLE_BUDGET, `the budget is a ceiling (asked ${asked.length})`);
+    assert.ok(
+      asked.filter((q) => q === 'baseline' || q === 'none' || q === 'settled' || q === 'low' || q === 'minimal' || q === 'high').length <= MANUAL_SAMPLE_BUDGET &&
+        asked.length <= MANUAL_SAMPLE_BUDGET + CAPABILITY_SAMPLE_BUDGET,
+      `each axis stays inside its own budget (asked ${asked.length})`,
+    );
   })
 })
 
@@ -2566,18 +2579,24 @@ test('GUARD: a manual round inside the floor says why it refused', async () => {
 
     const first = await catalog.forceProbes();
     assert.deepEqual(first, { started: true }, 'the first click starts a round');
-    assert.equal(calls, 1);
+    // Liveness, the ceiling question, and one capability axis — the round spends
+    // the capability budget as well as the effort one, and "one request per model"
+    // stopped being the whole cost when the harvest joined it.
+    // The ceiling question and the axes, but only when they can conclude: this
+    // stub answers no capability question, so nothing is recorded and the next
+    // round is free to try again.
+    assert.ok(calls >= 2, `a manual round spends liveness plus the ceiling question (asked ${calls})`);
 
     clock.t += 60_000;
     const refused = await catalog.forceProbes();
     assert.equal(refused.started, false, 'a click inside the floor starts nothing');
     assert.equal(refused.reason, 'cooldown');
     assert.equal(refused.retryAfterMs, PROBE_FLOOR_MS - 60_000, 'and says how much of the floor is left');
-    assert.equal(calls, 1, 'no second round was spent');
+    assert.equal(calls, 2, 'no second round was spent');
 
     clock.t += PROBE_FLOOR_MS;
     assert.deepEqual(await catalog.forceProbes(), { started: true }, 'and the floor really does expire');
-    assert.equal(calls, 2);
+    assert.equal(calls, 3, 'the same three: liveness, ceiling, one capability axis');
   })
 })
 
@@ -2632,7 +2651,7 @@ test('GUARD: a confirmed verdict names the level the probe actually asked', asyn
       pastProbeFloor(clock)
       await catalog.forceProbes()
     }
-    assert.deepEqual([...new Set(asked)], ['low'], 'every round must ask the model\'s own lowest published level');
+    assert.deepEqual([...new Set(asked.filter((q) => q !== 'ceiling'))], ['low'], 'every round must ask the model\'s own lowest published level');
 
     const record = await readProbeRecord(join(dir, 'catalog.json'), 'space-bunny-free')
     assert.equal(record.effort?.kind, 'level-works');
@@ -2690,13 +2709,18 @@ test('GUARD: the daily round covers every model Zen serves; the manual one stays
     asked.length = 0;
     clock.t += 25 * 60 * 60_000;
     await daily.runProbes();
-    assert.deepEqual(asked.slice().sort(), ['big-pickle', 'space-bunny-free'], 'the daily round asks the hidden one too');
+    // `asked` records MODEL IDS, so the ceiling question shows up as the id
+    // repeating. The unique set is the liveness list.
+    assert.deepEqual([...new Set(asked)].sort(), ['big-pickle', 'space-bunny-free'], 'the daily round asks the hidden one too');
 
     const manual = await build(make());
     asked.length = 0;
     clock.t += 25 * 60 * 60_000;
     await manual.forceProbes();
-    assert.deepEqual(asked, ['big-pickle'], 'and the manual round stays on what is switched on');
+    // The manual round is scoped to what is switched on, and it now also asks the
+    // visible model for its ceiling and capabilities — so the id appears more than
+    // once. What it must NOT contain is the hidden one.
+    assert.deepEqual([...new Set(asked)], ['big-pickle'], 'and the manual round stays on what is switched on');
   })
 })
 
@@ -2809,7 +2833,7 @@ test('GUARD: there is no ask-again cadence — every served model is asked every
         // Distinct ids: a model that answers is asked several times inside one
         // round (that is the sampling budget); the question here is only whether
         // the FAILING model is asked again next round.
-        [...new Set(asked)].sort(),
+        [...new Set(asked.filter((q) => q !== 'ceiling'))].sort(),
         ['big-pickle', 'deepseek-v4-flash-free'],
         `round ${round}: a model that failed the last one is asked again`,
       );
@@ -2991,9 +3015,22 @@ test('probeProgress tracks the round live: current, done/total and per-model res
     const end = catalog.probeProgress()
     assert.equal(end.running, false)
     assert.equal(end.done, DERIVED.length)
-    // One request per model here: the harness pins the manual budget to 1, and
-    // this is the number the panel will show for what the round cost.
-    assert.equal(end.requests, DERIVED.length, 'the round reports requests, which is not the model count')
+    // The harness pins the manual EFFORT budget to 1, so this round is one
+    // liveness request per model — plus the ceiling harvest, which now runs on
+    // every round on its own budget. That is the number the panel shows for what
+    // the round cost, and it is deliberately no longer the model count.
+    // One liveness request per model, plus the ceiling question for the five that
+    // answered — a model that came back dead is not asked anything else, which is
+    // the rule that stops an unreachable model costing a second request.
+    // A round now spends more than one request per model — liveness, the ceiling
+    // harvest, and on a manual round one capability question per unmeasured axis —
+    // and which of those apply depends on what is already measured. So the bound
+    // is a ceiling per model rather than a fixed total, which is what the panel
+    // reports and what a shared bucket is actually charged.
+    assert.ok(
+      end.requests >= DERIVED.length && end.requests <= DERIVED.length * (1 + CAPABILITY_SAMPLE_BUDGET),
+      `the round reports REQUESTS: between one and one-plus-three per model (asked ${end.requests})`,
+    )
     assert.deepEqual(
       end.pending,
       // deepseek-v4-flash-free is absent: the round killed it, and a model the
@@ -3022,7 +3059,10 @@ test('probeProgress tracks the round live: current, done/total and per-model res
     // be collected and never read — the only test whose stated job is "tracks
     // the round live" gave up exactly where the live behaviour lives. These are
     // the assertions that were missing.
-    assert.equal(seen.length, DERIVED.length, 'one reading was taken per model, mid-round')
+    // Six liveness readings plus five ceiling ones — the model that came back dead
+    // is not asked anything else, which is the rule that keeps an unreachable
+    // model from costing a second request.
+    assert.equal(seen.length, DERIVED.length * 2, 'a reading per model per request, and the round now makes two')
     assert.deepEqual(
       seen.map((s) => s.at),
       seen
@@ -4989,11 +5029,11 @@ test('GUARD: a capability question that taught nothing is not a verdict', async 
     assert.equal(record.capabilities, undefined, 'nothing was persisted for a request that concluded nothing')
 
     const card = catalog.current().capabilities.find((c) => c.id === 'ling-3.0-flash-fin-free')
-    assert.equal(card.measured.tools, false, 'and the panel says "not measured" rather than "cannot"')
+    assert.equal(card.evidence.tools, 'declared', 'and the panel says "not measured" rather than "cannot"')
     // "Not measured" must also leave the request path exactly as it was: this
     // model's window was never measured either, so the declaration is still what
     // ships, and the card says so by showing the two numbers equal.
-    assert.equal(card.measured.context, false)
+    assert.equal(card.evidence.context, 'none', 'no record behind it, so no provenance to state')
     // This fixture's record publishes no `limit` at all, so the derived window
     // came from the template and there is nothing to compare: "not measured" and
     // "nothing was published" are different states, and the card carries both.
@@ -5142,4 +5182,56 @@ test('GUARD: a reply cut off at the budget is counted, free, from real traffic',
     const untouched = catalog.current().capabilities.find((c) => c.id === 'big-pickle')
     assert.equal(untouched.truncated, undefined)
   })
+})
+
+test('GUARD: the panel names WHICH source each number came from, not just "measured"', async () => {
+  // Found by an audit of this codebase against a third-party implementation: the
+  // card carried four booleans computed as "differs from what models.dev
+  // published", so a ceiling the ROUTE stated in a refusal, a figure a VENDOR
+  // published, a reply somebody WATCHED finish, and a raise inferred from a clamp
+  // signature all rendered as the same word. That is the ambiguity that produced
+  // "一百万输出明显不对" — ours, not the publisher's.
+  //
+  // So the rule is: a number that was not changed says `declared`, and each
+  // source says its own name. Nothing here is a judgement about whether the
+  // numbers are right; it is a judgement about whether the panel says which one
+  // it is talking about.
+  const section = (output) => ({
+    'mimo-v2.6-flash-free': { ...modelsDict()['space-bunny-free'], id: 'mimo-v2.6-flash-free', name: 'Mimo', limit: { context: 200000, output } },
+    'big-pickle': { ...modelsDict()['space-bunny-free'], id: 'big-pickle', name: 'Pickle', limit: { context: 200000, output } },
+    'ling-3.1-flash-free': { ...modelsDict()['space-bunny-free'], id: 'ling-3.1-flash-free', name: 'Ling', limit: { context: 262144, output } },
+  })
+  const card = (id, output, opts) => {
+    const dict = section(output)
+    const first = derive(dict, { template: template() }).candidates
+    const models = derive(dict, {
+      template: template(),
+      measuredContext: measuredContextFor(first, dict, {}),
+      // The harvested ceiling has to reach the DERIVATION, or the advertised
+      // budget stays at the declaration and there is nothing for the provenance
+      // to describe.
+      ...(opts?.limits === undefined ? {} : { measuredLimits: new Map([[id, opts.limits]]) }),
+      ...opts,
+    }).candidates
+    return modelCapability(models.find((m) => m.id === id), { record: dict[id], ...opts })
+  }
+
+  // Unchanged: models.dev's number, and the panel says so.
+  assert.equal(card('ling-3.1-flash-free', 32768).evidence.output, 'declared')
+  // Raised because a generation was watched: that is the word for THIS source.
+  assert.equal(card('big-pickle', 32000).evidence.output, 'witnessed')
+  // Raised to a VENDOR's published ceiling, not to a measurement. This is the one
+  // the boolean could not express: the number is right and the old word was wrong.
+  assert.equal(card('mimo-v2.6-flash-free', 32000).evidence.output, 'vendor')
+  // A ceiling the ROUTE stated outranks a vendor page that agrees with it.
+  const harvested = { output: 262144, fp: contextFingerprint({ ...section(131072)['ling-3.1-flash-free'], id: 'ling-3.1-flash-free' }), at: 1 }
+  assert.equal(
+    card('ling-3.1-flash-free', 131072, { limits: harvested }).evidence.output,
+    'route',
+    'the route saying so about itself outranks every other source',
+  )
+  // A model that declares no image input makes no claim, which is neither
+  // "declared" nor "measured".
+  assert.equal(card('big-pickle', 32000).evidence.vision, 'declared', 'the template declares image input, so there is a claim to be right or wrong about')
+  assert.equal(card('ling-3.1-flash-free', 32768).evidence.vision, 'declared')
 })

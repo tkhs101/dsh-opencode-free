@@ -1645,7 +1645,7 @@ test('GUARD: the row states the limits that are IN EFFECT, and hides the provena
           declaredOutput: 131072,
           observedOutput: 64000,
           stated: { output: 262144, at: 1759146617000 },
-          measured: { context: false, output: true, vision: true, tools: true },
+          evidence: { context: 'declared', output: 'witnessed', vision: 'route', tools: 'route' },
         },
       ],
     },
@@ -1693,8 +1693,8 @@ test('GUARD: a badge that is on every row is not a badge', async () => {
       ...SNAPSHOT,
       visible: ['space-bunny-free', 'big-pickle'],
       models: [
-        { id: 'space-bunny-free', image: true, thinking: 'max', contextWindow: 1048576, outputBudget: 524288, declaredContext: 1048576, declaredOutput: 524288, measured: { context: false, output: false, vision: true, tools: true } },
-        { id: 'big-pickle', image: false, thinking: 'high', contextWindow: 200000, outputBudget: 48000, declaredContext: 200000, declaredOutput: 32000, measured: { context: true, output: true, vision: false, tools: true } },
+        { id: 'space-bunny-free', image: true, thinking: 'max', contextWindow: 1048576, outputBudget: 524288, declaredContext: 1048576, declaredOutput: 524288, evidence: { context: 'declared', output: 'declared', vision: 'route', tools: 'route' } },
+        { id: 'big-pickle', image: false, thinking: 'high', contextWindow: 200000, outputBudget: 48000, declaredContext: 200000, declaredOutput: 32000, evidence: { context: 'route', output: 'witnessed', vision: 'none', tools: 'route' } },
       ],
     },
   })

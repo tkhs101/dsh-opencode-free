@@ -326,6 +326,23 @@ export const EFFORT_CANDIDATE_SAMPLES = EFFORT_SAMPLES + EFFORT_CONCORDANCE - 1;
 export const MANUAL_SAMPLE_BUDGET = EFFORT_SAMPLES + EFFORT_FALLBACK_AFTER + EFFORT_CANDIDATE_SAMPLES;
 
 /**
+ * Requests one round may spend on the CAPABILITY axes — the ceiling question and
+ * the two declared-capability questions — per model.
+ *
+ * Deliberately NOT part of `samplesPerModel`. That number is the EFFORT axis's
+ * budget, and the daily round runs it at 1, so sharing the counter meant the
+ * ceiling and capability questions never fired outside a manual round: the block
+ * broke on `shots >= samplesPerModel` before its first request. ADR 0004 §49
+ * described the harvest as part of every round; the code said otherwise, and the
+ * code was right about what shipped and wrong about what was documented.
+ *
+ * Three is the whole budget, so a model that appears on Zen tonight is fully
+ * measured by tomorrow's daily round and costs nothing again on any round after
+ * that — the gate is the evidence, not the budget.
+ */
+export const CAPABILITY_SAMPLE_BUDGET = 3;
+
+/**
  * Which spelling to ask about next.
  *
  * The baseline is asked for rather than assumed, because a threshold on an
@@ -1768,13 +1785,54 @@ export interface ModelCapability {
    */
   readonly truncated?: { readonly output?: number; readonly context?: number };
   /** Per axis: was this verified on the route, or copied from a declaration? */
-  readonly measured: {
-    readonly context: boolean;
-    /** The BUDGET was measured on the route — not that the model writes that much. */
-    readonly output: boolean;
-    readonly vision: boolean;
-    readonly tools: boolean;
+  /**
+   * Where each number on this row COMES FROM — which is not the same question as
+   * "is it true".
+   *
+   * There were four booleans here once, computed as "differs from what models.dev
+   * published", and they collapsed four different kinds of evidence into one word:
+   * a ceiling the route stated in its own refusal, a ceiling a vendor published on
+   * its model page, a reply somebody watched a model finish, and a raise inferred
+   * from a clamp signature all rendered as 已实测. That is the ambiguity that
+   * produced "一百万输出明显不对" — and it was ours, not the publisher's.
+   *
+   * `declared` means the panel is showing models.dev's number unaltered, which is
+   * a legitimate answer and is now distinguishable from "we changed it".
+   */
+  readonly evidence: {
+    readonly context: Evidence;
+    readonly output: Evidence;
+    /** `none` when the model makes no such claim (no image input declared). */
+    readonly vision: Evidence;
+    readonly tools: Evidence;
   };
+}
+
+/**
+ * One model's provenance for one axis.
+ *
+ * Ordered by how much the statement can be trusted to still hold, which is also
+ * the order the panel prefers when two sources supply the same number.
+ */
+export type Evidence =
+  /** The route said so about itself, in a refusal that named a limit. */
+  | "route"
+  /** The model vendor published it. */
+  | "vendor"
+  /** A generation this plugin watched to its end. */
+  | "witnessed"
+  /** Inferred from a clamp signature — a positive claim about an UNDER-stated value. */
+  | "inferred"
+  /** models.dev's number, unaltered. */
+  | "declared"
+  /** There is no claim on screen for this axis. */
+  | "none";
+
+const EVIDENCE_TRUST: readonly Evidence[] = ["route", "vendor", "witnessed", "inferred", "declared"];
+
+/** The most-trusted of several sources; `none` only when all of them are. */
+function preferredEvidence(values: readonly Evidence[]): Evidence {
+  return EVIDENCE_TRUST.find((candidate) => values.includes(candidate)) ?? "none";
 }
 
 /** Strongest-first thinking levels; `off` is never a badge. */
@@ -1834,6 +1892,52 @@ export function capabilityQuestionsFor(
   return out;
 }
 
+/**
+ * Where the advertised OUTPUT number came from.
+ *
+ * The winner is whichever source supplied the largest figure, because that is the
+ * number pi-ai will send — and ties go to the more trustworthy source, so a
+ * ceiling the route states beats a vendor page that happens to agree.
+ */
+export function outputEvidenceFor(
+  record: CatalogRecord | undefined,
+  id: string,
+  shown: number,
+  limits?: MeasuredLimits | undefined,
+): Evidence {
+  if (record === undefined) return "none";
+  const declared = finitePositive(isPlainObject(record.limit) ? record.limit.output : undefined);
+  if (declared === undefined) return "none";
+  const seed = SEED_OUTPUT[id];
+  const seedApplies = seed !== undefined && seed.declared === declared;
+  const routeStated =
+    limits !== undefined && limits.fp === contextFingerprint(record) ? finitePositive(limits.output) : undefined;
+  const claims: Evidence[] = ["declared"];
+  if (seedApplies && seed?.named !== undefined && seed.named === shown) claims.push("vendor");
+  if (seedApplies && seed?.observed !== undefined && seed.observed === shown) claims.push("witnessed");
+  if (routeStated !== undefined && routeStated === shown) claims.push("route");
+  return preferredEvidence(claims);
+}
+
+/**
+ * Where the advertised CONTEXT number came from.
+ *
+ * `inferred` is the clamp-signature raise, which is a positive claim about a value
+ * being understated — kept apart from `route` because the route never said it.
+ */
+export function contextEvidenceFor(
+  record: CatalogRecord | undefined,
+  shown: number,
+  measured?: MeasuredContext | undefined,
+): Evidence {
+  if (record === undefined) return "none";
+  const declared = finitePositive(isPlainObject(record.limit) ? record.limit.context : undefined);
+  if (declared === undefined) return "none";
+  if (declared === shown) return "declared";
+  if (measured === undefined || measured.fp !== contextFingerprint(record)) return "declared";
+  return measured.source === "inferred" ? "inferred" : "route";
+}
+
 /** Project one effective record to the panel's capability card. */
 export function modelCapability(
   model: Model<Api>,
@@ -1841,9 +1945,8 @@ export function modelCapability(
     /** The raw models.dev record, for the declared values and the fingerprints. */
     readonly record?: CatalogRecord | undefined;
     readonly probes?: ProbeMap | undefined;
-    /** Whether the advertised window came from a measurement rather than a value. */
-    readonly measuredContext?: boolean;
-    readonly measuredOutput?: boolean;
+    /** The window measurement, so the card can say WHERE the number came from. */
+    readonly measured?: MeasuredContext | undefined;
     readonly measuredEffort?: MeasuredEffort | undefined;
     readonly limits?: MeasuredLimits | undefined;
     /** Truncation counters from real traffic, when the probe record has them. */
@@ -1892,14 +1995,15 @@ export function modelCapability(
             ...(context.budgetHits.context === undefined || context.budgetHits.context === 0 ? {} : { context: context.budgetHits.context }),
           },
         }),
-    measured: {
-      context: context?.measuredContext === true,
-      output: context?.measuredOutput === true,
-      // A model that declares no image input has nothing to verify: there is no
-      // claim on screen to back up, so the axis reads as unmeasured rather than
-      // as a failure.
-      vision: vision !== undefined,
-      tools: tools !== undefined,
+    evidence: {
+      context: contextEvidenceFor(record, model.contextWindow, context?.measured),
+      output: outputEvidenceFor(record, model.id, model.maxTokens, limits),
+      // A model that declares no image input makes no such claim, so there is
+      // nothing on screen to be right or wrong about — that reads `none`, and it
+      // is not a failure. A declared-but-unprobed one reads `declared`, which is
+      // the honest word for "models.dev says so and nobody has checked".
+      vision: model.input.includes("image") ? (vision !== undefined ? "route" : "declared") : "none",
+      tools: tools !== undefined ? "route" : "declared",
     },
   };
 }
@@ -3311,6 +3415,10 @@ export async function runProbeRound(
       // asking the ceiling and capability questions after the round had spent
       // nine requests anywhere — four models in, seven never heard the question.
       let shots = 0;
+      // Separate from `shots` on purpose: the effort ladder and the capability
+      // axes are different questions with different budgets, and one starving the
+      // other is how the ceiling harvest ended up manual-only.
+      let capabilityShots = 0;
       for (let shot = 1; shot <= samplesPerModel; shot += 1) {
       shots += 1;
       state.probeRun.requests += 1;
@@ -3628,11 +3736,11 @@ export async function runProbeRound(
       const ceilingAnswered = storedLimits !== undefined && storedLimits.fp === "";
       if (storedLimits === undefined || (!ceilingApplies && !ceilingAnswered)) {
         for (const _attempt of [0]) {
-          if (shots >= samplesPerModel) break;
+          if (capabilityShots >= CAPABILITY_SAMPLE_BUDGET) break;
           if (state.probes[model.id]?.verdict !== "ok") break;
           const recordCeil = rawById(model.id);
           if (recordCeil === undefined) break;
-          shots += 1;
+          capabilityShots += 1;
           state.probeRun.requests += 1;
           try {
             const ceilingOutcome = await probe!(model, "ceiling");
@@ -3675,13 +3783,19 @@ export async function runProbeRound(
           }
         }
       }
-      for (const axis of axisQuestions) {
-        if (shots >= samplesPerModel) break;
+      // The two DECLARED-capability questions cost real output tokens — a vision
+      // question can spend 4096 of them on thinking — and the daily round covers
+      // every model Zen serves, including the ones the user switched OFF. Paying
+      // that daily for models nobody is looking at is the wrong bill, so the axis
+      // questions stay on the manual round, which is scoped to what is on screen.
+      // The ceiling question above is the cheap one and runs on every round: a
+      // refusal produces no output tokens at all.
+      for (const axis of scope === "served" ? [] : axisQuestions) {
         if (state.probes[model.id]?.verdict !== "ok") break;
-        if (shots >= samplesPerModel) break;
+        if (capabilityShots >= CAPABILITY_SAMPLE_BUDGET) break;
         const record1 = rawById(model.id);
         if (record1 === undefined) break;
-        shots += 1;
+        capabilityShots += 1;
         state.probeRun.requests += 1;
         const askedAt = deps.now();
         try {
@@ -4035,6 +4149,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
       const section = state.cache?.models;
       const efforts = section === undefined ? new Map<string, MeasuredEffort>() : measuredEffortMap(effective, section, state.probes);
       const harvested = section === undefined ? new Map<string, MeasuredLimits>() : measuredLimitsFor(effective, section, state.probes);
+      const measured = section === undefined ? new Map<string, MeasuredContext>() : measuredContextFor(effective, section, state.probes);
       return {
         models: state.models.slice(),
         visible: effective.map((model) => model.id),
@@ -4050,8 +4165,7 @@ export function createCatalog(options: CreateCatalogOptions): Catalog {
             // published — stated plainly rather than re-derived from the seed
             // tables, because this is the only reading a reader of the panel can
             // check: they can see both numbers.
-            measuredContext: declaredContext !== undefined && model.contextWindow !== declaredContext,
-            measuredOutput: declaredOutput !== undefined && model.maxTokens !== declaredOutput,
+            measured: measured.get(model.id),
             measuredEffort: efforts.get(model.id),
             limits: harvested.get(model.id),
             budgetHits: state.probes[model.id]?.budgetHits,

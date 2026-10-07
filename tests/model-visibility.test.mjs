@@ -372,7 +372,11 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
       declaredOutput: 524288,
       levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
       off: null,
-      measured: { context: false, output: false, vision: true, tools: true },
+      // Nothing was raised for this model: its window and budget are exactly what
+      // models.dev published, so the provenance says `declared` rather than
+      // claiming a measurement that never happened. Vision and tools say `route`
+      // because a probe really did answer those two questions.
+      evidence: { context: 'declared', output: 'declared', vision: 'route', tools: 'route' },
     })
     const pickle = refreshed.body.models.find((m) => m.id === 'big-pickle')
     assert.equal(pickle.image, false)
@@ -394,7 +398,10 @@ test('derived catalogue: deprecated stays until a probe judges it, paid drops ou
     // Context reads UNMEASURED for the same reason the window is the declaration:
     // nothing has been established about this model's ceiling that survives the
     // endpoint naming a different one.
-    assert.deepEqual(pickle.measured, { context: false, output: true, vision: false, tools: true })
+    // Its context SEED was withdrawn on 2026-10-07 (it rested on an acceptance the
+    // endpoint later contradicted), so the window is models.dev's number again —
+    // and the provenance says `declared`, which is the honest word for it.
+    assert.deepEqual(pickle.evidence, { context: 'declared', output: 'witnessed', vision: 'none', tools: 'route' })
 
     // The derived record is a real model as far as the picker is concerned.
     const adapter = host.registered[0][1]

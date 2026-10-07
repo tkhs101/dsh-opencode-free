@@ -121,7 +121,12 @@ window.__ModuleLoader__.load({
 			"caps.out": "输出",
 			"caps.observed": "实测产出",
 			"caps.stated": "路由自述上限",
-			"caps.detailDeclared": "models.dev 声明 {value}（已被实测取代）",
+			"caps.detailDeclared": "models.dev 声明 {value}",
+			"cap.sourceRoute": "来源：路由自述 {value}",
+			"cap.sourceVendor": "来源：厂商公布 {value}",
+			"cap.sourceWitnessed": "来源：目击生成 {value}",
+			"cap.sourceInferred": "来源：由夹挤签名推断 {value}",
+			"cap.sourceDeclared": "来源：models.dev 声明 {value}",
 			"caps.detailStated": "路由自述上限 {value}",
 			"caps.detailObserved": "实测产出 ≥{value}",
 			"caps.detailTruncated": "真实回答被预算截断 {count} 次",
@@ -200,7 +205,12 @@ window.__ModuleLoader__.load({
 			"caps.out": "output",
 			"caps.observed": "observed",
 			"caps.stated": "route says",
-			"caps.detailDeclared": "models.dev declared {value} (replaced by measurement)",
+			"caps.detailDeclared": "models.dev declared {value}",
+			"cap.sourceRoute": "source: stated by the route ({value})",
+			"cap.sourceVendor": "source: published by the vendor ({value})",
+			"cap.sourceWitnessed": "source: a generation was watched ({value})",
+			"cap.sourceInferred": "source: inferred from a clamp signature ({value})",
+			"cap.sourceDeclared": "source: declared by models.dev ({value})",
 			"caps.detailStated": "route-stated ceiling {value}",
 			"caps.detailObserved": "observed ≥{value}",
 			"caps.detailTruncated": "real replies cut off at the budget: {count}",
@@ -556,7 +566,7 @@ window.__ModuleLoader__.load({
 					   to carry two booleans and a level, which is why a stale
 					   declaration and a measured one looked identical on screen —
 					   the panel had no way to show a number it was not sent. */
-					var measured = card.measured !== null && typeof card.measured === "object" ? card.measured : {};
+					var ev = card.evidence !== null && typeof card.evidence === "object" ? card.evidence : {};
 					var stated = card.stated !== null && typeof card.stated === "object" ? card.stated : null;
 					var trunc = card.truncated !== null && typeof card.truncated === "object" ? card.truncated : null;
 					cards[card.id] = {
@@ -575,11 +585,11 @@ window.__ModuleLoader__.load({
 						observedOutput: typeof card.observedOutput === "number" && isFinite(card.observedOutput) ? card.observedOutput : null,
 						declaredContext: typeof card.declaredContext === "number" && isFinite(card.declaredContext) ? card.declaredContext : null,
 						declaredOutput: typeof card.declaredOutput === "number" && isFinite(card.declaredOutput) ? card.declaredOutput : null,
-						measured: {
-							context: measured.context === true,
-							output: measured.output === true,
-							vision: measured.vision === true,
-							tools: measured.tools === true,
+						evidence: {
+							context: typeof ev.context === "string" ? ev.context : "none",
+							output: typeof ev.output === "string" ? ev.output : "none",
+							vision: typeof ev.vision === "string" ? ev.vision : "none",
+							tools: typeof ev.tools === "string" ? ev.tools : "none",
 						},
 					};
 				}
@@ -1271,8 +1281,8 @@ window.__ModuleLoader__.load({
 				   "this model" rather than "this number". */
 				var verified = [];
 				if (card !== null) {
-					if (card.measured.tools === true) verified.push(t("badge.tools"));
-					if (card.measured.vision === true && card.image === true) verified.push(t("badge.vision"));
+					if (card.evidence.tools === "route") verified.push(t("badge.tools"));
+					if (card.evidence.vision === "route" && card.image === true) verified.push(t("badge.vision"));
 				}
 				var left = [
 					E("span", {
@@ -1294,8 +1304,8 @@ window.__ModuleLoader__.load({
 					if (card !== null && card.image === true) {
 						left.push(E("span", {
 							key: "vision",
-							className: "opf-badge opf-badge-vision" + measuredClass(card.measured.vision),
-							title: card.measured.vision ? t("legend.measured") : t("caps.declared")
+							className: "opf-badge opf-badge-vision" + measuredClass(card.evidence.vision === "route"),
+							title: card.evidence.vision === "route" ? t("legend.measured") : t("caps.declared")
 						}, eyeIcon(), E("span", null, t("badge.vision"))));
 					}
 					if (card !== null && card.thinking !== null) {
@@ -1314,19 +1324,31 @@ window.__ModuleLoader__.load({
 					   the line says; where it came from, and what the model has actually
 					   been seen writing, are one hover away. */
 					if (card !== null && (card.contextWindow !== null || card.outputBudget !== null)) {
-						var detail = function (shown, declared, measured) {
-							var lines = [];
-							if (measured === true && declared !== null && declared !== shown) {
+												/* Where each number comes from, NAMED. "已实测" used to cover four
+							different things — a limit the route stated, a figure a vendor
+							published, a reply somebody watched finish, and a raise inferred
+							from a clamp — and the panel could not tell them apart. The number
+							never changes; the word does. */
+						var SOURCE_WORDS = {
+							route: "cap.sourceRoute",
+							vendor: "cap.sourceVendor",
+							witnessed: "cap.sourceWitnessed",
+							inferred: "cap.sourceInferred",
+							declared: "cap.sourceDeclared",
+						};
+						var detail = function (shown, declared, evidence) {
+							var lines = [t(SOURCE_WORDS[evidence] ?? "cap.sourceDeclared", { value: countLabel(shown) })];
+							if (declared !== null && declared !== shown) {
 								lines.push(t("caps.detailDeclared", { value: countLabel(declared) }));
 							}
 							return lines.join("\n");
 						};
 						var parts2 = [];
 						if (card.contextWindow !== null) {
-							parts2.push(E("span", { key: "ctx", className: "opf-limit" },
+							parts2.push(E("span", { key: "ctx", className: "opf-limit", title: detail(card.contextWindow, card.declaredContext, card.evidence.context) },
 								t("caps.ctx") + " ", E("b", null, countLabel(card.contextWindow)),
-								card.measured.context === true && card.declaredContext !== null && card.declaredContext !== card.contextWindow
-									? E("span", { key: "ctxt", className: "opf-hint-dot", title: detail(card.contextWindow, card.declaredContext, card.measured.context) }, " ⓘ")
+								card.evidence.context !== "declared"
+									? E("span", { key: "ctxt", className: "opf-hint-dot" }, " ⓘ")
 									: null));
 						}
 						if (card.outputBudget !== null) {
@@ -1335,7 +1357,7 @@ window.__ModuleLoader__.load({
 							   take, what the model has been watched writing, and how
 							   often a real reply has been cut off. They were four items on
 							   the row; they are one sentence in a tooltip. */
-							var lines2 = detail(card.outputBudget, card.declaredOutput, card.measured.output);
+							var lines2 = detail(card.outputBudget, card.declaredOutput, card.evidence.output);
 							if (card.stated !== null && card.stated.output !== null) {
 								lines2 += (lines2 === "" ? "" : "\n") + t("caps.detailStated", { value: countLabel(card.stated.output) });
 							}
