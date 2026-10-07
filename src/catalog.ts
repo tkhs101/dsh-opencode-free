@@ -2283,7 +2283,15 @@ const SEED_OUTPUT: Readonly<
     // What the route accepts: asked for 1,048,577, 2,000,000 and 8,000,000 and
     // got three 200s. There is no output cap on this route at all, so the vendor
     // number — not the acceptance — is what bounds the budget.
-    observed: 64000,
+    //
+    // 79,722 and not 64,000: both were watched, and the larger one is the one
+    // that answers "how long a reply has this model actually written". Asked for
+    // 131,072 it wrote 79,722 and stopped BY ITSELF (762s), so nothing truncated
+    // it; the 64,000 sample ended on the budget instead. The budget is unchanged
+    // (131,072 comes from the vendor either way) — this only corrects the figure
+    // the panel reports, which is a lower bound and should be the strongest one
+    // we have rather than a rounder one.
+    observed: 79722,
   },
   "big-pickle": { declared: 32000, observed: 48000 },
   "longcat-2.5-preview-free": {
