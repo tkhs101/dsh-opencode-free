@@ -440,6 +440,37 @@ export function apply(ctx: HostContext, config?: Config): void {
   registerCatalogRoutes(ctx, catalog);
 
   provider = zenProvider(() => undefined, getConfigKey, { catalog });
+  // The host reads `profile.configuredMaxTokens` to work out how much of the
+  // context window to hold back for the reply — and it is EMPTY here.
+  //
+  // The static-directory path fills it (`dsh-llm-pi-ai/lib/index.js:679`,
+  // `if (entry.maxTokens !== undefined) configuredMaxTokens.set(...)`), so only a
+  // dynamically registered provider misses it. Measured 2026-10-08, and the
+  // arithmetic closes exactly:
+  //
+  //   reserved = 0                       -> threshold = floor(0.8 x 1048576) = 838,860
+  //   reserved = 524,288 (this model's)  -> threshold = 1048576-524288-65536 = 458,752
+  //
+  // Meanwhile the route enforces `prompt + max_tokens <= contextWindow`, and
+  // pi-ai's clamp had settled at ~262,144 by the time these sessions died, so the
+  // real prompt ceiling was 786,432 — BELOW the 838,860 the host was watching for.
+  // The last accepted request sat at 786,319 + 262,144 = 1,048,463, 113 tokens
+  // under the line; the next one at 787,309 crossed it and was refused. With the
+  // threshold at 458,752, compaction fires long before any of that.
+  //
+  // So this is not a new number: it is the output budget the plugin already
+  // advertises on the picker, merely reported to the one component that needs it.
+  const configuredMaxTokens = new Map<string, number>();
+  const syncConfiguredMaxTokens = (models: readonly { id: string; maxTokens?: number }[]): void => {
+    for (const m of models) {
+      if (typeof m.maxTokens === "number" && Number.isFinite(m.maxTokens) && m.maxTokens > 0) {
+        configuredMaxTokens.set(m.id, Math.floor(m.maxTokens));
+      } else {
+        // A model whose budget is unknown must not keep a stale one.
+        configuredMaxTokens.delete(m.id);
+      }
+    }
+  };
   const filtered = {
     ...provider,
     getModels: () => {
@@ -454,7 +485,12 @@ export function apply(ctx: HostContext, config?: Config): void {
       // already ran, so this stays a single cheap check per read.
       const snapshot = catalog.current();
       if (snapshot.source !== "builtin-fallback") void catalog.runProbes().catch(() => undefined);
-      return provider.getModels().filter((m) => !isHidden(m.id));
+      const visible = provider.getModels().filter((m) => !isHidden(m.id));
+      // Synced on every read rather than once at build time: the catalogue is
+      // dynamic, so a model's budget can be raised by a measurement or a harvest
+      // after start-up, and the host reads this map per request.
+      syncConfiguredMaxTokens(visible);
+      return visible;
     },
     // Required by the pi-ai Provider interface, so it stays even though this
     // host never calls it (zen-provider.ts records the verification). It is a
@@ -473,7 +509,7 @@ export function apply(ctx: HostContext, config?: Config): void {
     displayName: "OpenCode Zen Free",
     piProvider: filtered,
     modelErrors: /* @__PURE__ */ new Map<string, string>(),
-    configuredMaxTokens: /* @__PURE__ */ new Map<string, number>(),
+    configuredMaxTokens,
     streamIdleTimeoutMs: 600 * 1_000,
     // This one reaches pi-ai as the SDK's whole-request `timeout`, and it was
     // 180s — which decided the real length of a reply before any max-output

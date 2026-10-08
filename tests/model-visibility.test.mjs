@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -580,4 +581,59 @@ test('a same-origin POST must still name this machine (DNS rebinding)', async ()
   assert.equal(reboundProbe.status, 403, 'and the quota-spending route is fenced the same way')
 
   host.dispose?.()
+})
+
+test('GUARD: the host is told this lane\'s output budget, or it watches the wrong line', async () => {
+  // Found 2026-10-08, three sessions deep. This route enforces
+  //   prompt + max_tokens <= contextWindow
+  // (measured: 2,150,000 chars of real content passes at max_tokens=32 and is
+  // refused at both 262144 and 524288, with identical boundaries — so the sum is
+  // what binds, and the boundary does NOT move with max_tokens).
+  //
+  // The host works out how full the context is from
+  //   reservedCompletionTokens = requestHeader().config.maxTokens ?? defaultMaxTokens ?? 0
+  // and then compacts at
+  //   thresholdTokens = floor(min(W * 0.8, W - reserved - 65536))
+  //
+  // `configuredMaxTokens` shipped EMPTY. The static-directory path fills it
+  // (`dsh-llm-pi-ai/lib/index.js:679`); a dynamically registered provider — which
+  // is what this plugin is — silently skipped that step. So reserved was 0, the
+  // threshold was floor(0.8 x 1048576) = 838,860, and by the time those sessions
+  // died pi-ai's clamp had settled at ~262,144, putting the real prompt ceiling
+  // at 786,432 — BELOW the threshold the host was watching for. Compaction could
+  // never fire: `compactIfNeeded` returned null on all 1,833 pre-steps.
+  //
+  // The arithmetic that closes: 786,319 + 262,144 = 1,048,463, 113 tokens under
+  // the line. The next request at 787,309 crossed it and was refused.
+  //
+  // The fix is not a new number — it is the budget the picker already advertises,
+  // reported to the one component that reads it.
+  const W = 1_048_576;
+  const BUDGET = 524_288;
+  const REAL_PROMPT_CEILING = 786_432; // 1048576 - 262144, the clamp's settled value
+  const thresholdWith = (reserved) => Math.floor(Math.min(W * 0.8, W - reserved - 65_536));
+  assert.equal(
+    thresholdWith(0) > REAL_PROMPT_CEILING,
+    true,
+    'the empty map put the threshold above the wall, which is the whole failure',
+  );
+  assert.equal(
+    thresholdWith(BUDGET),
+    458_752,
+    'reporting the budget drops it well below, with 327,680 tokens of margin',
+  );
+
+  // And the map must actually carry the value, kept in step with the catalogue.
+  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  assert.match(source, /syncConfiguredMaxTokens/, 'the map is populated, not left empty')
+  assert.doesNotMatch(
+    source,
+    /configuredMaxTokens:\s*\/\* @__PURE__ \*\/\s*new Map<string, number>\(\)/,
+    'the empty literal is gone — that literal is the defect',
+  )
+  assert.match(
+    source,
+    /Math\.floor\(m\.maxTokens\)/,
+    'and a positive integer is stored, which is what the host validates',
+  )
 })
